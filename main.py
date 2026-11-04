@@ -1,0 +1,835 @@
+"""Integra Bling — DRE multiempresa com dados do Bling (contas a pagar e a receber) e da Domínio
+(faturamento e devoluções, via Central de Inteligência 360). Alta Visão Contabilidade."""
+import io
+import re
+import json
+import secrets
+import threading
+import datetime as dt
+from pathlib import Path
+
+from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi.responses import JSONResponse, FileResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select, func
+
+import db
+from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Lancamento, DominioValor, Job,
+                Auditoria, agora, PERFIS, TIPOS_LINHA)
+import bling
+import dominio
+import dre
+from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
+import os
+
+VERSAO = "1.0.0"
+COOKIE = "ib_sess"
+RAIZ = Path(__file__).parent
+app = FastAPI(title="Integra Bling", version=VERSAO)
+app.mount("/static", StaticFiles(directory=RAIZ / "static"), name="static")
+
+
+# ------------------------------------------------------------------ infraestrutura
+def get_db():
+    s = SessionLocal()
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+@app.on_event("startup")
+def iniciar():
+    db.criar_tabelas()
+    with SessionLocal() as s:
+        if not s.scalar(select(func.count(ModeloDRE.id))):
+            dre.criar_modelo_padrao(s)
+        for j in s.scalars(select(Job).where(Job.status.in_(("PENDENTE", "EXECUTANDO")))).all():
+            j.status, j.fim, j.mensagem = "ERRO", agora(), "Interrompido: o sistema foi reiniciado. Peça de novo."
+        s.commit()
+
+
+@app.exception_handler(HTTPException)
+async def erro_http(_req, exc: HTTPException):
+    return JSONResponse({"erro": exc.detail}, status_code=exc.status_code)
+
+
+@app.middleware("http")
+async def cabecalhos(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "same-origin"
+    return resp
+
+
+def audit(s, quem, acao, detalhe=""):
+    s.add(Auditoria(usuario=quem, acao=acao, detalhe=str(detalhe)[:2000]))
+
+
+def _404(msg="Não encontrado."):
+    raise HTTPException(404, msg)
+
+
+def usuario(request: Request, s=Depends(get_db)):
+    d = verificar(request.cookies.get(COOKIE, ""))
+    u = s.get(Usuario, d.get("uid")) if d else None
+    if not u or not u.ativo:
+        raise HTTPException(401, "Faça login.")
+    return u
+
+
+def admin(u=Depends(usuario)):
+    if u.perfil != "ADMIN":
+        raise HTTPException(403, "Somente administradores.")
+    return u
+
+
+def dt2s(v):
+    return v.isoformat(timespec="seconds") if v else None
+
+
+def so_digitos(v):
+    return re.sub(r"\D", "", str(v or ""))
+
+
+def _mes_ok(v, campo):
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", str(v or "")):
+        raise HTTPException(400, f"{campo}: use o formato AAAA-MM.")
+    return v
+
+
+def _data_ok(v, campo):
+    try:
+        return dt.date.fromisoformat(str(v)).isoformat()
+    except ValueError:
+        raise HTTPException(400, f"{campo}: data inválida.") from None
+
+
+def base_url(request: Request):
+    url = os.environ.get("PUBLIC_URL", "").rstrip("/")
+    if url:
+        return url
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+    return f"{proto}://{host}"
+
+
+@app.get("/health")
+def health():
+    return {"ok": True, "versao": VERSAO}
+
+
+@app.get("/")
+def index():
+    return FileResponse(RAIZ / "static" / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+# ------------------------------------------------------------------ login e usuários
+def _u_json(u: Usuario):
+    return {"id": u.id, "nome": u.nome, "email": u.email, "perfil": u.perfil, "ativo": u.ativo}
+
+
+def _sessao(resp, u, request):
+    resp.set_cookie(COOKIE, assinar({"uid": u.id}, 12 * 3600), httponly=True, samesite="lax", max_age=12 * 3600,
+                    secure=base_url(request).startswith("https"))
+
+
+def _senha_ok(senha):
+    if len(senha or "") < 8:
+        raise HTTPException(400, "A senha precisa ter pelo menos 8 caracteres.")
+    return senha
+
+
+@app.get("/api/estado")
+def estado(request: Request, s=Depends(get_db)):
+    d = verificar(request.cookies.get(COOKIE, ""))
+    u = s.get(Usuario, d.get("uid")) if d else None
+    return {"versao": VERSAO, "precisa_setup": not s.scalar(select(func.count(Usuario.id))),
+            "usuario": _u_json(u) if u and u.ativo else None}
+
+
+@app.post("/api/setup")
+async def setup(request: Request, s=Depends(get_db)):
+    if s.scalar(select(func.count(Usuario.id))):
+        raise HTTPException(400, "O administrador já foi criado.")
+    b = await request.json()
+    email = str(b.get("email") or "").strip().lower()
+    if "@" not in email:
+        raise HTTPException(400, "E-mail inválido.")
+    u = Usuario(nome=str(b.get("nome") or "Administrador").strip()[:120], email=email,
+                senha_hash=hash_senha(_senha_ok(b.get("senha"))), perfil="ADMIN")
+    s.add(u)
+    audit(s, email, "SETUP")
+    s.commit()
+    resp = JSONResponse(_u_json(u))
+    _sessao(resp, u, request)
+    return resp
+
+
+@app.post("/api/login")
+async def login(request: Request, s=Depends(get_db)):
+    b = await request.json()
+    u = s.scalar(select(Usuario).where(Usuario.email == str(b.get("email") or "").strip().lower()))
+    if not u or not u.ativo or not confere_senha(str(b.get("senha") or ""), u.senha_hash):
+        raise HTTPException(401, "E-mail ou senha incorretos.")
+    audit(s, u.email, "LOGIN")
+    s.commit()
+    resp = JSONResponse(_u_json(u))
+    _sessao(resp, u, request)
+    return resp
+
+
+@app.post("/api/logout")
+def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(COOKIE)
+    return resp
+
+
+@app.post("/api/senha")
+async def trocar_senha(request: Request, u=Depends(usuario), s=Depends(get_db)):
+    b = await request.json()
+    if not confere_senha(str(b.get("atual") or ""), u.senha_hash):
+        raise HTTPException(400, "A senha atual não confere.")
+    u.senha_hash = hash_senha(_senha_ok(b.get("nova")))
+    audit(s, u.email, "SENHA")
+    s.commit()
+    return {"ok": True}
+
+
+@app.get("/api/usuarios")
+def usuarios(_u=Depends(admin), s=Depends(get_db)):
+    return [_u_json(x) for x in s.scalars(select(Usuario).order_by(Usuario.nome)).all()]
+
+
+@app.post("/api/usuarios")
+async def usuario_novo(request: Request, u=Depends(admin), s=Depends(get_db)):
+    b = await request.json()
+    email = str(b.get("email") or "").strip().lower()
+    if "@" not in email:
+        raise HTTPException(400, "E-mail inválido.")
+    if s.scalar(select(Usuario).where(Usuario.email == email)):
+        raise HTTPException(400, "Já existe um usuário com esse e-mail.")
+    perfil = str(b.get("perfil") or "OPERADOR").upper()
+    if perfil not in PERFIS:
+        raise HTTPException(400, "Perfil inválido.")
+    x = Usuario(nome=str(b.get("nome") or email).strip()[:120], email=email, perfil=perfil,
+                senha_hash=hash_senha(_senha_ok(b.get("senha"))))
+    s.add(x)
+    audit(s, u.email, "USUARIO_NOVO", email)
+    s.commit()
+    return _u_json(x)
+
+
+@app.put("/api/usuarios/{uid}")
+async def usuario_editar(uid: int, request: Request, u=Depends(admin), s=Depends(get_db)):
+    x = s.get(Usuario, uid) or _404()
+    b = await request.json()
+    if "nome" in b:
+        x.nome = str(b["nome"]).strip()[:120] or x.nome
+    if "perfil" in b:
+        if b["perfil"] not in PERFIS:
+            raise HTTPException(400, "Perfil inválido.")
+        if x.id == u.id and b["perfil"] != "ADMIN":
+            raise HTTPException(400, "Você não pode tirar o seu próprio perfil de administrador.")
+        x.perfil = b["perfil"]
+    if "ativo" in b:
+        if x.id == u.id and not b["ativo"]:
+            raise HTTPException(400, "Você não pode desativar a si mesmo.")
+        x.ativo = bool(b["ativo"])
+    if b.get("senha"):
+        x.senha_hash = hash_senha(_senha_ok(b["senha"]))
+    audit(s, u.email, "USUARIO_EDITA", x.email)
+    s.commit()
+    return _u_json(x)
+
+
+# ------------------------------------------------------------------ configurações
+@app.get("/api/config")
+def config_ver(request: Request, _u=Depends(admin), s=Depends(get_db)):
+    return {"bling_client_id": get_config(s, "bling_client_id"),
+            "bling_secret_definido": bool(get_config(s, "bling_client_secret")),
+            "redirect_uri": base_url(request) + "/bling/callback",
+            "central_url": get_config(s, "central_url"),
+            "central_chave_definida": bool(get_config(s, "central_chave")),
+            "secret_key_no_ambiente": bool(os.environ.get("SECRET_KEY"))}
+
+
+@app.put("/api/config")
+async def config_salvar(request: Request, u=Depends(admin), s=Depends(get_db)):
+    b = await request.json()
+    if "bling_client_id" in b:
+        set_config(s, "bling_client_id", str(b["bling_client_id"] or "").strip()[:200])
+    if b.get("bling_client_secret"):
+        set_config(s, "bling_client_secret", cifrar(str(b["bling_client_secret"]).strip()))
+    if "central_url" in b:
+        url = str(b["central_url"] or "").strip().rstrip("/")
+        if url and not url.startswith("https://") and not url.startswith("http://localhost"):
+            raise HTTPException(400, "O endereço da Central precisa começar com https://")
+        set_config(s, "central_url", url)
+    if b.get("central_chave"):
+        set_config(s, "central_chave", cifrar(str(b["central_chave"]).strip()))
+    audit(s, u.email, "CONFIG", ",".join(k for k in b if b[k]))
+    s.commit()
+    return config_ver(request, u, s)
+
+
+@app.post("/api/config/testar-central")
+def config_testar_central(_u=Depends(admin), s=Depends(get_db)):
+    try:
+        itens = dominio.clientes_central(s)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, str(e)) from None
+    return {"ok": True, "clientes": len(itens)}
+
+
+@app.get("/api/central/clientes")
+def central_clientes(q: str = "", _u=Depends(usuario), s=Depends(get_db)):
+    try:
+        itens = dominio.clientes_central(s)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, str(e)) from None
+    q = q.strip().lower()
+    if q:
+        dq = so_digitos(q)
+        itens = [c for c in itens if q in (c["razao_social"] or "").lower() or q in (c["nome_fantasia"] or "").lower()
+                 or (dq and dq in (c["cnpj"] or "")) or q == str(c["codigo_dominio"])]
+    return itens[:50]
+
+
+# ------------------------------------------------------------------ empresas
+def _emp_json(s, e: Empresa):
+    contas = s.execute(select(ContaOrigem.origem, func.count(ContaOrigem.id), func.count(ContaOrigem.linha_id))
+                       .where(ContaOrigem.empresa_id == e.id, ContaOrigem.ativa == True)  # noqa: E712
+                       .group_by(ContaOrigem.origem)).all()
+    job = s.scalar(select(Job).where(Job.empresa_id == e.id).order_by(Job.id.desc()).limit(1))
+    m = s.get(ModeloDRE, e.modelo_id) if e.modelo_id else None
+    return {"id": e.id, "nome": e.nome, "cnpj": e.cnpj, "codigo_dominio": e.codigo_dominio, "ativo": e.ativo,
+            "modelo_id": e.modelo_id, "modelo_nome": m.nome if m else None,
+            "bling_conectado": bool(e.bling_refresh), "bling_conectado_em": dt2s(e.bling_conectado_em),
+            "bling_app_proprio": bool(e.bling_client_id), "bling_client_id": e.bling_client_id,
+            "bling_sync_em": dt2s(e.bling_sync_em), "bling_sync_periodo": e.bling_sync_periodo,
+            "dominio_sync_em": dt2s(e.dominio_sync_em), "dominio_sync_periodo": e.dominio_sync_periodo,
+            "contas": {o: {"total": t, "associadas": a} for o, t, a in contas},
+            "ultimo_job": _job_json(job) if job else None}
+
+
+def _aplicar_sugestoes(s, e: Empresa):
+    """Associa as contas da Domínio às linhas sugeridas do modelo, quando ainda não associadas."""
+    dominio.garantir_contas(s, e.id)
+    s.flush()
+    if not e.modelo_id:
+        return
+    linhas = {ln.codigo: ln.id for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == e.modelo_id)).all()}
+    for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == e.id, ContaOrigem.origem == "DOMINIO")).all():
+        sug = dre.SUGESTAO_DOMINIO.get(c.codigo)
+        if not c.linha_id and sug in linhas:
+            c.linha_id = linhas[sug]
+
+
+def _ler_empresa(b, e: Empresa, s):
+    if "nome" in b:
+        e.nome = str(b["nome"] or "").strip()[:200]
+    if "cnpj" in b:
+        c = so_digitos(b["cnpj"])
+        if c and len(c) not in (11, 14):
+            raise HTTPException(400, "CNPJ inválido.")
+        e.cnpj = c
+    if "codigo_dominio" in b:
+        e.codigo_dominio = str(b["codigo_dominio"] or "").strip()[:20]
+    if "ativo" in b:
+        e.ativo = bool(b["ativo"])
+    if "bling_client_id" in b:
+        e.bling_client_id = str(b["bling_client_id"] or "").strip()[:200]
+        if not e.bling_client_id:
+            e.bling_client_secret = ""
+    if b.get("bling_client_secret"):
+        e.bling_client_secret = cifrar(str(b["bling_client_secret"]).strip())
+    if "modelo_id" in b:
+        novo = int(b["modelo_id"]) if b["modelo_id"] else None
+        if novo and not s.get(ModeloDRE, novo):
+            raise HTTPException(400, "Modelo de DRE não encontrado.")
+        if novo != e.modelo_id and e.id:
+            # associações do modelo antigo não valem no novo
+            for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == e.id, ContaOrigem.linha_id.is_not(None))):
+                c.linha_id = None
+        e.modelo_id = novo
+    if not e.nome:
+        raise HTTPException(400, "Informe o nome da empresa.")
+
+
+@app.get("/api/empresas")
+def empresas(_u=Depends(usuario), s=Depends(get_db)):
+    return [_emp_json(s, e) for e in s.scalars(select(Empresa).order_by(Empresa.ativo.desc(), Empresa.nome)).all()]
+
+
+@app.post("/api/empresas")
+async def empresa_nova(request: Request, u=Depends(usuario), s=Depends(get_db)):
+    b = await request.json()
+    e = Empresa(nome="")
+    if not b.get("modelo_id"):
+        m = s.scalar(select(ModeloDRE).order_by(ModeloDRE.id).limit(1))
+        b["modelo_id"] = m.id if m else None
+    _ler_empresa(b, e, s)
+    if e.cnpj and s.scalar(select(Empresa).where(Empresa.cnpj == e.cnpj)):
+        raise HTTPException(400, "Já existe uma empresa com esse CNPJ.")
+    s.add(e)
+    s.flush()
+    _aplicar_sugestoes(s, e)
+    audit(s, u.email, "EMPRESA_NOVA", f"{e.cnpj} {e.nome}")
+    s.commit()
+    return _emp_json(s, e)
+
+
+@app.get("/api/empresas/{eid}")
+def empresa_ver(eid: int, _u=Depends(usuario), s=Depends(get_db)):
+    return _emp_json(s, s.get(Empresa, eid) or _404())
+
+
+@app.put("/api/empresas/{eid}")
+async def empresa_editar(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    e = s.get(Empresa, eid) or _404()
+    b = await request.json()
+    _ler_empresa(b, e, s)
+    _aplicar_sugestoes(s, e)
+    audit(s, u.email, "EMPRESA_EDITA", f"{e.id} {e.nome}")
+    s.commit()
+    return _emp_json(s, e)
+
+
+@app.delete("/api/empresas/{eid}")
+def empresa_excluir(eid: int, u=Depends(admin), s=Depends(get_db)):
+    e = s.get(Empresa, eid) or _404()
+    audit(s, u.email, "EMPRESA_EXCLUI", f"{e.cnpj} {e.nome}")
+    s.delete(e)
+    s.commit()
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ Bling: conexão e sincronização
+@app.post("/api/empresas/{eid}/bling/conectar")
+def bling_conectar(eid: int, u=Depends(usuario), s=Depends(get_db)):
+    e = s.get(Empresa, eid) or _404()
+    cid, sec = bling.credenciais(s, e)
+    if not cid or not sec:
+        raise HTTPException(400, "Cadastre o aplicativo do Bling (Client ID e Client Secret) em Configurações "
+                                 "ou no cadastro da empresa.")
+    state = assinar({"eid": e.id, "uid": u.id, "n": secrets.token_hex(4)}, 1800)
+    return {"url": bling.url_autorizacao(cid, state)}
+
+
+@app.get("/bling/callback")
+def bling_callback(code: str = "", state: str = "", error: str = "", error_description: str = "", s=Depends(get_db)):
+    d = verificar(state)
+    if not d:
+        return RedirectResponse("/#/empresas?bling=erro&msg=" + "Autorização expirada. Tente de novo.")
+    e = s.get(Empresa, d["eid"])
+    if not e:
+        return RedirectResponse("/#/empresas?bling=erro&msg=Empresa não encontrada")
+    if error or not code:
+        return RedirectResponse(f"/#/empresa/{e.id}?bling=erro&msg=" + (error_description or error or "Autorização negada"))
+    try:
+        bling.trocar_codigo(s, e, code)
+        u = s.get(Usuario, d.get("uid"))
+        audit(s, u.email if u else "", "BLING_CONECTA", f"{e.id} {e.nome}")
+        s.commit()
+    except Exception as ex:  # noqa: BLE001
+        return RedirectResponse(f"/#/empresa/{e.id}?bling=erro&msg=" + str(ex)[:200])
+    return RedirectResponse(f"/#/empresa/{e.id}?bling=ok")
+
+
+@app.post("/api/empresas/{eid}/bling/desconectar")
+def bling_desconectar(eid: int, u=Depends(usuario), s=Depends(get_db)):
+    e = s.get(Empresa, eid) or _404()
+    e.bling_access = e.bling_refresh = ""
+    e.bling_expira = e.bling_conectado_em = None
+    audit(s, u.email, "BLING_DESCONECTA", f"{e.id} {e.nome}")
+    s.commit()
+    return _emp_json(s, e)
+
+
+def _job_json(j: Job):
+    return {"id": j.id, "empresa_id": j.empresa_id, "tipo": j.tipo, "status": j.status, "progresso": j.progresso,
+            "total": j.total, "mensagem": j.mensagem, "criado_por": j.criado_por, "criado_em": dt2s(j.criado_em),
+            "fim": dt2s(j.fim), "parametros": json.loads(j.parametros or "{}")}
+
+
+def _iniciar_job(s, e, tipo, params, u, alvo):
+    ativo = s.scalar(select(Job).where(Job.empresa_id == e.id, Job.tipo == tipo, Job.status.in_(("PENDENTE", "EXECUTANDO"))))
+    if ativo:
+        return _job_json(ativo)
+    j = Job(empresa_id=e.id, tipo=tipo, parametros=json.dumps(params), criado_por=u.email)
+    s.add(j)
+    audit(s, u.email, tipo.upper(), f"{e.id} {e.nome} {params}")
+    s.commit()
+    if os.environ.get("INTEGRA_SEM_THREADS") != "1":
+        threading.Thread(target=alvo, args=(j.id,), daemon=True).start()
+    return _job_json(j)
+
+
+@app.post("/api/empresas/{eid}/bling/sincronizar")
+async def bling_sincronizar(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    e = s.get(Empresa, eid) or _404()
+    if not e.bling_refresh:
+        raise HTTPException(400, "Conecte a empresa ao Bling primeiro.")
+    b = await request.json()
+    ini, fim = _data_ok(b.get("inicio"), "Início"), _data_ok(b.get("fim"), "Fim")
+    if ini > fim:
+        raise HTTPException(400, "O início é depois do fim.")
+    if (dt.date.fromisoformat(fim) - dt.date.fromisoformat(ini)).days > 800:
+        raise HTTPException(400, "Período máximo de 2 anos por vez.")
+    return _iniciar_job(s, e, "bling_sync", {"inicio": ini, "fim": fim}, u, bling.sincronizar)
+
+
+@app.post("/api/empresas/{eid}/dominio/importar")
+async def dominio_importar(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    e = s.get(Empresa, eid) or _404()
+    if not e.cnpj and not e.codigo_dominio:
+        raise HTTPException(400, "Informe o CNPJ ou o código da Domínio da empresa.")
+    b = await request.json()
+    ini, fim = _mes_ok(b.get("inicio"), "Início"), _mes_ok(b.get("fim"), "Fim")
+    if ini > fim:
+        raise HTTPException(400, "O início é depois do fim.")
+    if len(dre.meses_entre(ini, fim)) > 36:
+        raise HTTPException(400, "Período máximo de 36 meses.")
+    try:
+        dominio.central(s)
+    except RuntimeError as ex:
+        raise HTTPException(400, str(ex)) from None
+    return _iniciar_job(s, e, "dominio_importar", {"inicio": ini, "fim": fim}, u, dominio.importar)
+
+
+@app.get("/api/jobs")
+def jobs(empresa_id: int | None = None, _u=Depends(usuario), s=Depends(get_db)):
+    st = select(Job).order_by(Job.id.desc()).limit(50)
+    if empresa_id:
+        st = st.where(Job.empresa_id == empresa_id)
+    return [_job_json(j) for j in s.scalars(st).all()]
+
+
+@app.get("/api/jobs/{jid}")
+def job_ver(jid: int, _u=Depends(usuario), s=Depends(get_db)):
+    return _job_json(s.get(Job, jid) or _404())
+
+
+# ------------------------------------------------------------------ contas de origem e associação
+def _nome_completo(c, por_cod):
+    pai = por_cod.get(c.pai_codigo) if c.pai_codigo else None
+    return f"{pai.descricao} › {c.descricao}" if pai else c.descricao
+
+
+@app.get("/api/empresas/{eid}/contas")
+def contas(eid: int, inicio: str = "", fim: str = "", regime: str = "competencia", _u=Depends(usuario), s=Depends(get_db)):
+    e = s.get(Empresa, eid) or _404()
+    totais = {}
+    if inicio and fim:
+        _mes_ok(inicio, "Início")
+        _mes_ok(fim, "Fim")
+        _c, vals, _n, _sc = dre.valores_origem(s, e.id, inicio, fim, regime)
+        totais = {k: round(sum(v.values()), 2) for k, v in vals.items()}
+    rows = s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == e.id)).all()
+    por_cod = {c.codigo: c for c in rows if c.origem == "BLING"}
+    qtd = dict(s.execute(select(Lancamento.categoria_codigo, func.count(Lancamento.id)).where(
+        Lancamento.empresa_id == e.id).group_by(Lancamento.categoria_codigo)).all())
+    linhas = {ln.id: ln for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == e.modelo_id)).all()} if e.modelo_id else {}
+    out = []
+    for c in rows:
+        ln = linhas.get(c.linha_id)
+        out.append({"id": c.id, "origem": c.origem, "codigo": c.codigo, "descricao": c.descricao,
+                    "nome": _nome_completo(c, por_cod) if c.origem == "BLING" else c.descricao,
+                    "tipo": c.tipo, "ativa": c.ativa, "linha_id": c.linha_id if ln else None,
+                    "linha_nome": ln.nome if ln else None, "titulos": qtd.get(c.codigo, 0) if c.origem == "BLING" else None,
+                    "total": totais.get(c.id)})
+    out.sort(key=lambda x: (x["origem"] != "DOMINIO", not x["ativa"], x["tipo"] != "R", x["nome"].lower()))
+    return {"empresa": _emp_json(s, e), "contas": out}
+
+
+@app.put("/api/contas/{cid}")
+async def conta_associar(cid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    c = s.get(ContaOrigem, cid) or _404()
+    b = await request.json()
+    _associar(s, c, b.get("linha_id"))
+    audit(s, u.email, "ASSOCIA", f"{c.empresa_id} {c.origem}:{c.codigo} -> {c.linha_id}")
+    s.commit()
+    return {"ok": True, "linha_id": c.linha_id}
+
+
+def _associar(s, c, linha_id):
+    if not linha_id:
+        c.linha_id = None
+        return
+    e = s.get(Empresa, c.empresa_id)
+    ln = s.get(LinhaDRE, int(linha_id))
+    if not ln or ln.modelo_id != e.modelo_id:
+        raise HTTPException(400, "Linha não pertence ao modelo de DRE da empresa.")
+    if ln.tipo != "CONTA":
+        raise HTTPException(400, "Só é possível associar a linhas do tipo Conta (totais e títulos são calculados).")
+    c.linha_id = ln.id
+
+
+@app.post("/api/empresas/{eid}/contas/lote")
+async def contas_lote(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    """[{conta_id, linha_id}] de uma vez."""
+    b = await request.json()
+    n = 0
+    for it in b.get("itens") or []:
+        c = s.get(ContaOrigem, int(it.get("conta_id") or 0))
+        if c and c.empresa_id == eid:
+            _associar(s, c, it.get("linha_id"))
+            n += 1
+    audit(s, u.email, "ASSOCIA_LOTE", f"{eid}: {n}")
+    s.commit()
+    return {"ok": True, "alteradas": n}
+
+
+@app.post("/api/empresas/{eid}/contas/copiar")
+async def contas_copiar(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    """Copia as associações de outra empresa (mesmo modelo), casando categorias pela descrição."""
+    e = s.get(Empresa, eid) or _404()
+    b = await request.json()
+    o = s.get(Empresa, int(b.get("de_empresa_id") or 0)) or _404("Empresa de origem não encontrada.")
+    if o.modelo_id != e.modelo_id:
+        raise HTTPException(400, "As duas empresas precisam usar o mesmo modelo de DRE.")
+    sobrescrever = bool(b.get("sobrescrever"))
+
+    def chave(c):
+        return (c.origem, c.codigo if c.origem == "DOMINIO" else re.sub(r"\s+", " ", c.descricao.strip().lower()))
+
+    mapa = {chave(c): c.linha_id for c in s.scalars(select(ContaOrigem).where(
+        ContaOrigem.empresa_id == o.id, ContaOrigem.linha_id.is_not(None))).all()}
+    n = 0
+    for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == e.id)).all():
+        lid = mapa.get(chave(c))
+        if lid and (sobrescrever or not c.linha_id) and c.linha_id != lid:
+            c.linha_id = lid
+            n += 1
+    audit(s, u.email, "ASSOCIA_COPIA", f"{o.id} -> {e.id}: {n}")
+    s.commit()
+    return {"ok": True, "alteradas": n}
+
+
+@app.get("/api/contas/{cid}/detalhe")
+def conta_detalhe(cid: int, inicio: str, fim: str, regime: str = "competencia", _u=Depends(usuario), s=Depends(get_db)):
+    """Botão Consultar: títulos do Bling da categoria, ou os CFOPs da Domínio que formam o grupo."""
+    c = s.get(ContaOrigem, cid) or _404()
+    _mes_ok(inicio, "Início")
+    _mes_ok(fim, "Fim")
+    meses = set(dre.meses_entre(inicio, fim))
+    if c.origem == "BLING":
+        itens = []
+        for x in s.scalars(select(Lancamento).where(Lancamento.empresa_id == c.empresa_id,
+                                                    Lancamento.categoria_codigo == c.codigo)).all():
+            d = dre.data_lancamento(x, regime)
+            if not d or f"{d.year:04d}-{d.month:02d}" not in meses:
+                continue
+            itens.append({"tipo": "A receber" if x.tipo == "R" else "A pagar", "id_bling": x.id_externo,
+                          "data": d.isoformat(), "emissao": x.data_emissao.isoformat() if x.data_emissao else None,
+                          "vencimento": x.vencimento.isoformat() if x.vencimento else None,
+                          "contato": x.contato, "historico": x.historico, "documento": x.documento,
+                          "valor": float(x.valor or 0), "situacao": SITUACOES.get(x.situacao, str(x.situacao)),
+                          "cancelado": x.situacao == bling.SITUACAO_CANCELADA})
+        itens.sort(key=lambda x: (x["data"], x["contato"]))
+        return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "titulos", "itens": itens,
+                "total": round(sum(i["valor"] for i in itens if not i["cancelado"]), 2)}
+    itens = []
+    for v in s.scalars(select(DominioValor).where(DominioValor.empresa_id == c.empresa_id, DominioValor.mes >= inicio,
+                                                  DominioValor.mes <= fim).order_by(DominioValor.mes, DominioValor.cfop)).all():
+        if dominio.grupo(v.grupo, v.cfop) == c.codigo:
+            itens.append({"mes": v.mes, "origem": {"SAIDA": "NF de saída", "ENTRADA": "NF de entrada",
+                                                    "SERVICO": "Serviços prestados"}[v.grupo],
+                          "cfop": v.cfop or None, "qtd": v.qtd, "valor": float(v.valor)})
+    return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "cfops", "itens": itens,
+            "total": round(sum(i["valor"] for i in itens), 2)}
+
+
+SITUACOES = {1: "Em aberto", 2: "Pago/recebido", 3: "Parcial", 4: "Devolvido", 5: "Cancelado", 6: "Devolvido parcial",
+             7: "Confirmado"}
+
+
+# ------------------------------------------------------------------ modelos de DRE
+def _modelo_json(s, m: ModeloDRE, linhas=True):
+    d = {"id": m.id, "nome": m.nome, "descricao": m.descricao,
+         "empresas": s.scalar(select(func.count(Empresa.id)).where(Empresa.modelo_id == m.id)) or 0}
+    if linhas:
+        d["linhas"] = [{"id": ln.id, "ordem": ln.ordem, "codigo": ln.codigo, "nome": ln.nome, "tipo": ln.tipo,
+                        "sinal": ln.sinal, "formula": ln.formula, "destaque": ln.destaque, "base_av": ln.base_av}
+                       for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == m.id)
+                                           .order_by(LinhaDRE.ordem, LinhaDRE.id)).all()]
+    return d
+
+
+@app.get("/api/modelos")
+def modelos(_u=Depends(usuario), s=Depends(get_db)):
+    return [_modelo_json(s, m) for m in s.scalars(select(ModeloDRE).order_by(ModeloDRE.nome)).all()]
+
+
+@app.post("/api/modelos")
+async def modelo_novo(request: Request, u=Depends(usuario), s=Depends(get_db)):
+    b = await request.json()
+    nome = str(b.get("nome") or "").strip()[:120] or "Novo modelo"
+    base = s.get(ModeloDRE, int(b["copiar_de"])) if b.get("copiar_de") else None
+    if base:
+        m = ModeloDRE(nome=nome, descricao=base.descricao)
+        s.add(m)
+        s.flush()
+        for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == base.id)).all():
+            s.add(LinhaDRE(modelo_id=m.id, ordem=ln.ordem, codigo=ln.codigo, nome=ln.nome, tipo=ln.tipo, sinal=ln.sinal,
+                           formula=ln.formula, destaque=ln.destaque, base_av=ln.base_av))
+    elif b.get("vazio"):
+        m = ModeloDRE(nome=nome)
+        s.add(m)
+    else:
+        m = dre.criar_modelo_padrao(s, nome)
+    audit(s, u.email, "MODELO_NOVO", nome)
+    s.commit()
+    return _modelo_json(s, m)
+
+
+@app.get("/api/modelos/{mid}")
+def modelo_ver(mid: int, _u=Depends(usuario), s=Depends(get_db)):
+    return _modelo_json(s, s.get(ModeloDRE, mid) or _404())
+
+
+@app.put("/api/modelos/{mid}")
+async def modelo_salvar(mid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    """Salva nome e todas as linhas (as linhas que não vierem são excluídas e perdem as associações)."""
+    m = s.get(ModeloDRE, mid) or _404()
+    b = await request.json()
+    m.nome = str(b.get("nome") or m.nome).strip()[:120]
+    m.descricao = str(b.get("descricao") or "")[:2000]
+    linhas = b.get("linhas")
+    if linhas is not None:
+        for x in linhas:
+            x["codigo"] = str(x.get("codigo") or "").strip().upper()
+            if x.get("tipo") not in TIPOS_LINHA:
+                raise HTTPException(400, f"{x['codigo']}: tipo inválido.")
+            if not str(x.get("nome") or "").strip():
+                raise HTTPException(400, f"{x['codigo']}: informe o nome da linha.")
+        erros = dre.validar_modelo(linhas)
+        if erros:
+            raise HTTPException(400, " ".join(erros[:5]))
+        atuais = {ln.id: ln for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == m.id)).all()}
+        manter = set()
+        # códigos podem trocar de linha: libera os códigos antes de gravar
+        for ln in atuais.values():
+            ln.codigo = f"__{ln.id}"
+        s.flush()
+        for i, x in enumerate(linhas, 1):
+            ln = atuais.get(int(x["id"])) if x.get("id") else None
+            if not ln:
+                ln = LinhaDRE(modelo_id=m.id)
+                s.add(ln)
+            ln.ordem, ln.codigo, ln.nome, ln.tipo = i * 10, x["codigo"], str(x["nome"]).strip()[:200], x["tipo"]
+            ln.sinal = int(x.get("sinal") or 0) if x["tipo"] == "CONTA" else 0
+            ln.sinal = max(-1, min(1, ln.sinal))
+            ln.formula = str(x.get("formula") or "").strip()[:2000] if x["tipo"] == "TOTAL" else ""
+            ln.destaque, ln.base_av = bool(x.get("destaque")), bool(x.get("base_av"))
+            s.flush()
+            manter.add(ln.id)
+        for lid, ln in atuais.items():
+            if lid not in manter:
+                s.delete(ln)
+        s.flush()
+        for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == m.id, LinhaDRE.tipo != "CONTA")).all():
+            for c in s.scalars(select(ContaOrigem).where(ContaOrigem.linha_id == ln.id)).all():
+                c.linha_id = None
+    audit(s, u.email, "MODELO_SALVA", f"{m.id} {m.nome}")
+    s.commit()
+    return _modelo_json(s, m)
+
+
+@app.delete("/api/modelos/{mid}")
+def modelo_excluir(mid: int, u=Depends(admin), s=Depends(get_db)):
+    m = s.get(ModeloDRE, mid) or _404()
+    if s.scalar(select(func.count(Empresa.id)).where(Empresa.modelo_id == m.id)):
+        raise HTTPException(400, "Há empresas usando este modelo. Troque o modelo delas antes de excluir.")
+    audit(s, u.email, "MODELO_EXCLUI", m.nome)
+    s.delete(m)
+    s.commit()
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ DRE
+def _calc(s, eid, inicio, fim, regime):
+    e = s.get(Empresa, eid) or _404()
+    _mes_ok(inicio, "Início")
+    _mes_ok(fim, "Fim")
+    if inicio > fim:
+        raise HTTPException(400, "O início é depois do fim.")
+    if len(dre.meses_entre(inicio, fim)) > 36:
+        raise HTTPException(400, "Período máximo de 36 meses.")
+    if regime not in ("competencia", "vencimento"):
+        raise HTTPException(400, "Regime inválido.")
+    if not e.modelo_id:
+        raise HTTPException(400, "Escolha um modelo de DRE para a empresa.")
+    return e, dre.calcular(s, e, inicio, fim, regime)
+
+
+@app.get("/api/empresas/{eid}/dre")
+def dre_ver(eid: int, inicio: str, fim: str, regime: str = "competencia", _u=Depends(usuario), s=Depends(get_db)):
+    e, r = _calc(s, eid, inicio, fim, regime)
+    return {"empresa": {"id": e.id, "nome": e.nome, "cnpj": e.cnpj,
+                        "bling_sync_periodo": e.bling_sync_periodo, "dominio_sync_periodo": e.dominio_sync_periodo}, **r}
+
+
+@app.get("/api/empresas/{eid}/dre.xlsx")
+def dre_excel(eid: int, inicio: str, fim: str, regime: str = "competencia", _u=Depends(usuario), s=Depends(get_db)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    e, r = _calc(s, eid, inicio, fim, regime)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "DRE"
+    ws.append([f"DRE — {e.nome}"])
+    ws.append([f"CNPJ {e.cnpj} · {inicio[5:]}/{inicio[:4]} a {fim[5:]}/{fim[:4]} · regime de "
+               + ("competência" if regime == "competencia" else "vencimento")])
+    ws.append([])
+    cab = ["Linha"] + [f"{m[5:]}/{m[:4]}" for m in r["meses"]] + ["Total", "AV %"]
+    ws.append(cab)
+    for c in ws[4]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F3A5F")
+    ws["A1"].font = Font(bold=True, size=14)
+    for ln in r["linhas"]:
+        if ln["tipo"] == "TITULO":
+            ws.append([ln["nome"]])
+            ws.cell(ws.max_row, 1).font = Font(bold=True, color="1F3A5F")
+            continue
+        ws.append([ln["nome"]] + ln["valores"] + [ln["total"], (ln["av_total"] or 0) / 100 if ln["av_total"] is not None else None])
+        row = ws.max_row
+        for col in range(2, len(r["meses"]) + 3):
+            ws.cell(row, col).number_format = '#,##0.00;[Red]-#,##0.00'
+        ws.cell(row, len(r["meses"]) + 3).number_format = "0.0%"
+        if ln["destaque"]:
+            for col in range(1, len(cab) + 1):
+                ws.cell(row, col).font = Font(bold=True)
+                ws.cell(row, col).fill = PatternFill("solid", fgColor="E8EEF6")
+    ws.column_dimensions["A"].width = 52
+    for i in range(2, len(cab) + 1):
+        ws.column_dimensions[get_column_letter(i)].width = 14
+    ws.freeze_panes = "B5"
+    ws2 = wb.create_sheet("Composição")
+    ws2.append(["Linha da DRE", "Origem", "Conta de origem"] + [f"{m[5:]}/{m[:4]}" for m in r["meses"]] + ["Total"])
+    for c in ws2[1]:
+        c.font = Font(bold=True)
+    for ln in r["linhas"]:
+        for c in ln["composicao"]:
+            ws2.append([ln["nome"], c["origem"], c["descricao"]] + c["valores"] + [c["total"]])
+    for c in r["nao_associadas"]:
+        ws2.append(["(sem associação)", c["origem"], c["descricao"]] + [None] * len(r["meses"]) + [c["total"]])
+    ws2.column_dimensions["A"].width = 40
+    ws2.column_dimensions["C"].width = 45
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nome = re.sub(r"[^A-Za-z0-9]+", "_", e.nome)[:40]
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="DRE_{nome}_{inicio}_{fim}.xlsx"'})
+
+
+@app.get("/api/auditoria")
+def auditoria(_u=Depends(admin), s=Depends(get_db)):
+    return [{"quando": dt2s(a.quando), "usuario": a.usuario, "acao": a.acao, "detalhe": a.detalhe}
+            for a in s.scalars(select(Auditoria).order_by(Auditoria.id.desc()).limit(200)).all()]
