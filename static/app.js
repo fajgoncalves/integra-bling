@@ -51,7 +51,7 @@ function periodoPadrao() {
   const h = new Date();
   const ult = new Date(h.getFullYear(), h.getMonth(), 0);
   const fim = `${ult.getFullYear()}-${String(ult.getMonth() + 1).padStart(2, "0")}`;
-  return { inicio: `${ult.getFullYear()}-01`, fim, regime: "competencia" };
+  return { inicio: `${ult.getFullYear()}-01`, fim };
 }
 function periodo() {
   try { return { ...periodoPadrao(), ...JSON.parse(localStorage.getItem("ib_periodo") || "{}") }; } catch (_) { return periodoPadrao(); }
@@ -59,20 +59,17 @@ function periodo() {
 function salvarPeriodo(p) { try { localStorage.setItem("ib_periodo", JSON.stringify(p)); } catch (_) { /* sem storage */ } }
 function ultimoDia(mes) { const [a, m] = mes.split("-").map(Number); return `${mes}-${String(new Date(a, m, 0).getDate()).padStart(2, "0")}`; }
 
-function seletorPeriodo(aoMudar, comRegime = true) {
+function seletorPeriodo(aoMudar) {
   const p = periodo();
   const html = `<div class="linha">
     <label>De <input type="month" id="p-ini" value="${p.inicio}"></label>
     <label>Até <input type="month" id="p-fim" value="${p.fim}"></label>
-    ${comRegime ? `<label>Regime <select id="p-reg">
-      <option value="competencia" ${p.regime === "competencia" ? "selected" : ""}>Competência (emissão)</option>
-      <option value="vencimento" ${p.regime === "vencimento" ? "selected" : ""}>Vencimento</option></select></label>` : ""}
   </div>`;
   setTimeout(() => {
-    ["#p-ini", "#p-fim", "#p-reg"].forEach((id) => {
+    ["#p-ini", "#p-fim"].forEach((id) => {
       const el = $(id);
       if (el) el.addEventListener("change", () => {
-        const n = { inicio: $("#p-ini").value, fim: $("#p-fim").value, regime: $("#p-reg") ? $("#p-reg").value : p.regime };
+        const n = { inicio: $("#p-ini").value, fim: $("#p-fim").value };
         if (!n.inicio || !n.fim) return;
         salvarPeriodo(n);
         aoMudar(n);
@@ -232,13 +229,13 @@ function abaConexoes(e) {
     <div class="card"><h2>Bling</h2>
       ${e.bling_conectado ? `<div class="linha"><span class="badge b-ok">Conectado</span><span class="suave peq">desde ${dataHora(e.bling_conectado_em)}${e.bling_app_proprio ? " · aplicativo próprio" : ""}</span></div>`
         : `<div class="aviso">Ainda não conectada. Clique em <b>Conectar ao Bling</b> e entre com o usuário do Bling desta empresa para autorizar a leitura.</div>`}
-      <div class="suave peq" style="margin:10px 0">Última atualização: ${e.bling_sync_em ? `${dataHora(e.bling_sync_em)} (emitidos de ${esc(e.bling_sync_periodo)})` : "nunca"}</div>
+      <div class="suave peq" style="margin:10px 0">Última atualização: ${e.bling_sync_em ? `${dataHora(e.bling_sync_em)} (caixa de ${esc(e.bling_sync_periodo)})` : "nunca"}</div>
       <div class="linha"><label>De <input type="month" id="b-ini" value="${p.inicio}"></label><label>Até <input type="month" id="b-fim" value="${p.fim}"></label></div>
       <div class="linha" style="margin-top:12px">
         <button class="btn ${e.bling_conectado ? "" : "pri"}" id="b-con">${e.bling_conectado ? "Reconectar" : "Conectar ao Bling"}</button>
         <button class="btn pri" id="b-sync" ${e.bling_conectado ? "" : "disabled"}>Atualizar do Bling</button>
         ${e.bling_conectado ? '<button class="btn perigo peq" id="b-des">Desconectar</button>' : ""}</div>
-      <div class="suave peq" style="margin-top:10px">Lê as categorias financeiras e as contas a pagar e a receber <b>emitidas</b> no período (somente leitura). Na primeira vez, cada título é consultado para pegar a categoria — pode levar alguns minutos.</div>
+      <div class="suave peq" style="margin-top:10px">Lê as categorias financeiras e os lançamentos de <b>Caixa e Bancos</b> do período — só o que foi efetivamente pago ou recebido (somente leitura). Contas a pagar e a receber em aberto não entram. Pode levar alguns minutos.</div>
     </div>
     <div class="card"><h2>Domínio (Central 360)</h2>
       <div class="suave peq" style="margin-bottom:10px">Faturamento (notas de saída e serviços) e devoluções, por CFOP, lidos pelo Agente 360 no banco da Domínio.</div>
@@ -297,7 +294,7 @@ async function abaAssociacao(e) {
   let dados = null, modelo = null;
   const carregar = async () => {
     const p = periodo();
-    [dados, modelo] = await Promise.all([api(`/api/empresas/${e.id}/contas?inicio=${p.inicio}&fim=${p.fim}&regime=${p.regime}`), api(`/api/modelos/${e.modelo_id}`)]);
+    [dados, modelo] = await Promise.all([api(`/api/empresas/${e.id}/contas?inicio=${p.inicio}&fim=${p.fim}`), api(`/api/modelos/${e.modelo_id}`)]);
     desenhar();
   };
   const opcoes = () => {
@@ -318,12 +315,12 @@ async function abaAssociacao(e) {
     $("#resumo").innerHTML = `${bl.filter((c) => c.linha_id).length} de ${bl.length} categorias ativas do Bling associadas.`
       + (comValor.length ? ` <b style="color:var(--amarelo)">${comValor.length} conta(s) com valor no período ainda sem associação.</b>` : "")
       + (bl.length ? "" : " <b>Ainda não há categorias do Bling: conecte e atualize na aba Conexões.</b>");
-    $("#tab").innerHTML = `<tr><th>Origem</th><th>Conta</th><th>Tipo</th><th class="num">Valor no período</th><th style="min-width:260px">Linha da DRE</th><th></th></tr>`
+    $("#tab").innerHTML = `<tr><th>Origem</th><th>Conta</th><th>Tipo</th><th class="num">Pago/recebido no período</th><th style="min-width:260px">Linha da DRE</th><th></th></tr>`
       + (lin.length ? lin.map((c) => `<tr data-id="${c.id}" style="${c.ativa ? "" : "opacity:.55"}">
         <td>${ORIGEM[c.origem]}</td>
         <td>${esc(c.nome)}${c.ativa ? "" : ' <span class="badge">inativa</span>'}${c.origem === "BLING" ? ` <span class="suave peq">#${esc(c.codigo)}</span>` : ""}</td>
         <td class="peq">${TIPO[c.tipo] || c.tipo}</td>
-        <td class="num">${c.total ? brl(c.total) : '<span class="suave">—</span>'}</td>
+        <td class="num ${c.total < 0 ? "neg" : ""}">${c.total ? brl(c.total) : '<span class="suave">—</span>'}</td>
         <td><select class="sel-linha" style="width:100%">${ops}</select></td>
         <td><button class="btn peq consultar">Consultar</button></td></tr>`).join("") : `<tr><td colspan="6" class="vazio">Nada para mostrar.</td></tr>`);
     $$("#tab tr[data-id]").forEach((tr) => {
@@ -359,18 +356,18 @@ async function abaAssociacao(e) {
 
 async function consultarConta(c, e) {
   const p = periodo();
-  const m = modal(`<div class="linha entre"><div><h2 style="margin:0">${esc(c.nome)}</h2><div class="suave peq">${ORIGEM[c.origem]} ${mesBR(p.inicio)} a ${mesBR(p.fim)} · ${p.regime === "vencimento" ? "por vencimento" : "por competência"}</div></div>
+  const m = modal(`<div class="linha entre"><div><h2 style="margin:0">${esc(c.nome)}</h2><div class="suave peq">${ORIGEM[c.origem]} ${mesBR(p.inicio)} a ${mesBR(p.fim)} · ${c.origem === "BLING" ? "caixa e bancos (pagos e recebidos)" : "notas fiscais"}</div></div>
     <div class="linha">${c.origem === "BLING" && e ? '<button class="btn" id="cs-sync">Atualizar do Bling</button>' : ""}<button class="btn" data-fechar>Fechar</button></div></div>
     <div id="cs-corpo" style="margin-top:12px" class="suave">Carregando...</div>`);
   const carregar = async () => {
-    const r = await api(`/api/contas/${c.id}/detalhe?inicio=${p.inicio}&fim=${p.fim}&regime=${p.regime}`);
+    const r = await api(`/api/contas/${c.id}/detalhe?inicio=${p.inicio}&fim=${p.fim}`);
     const corpo = $("#cs-corpo", m);
     if (!r.itens.length) { corpo.innerHTML = '<div class="vazio">Nenhum lançamento no período.</div>'; return; }
-    if (r.tipo === "titulos") {
-      corpo.innerHTML = `<div class="kpi"><div>Total<b>R$ ${brl(r.total)}</b></div><div>Títulos<b>${r.itens.length}</b></div></div>
-      <div class="rolagem"><table><tr><th>Data</th><th>Tipo</th><th>Contato</th><th>Histórico</th><th>Situação</th><th class="num">Valor</th></tr>
-      ${r.itens.map((i) => `<tr style="${i.cancelado ? "text-decoration:line-through;opacity:.6" : ""}"><td>${dataBR(i.data)}</td><td class="peq">${i.tipo}</td><td>${esc(i.contato)}</td>
-        <td class="peq">${esc(i.historico)}${i.documento ? ` <span class="suave">doc ${esc(i.documento)}</span>` : ""}</td><td class="peq">${esc(i.situacao)}</td><td class="num">${brl(i.valor)}</td></tr>`).join("")}</table></div>`;
+    if (r.tipo === "caixa") {
+      corpo.innerHTML = `<div class="kpi"><div>Total<b class="${r.total < 0 ? "neg" : ""}">R$ ${brl(r.total)}</b></div><div>Lançamentos<b>${r.itens.length}</b></div></div>
+      <div class="rolagem"><table><tr><th>Data</th><th>Conta</th><th>Contato</th><th>Descrição</th><th>Origem</th><th class="num">Valor</th></tr>
+      ${r.itens.map((i) => `<tr><td>${dataBR(i.data)}</td><td class="peq">${esc(i.conta_financeira)}</td><td>${esc(i.contato)}</td>
+        <td class="peq">${esc(i.descricao)}</td><td class="peq suave">${esc(i.origem)}</td><td class="num ${i.valor < 0 ? "neg" : ""}">${brl(i.valor)}</td></tr>`).join("")}</table></div>`;
     } else {
       corpo.innerHTML = `<div class="kpi"><div>Total<b>R$ ${brl(r.total)}</b></div></div>
       <div class="rolagem"><table><tr><th>Mês</th><th>Origem</th><th>CFOP</th><th class="num">Notas</th><th class="num">Valor</th></tr>
@@ -394,7 +391,7 @@ async function abaDre(e) {
   let r = null;
   const carregar = async () => {
     const p = periodo();
-    r = await api(`/api/empresas/${e.id}/dre?inicio=${p.inicio}&fim=${p.fim}&regime=${p.regime}`);
+    r = await api(`/api/empresas/${e.id}/dre?inicio=${p.inicio}&fim=${p.fim}`);
     desenhar();
   };
   const desenhar = () => {
@@ -404,7 +401,7 @@ async function abaDre(e) {
     if (!r.empresa.dominio_sync_periodo) fontes.push("a Domínio ainda não foi lida");
     $("#dre-avisos").innerHTML = (fontes.length ? `<div class="aviso">Atenção: ${fontes.join(" e ")} para esta empresa (aba Conexões).</div>` : "")
       + r.avisos.map((a) => `<div class="aviso">${esc(a)}</div>`).join("")
-      + `<div class="suave peq">Bling: emitidos de ${esc(r.empresa.bling_sync_periodo || "—")} · Domínio: ${esc(r.empresa.dominio_sync_periodo || "—")} · Base da análise vertical: ${esc(r.base_av || "—")}. Clique numa linha para ver de onde vêm os valores.</div>`;
+      + `<div class="suave peq">Bling pelo caixa (pagos e recebidos em ${esc(r.empresa.bling_sync_periodo || "—")}) · Domínio pelas notas fiscais (${esc(r.empresa.dominio_sync_periodo || "—")}) · Base da análise vertical: ${esc(r.base_av || "—")}. Clique numa linha para ver de onde vêm os valores.</div>`;
     const cols = r.meses.length + 2 + (av ? 1 : 0);
     const cel = (v) => `<td class="num ${v < 0 ? "neg" : ""}">${v ? brl(v) : '<span class="suave">–</span>'}</td>`;
     let html = `<div class="rolagem"><table class="dre"><tr><th>Linha</th>${r.meses.map((m) => `<th class="num">${mesBR(m)}</th>`).join("")}<th class="num">Total</th>${av ? '<th class="num">AV</th>' : ""}</tr>`;
@@ -428,12 +425,12 @@ async function abaDre(e) {
     if (r.nao_associadas.length) {
       na.style.display = "";
       na.innerHTML = `<h2>Contas com valor no período que não entram na DRE</h2>
-        <div class="suave peq" style="margin-bottom:8px">Associe na aba <a href="#/empresa/${e.id}/associacao">Associação de contas</a> ou deixe de fora de propósito (ex.: vendas do Bling, quando o faturamento vem da Domínio).</div>
+        <div class="suave peq" style="margin-bottom:8px">Associe na aba <a href="#/empresa/${e.id}/associacao">Associação de contas</a> ou deixe de fora de propósito (ex.: recebimentos de vendas no Bling, quando o faturamento vem da Domínio).</div>
         <table><tr><th>Origem</th><th>Conta</th><th>Natureza</th><th class="num">Total</th></tr>${r.nao_associadas.map((c) => `<tr><td>${ORIGEM[c.origem]}</td><td>${esc(c.descricao)}</td><td class="peq">${TIPO[c.natureza] || ""}</td><td class="num">${brl(c.total)}</td></tr>`).join("")}</table>`;
     } else na.style.display = "none";
   };
   $("#av").onchange = () => r && desenhar();
-  $("#xls").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/dre.xlsx?inicio=${p.inicio}&fim=${p.fim}&regime=${p.regime}`; };
+  $("#xls").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/dre.xlsx?inicio=${p.inicio}&fim=${p.fim}`; };
   await tentar(carregar);
 }
 
@@ -460,7 +457,7 @@ async function telaModelo(id) {
   casca("modelos", `<div class="topo"><div><a href="#/modelos" class="peq">← Modelos</a><h1>Editar modelo</h1></div>
     <div class="linha">${EU.perfil === "ADMIN" ? '<button class="btn perigo" id="m-del">Excluir</button>' : ""}<button class="btn pri" id="m-salvar">Salvar modelo</button></div></div>
     <div class="card"><div class="form" style="grid-template-columns:1fr 2fr"><label>Nome <input id="m-nome" value="${esc(m.nome)}"></label><label>Descrição <input id="m-desc" value="${esc(m.descricao)}"></label></div></div>
-    <div class="info peq"><b>Como funciona.</b> <b>Conta</b>: recebe as categorias do Bling e os grupos da Domínio que você associar; o sinal diz se soma (receitas) ou subtrai (despesas) — "automático" soma receitas e subtrai despesas.
+    <div class="info peq"><b>Como funciona.</b> <b>Conta</b>: recebe as categorias do Bling e os grupos da Domínio que você associar. Sinal <b>automático</b> (recomendado): entradas de caixa somam e saídas subtraem, e um estorno abate a despesa. "Soma" e "Subtrai" forçam o sinal.
       <b>Total</b>: fórmula com os códigos das linhas de cima, ex.: <span class="mono">RB + DED_DEV + DED_IMP</span> (as despesas já vêm negativas, por isso normalmente é tudo "+").
       <b>Título</b>: só organiza a leitura. Marque <b>AV</b> na linha que vale 100% na análise vertical (normalmente a Receita líquida).
       ${m.empresas ? `<br>Este modelo é usado por ${m.empresas} empresa(s): excluir uma linha apaga as associações dela.` : ""}</div>
@@ -474,7 +471,7 @@ async function telaModelo(id) {
       <td><input class="mono f-cod" value="${esc(x.codigo)}"></td>
       <td><input class="f-nome" value="${esc(x.nome)}"></td>
       <td><select class="f-tipo"><option value="CONTA">Conta</option><option value="TOTAL">Total</option><option value="TITULO">Título</option></select></td>
-      <td>${x.tipo === "CONTA" ? `<select class="f-sinal"><option value="1">Soma (+)</option><option value="-1">Subtrai (−)</option><option value="0">Automático</option></select>`
+      <td>${x.tipo === "CONTA" ? `<select class="f-sinal"><option value="0">Automático</option><option value="1">Sempre soma (+)</option><option value="-1">Sempre subtrai (−)</option></select>`
         : x.tipo === "TOTAL" ? `<input class="mono f-form" value="${esc(x.formula)}" placeholder="RB + DED">` : ""}</td>
       <td style="text-align:center"><input type="checkbox" class="f-dest" ${x.destaque ? "checked" : ""}></td>
       <td style="text-align:center">${x.tipo !== "TITULO" ? `<input type="radio" name="av" class="f-av" ${x.base_av ? "checked" : ""}>` : ""}</td>
@@ -485,7 +482,7 @@ async function telaModelo(id) {
       if ($(".f-sinal", tr)) $(".f-sinal", tr).value = String(x.sinal ?? 1);
       $(".f-cod", tr).oninput = (ev) => { x.codigo = ev.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""); ev.target.value = x.codigo; };
       $(".f-nome", tr).oninput = (ev) => { x.nome = ev.target.value; };
-      $(".f-tipo", tr).onchange = (ev) => { x.tipo = ev.target.value; if (x.tipo === "CONTA" && x.sinal == null) x.sinal = -1; desenhar(); };
+      $(".f-tipo", tr).onchange = (ev) => { x.tipo = ev.target.value; if (x.tipo === "CONTA" && x.sinal == null) x.sinal = 0; desenhar(); };
       if ($(".f-sinal", tr)) $(".f-sinal", tr).onchange = (ev) => { x.sinal = Number(ev.target.value); };
       if ($(".f-form", tr)) $(".f-form", tr).oninput = (ev) => { x.formula = ev.target.value.toUpperCase(); };
       $(".f-dest", tr).onchange = (ev) => { x.destaque = ev.target.checked; };
@@ -498,7 +495,7 @@ async function telaModelo(id) {
   const add = (tipo) => {
     let n = linhas.length + 1;
     while (linhas.some((x) => x.codigo === `L${n}`)) n += 1;
-    linhas.push({ codigo: `L${n}`, nome: tipo === "TITULO" ? "NOVO GRUPO" : tipo === "TOTAL" ? "(=) Novo total" : "(-) Nova conta", tipo, sinal: -1, formula: "", destaque: tipo === "TOTAL", base_av: false });
+    linhas.push({ codigo: `L${n}`, nome: tipo === "TITULO" ? "NOVO GRUPO" : tipo === "TOTAL" ? "(=) Novo total" : "(-) Nova conta", tipo, sinal: 0, formula: "", destaque: tipo === "TOTAL", base_av: false });
     desenhar();
     const ult = $$("#linhas tr").pop(); ult.scrollIntoView({ block: "center" }); $(".f-nome", ult).select();
   };
@@ -523,7 +520,7 @@ async function telaConfig() {
   casca("config", `<div class="topo"><div><h1>Configurações</h1></div></div>
     ${c.secret_key_no_ambiente ? "" : '<div class="aviso">A variável SECRET_KEY não está definida no servidor; os segredos estão cifrados com uma chave guardada no próprio banco.</div>'}
     <div class="card"><h2>Aplicativo do Bling (padrão)</h2>
-      <div class="info peq">No Bling: <b>Central de Extensões → Área do Integrador → Criar aplicativo</b> (tipo API, uso privado). Em <b>Link de redirecionamento</b> coloque o endereço abaixo. Escopos: <b>Categorias financeiras</b>, <b>Contas a pagar</b>, <b>Contas a receber</b> (só leitura). Depois copie o Client ID e o Client Secret para cá.
+      <div class="info peq">No Bling: <b>Central de Extensões → Área do Integrador → Criar aplicativo</b> (tipo API, uso privado). Em <b>Link de redirecionamento</b> coloque o endereço abaixo. Escopos (só leitura): <b>Categorias financeiras</b> e <b>Caixas e bancos</b>. Depois copie o Client ID e o Client Secret para cá.
       Um aplicativo privado só pode ser autorizado pela conta Bling que o criou; empresas com conta Bling própria podem ter o próprio aplicativo (no cadastro da empresa).</div>
       <label>Link de redirecionamento (cole no Bling)<div class="linha"><input readonly value="${esc(c.redirect_uri)}" style="flex:1" id="cf-redir"><button class="btn" id="cf-copiar">Copiar</button></div></label>
       <div class="form" style="margin-top:12px"><label>Client ID <input id="cf-cid" value="${esc(c.bling_client_id)}"></label>

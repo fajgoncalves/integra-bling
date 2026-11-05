@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func
 
 import db
-from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Lancamento, DominioValor, Job,
+from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Movimento, DominioValor, Job,
                 Auditoria, agora, PERFIS, TIPOS_LINHA)
 import bling
 import dominio
@@ -22,7 +22,7 @@ import dre
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.0.0"
+VERSAO = "1.1.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -44,6 +44,10 @@ def iniciar():
     with SessionLocal() as s:
         if not s.scalar(select(func.count(ModeloDRE.id))):
             dre.criar_modelo_padrao(s)
+        if get_config(s, "migracao_caixa") != "1":  # 1.1.0: DRE pelo caixa — contas passam a usar o sinal automático
+            for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.tipo == "CONTA")).all():
+                ln.sinal = 0
+            set_config(s, "migracao_caixa", "1")
         for j in s.scalars(select(Job).where(Job.status.in_(("PENDENTE", "EXECUTANDO")))).all():
             j.status, j.fim, j.mensagem = "ERRO", agora(), "Interrompido: o sistema foi reiniciado. Peça de novo."
         s.commit()
@@ -520,18 +524,18 @@ def _nome_completo(c, por_cod):
 
 
 @app.get("/api/empresas/{eid}/contas")
-def contas(eid: int, inicio: str = "", fim: str = "", regime: str = "competencia", _u=Depends(usuario), s=Depends(get_db)):
+def contas(eid: int, inicio: str = "", fim: str = "", _u=Depends(usuario), s=Depends(get_db)):
     e = s.get(Empresa, eid) or _404()
     totais = {}
     if inicio and fim:
         _mes_ok(inicio, "Início")
         _mes_ok(fim, "Fim")
-        _c, vals, _n, _sc = dre.valores_origem(s, e.id, inicio, fim, regime)
+        _c, vals, _sc = dre.valores_origem(s, e.id, inicio, fim)
         totais = {k: round(sum(v.values()), 2) for k, v in vals.items()}
     rows = s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == e.id)).all()
     por_cod = {c.codigo: c for c in rows if c.origem == "BLING"}
-    qtd = dict(s.execute(select(Lancamento.categoria_codigo, func.count(Lancamento.id)).where(
-        Lancamento.empresa_id == e.id).group_by(Lancamento.categoria_codigo)).all())
+    qtd = dict(s.execute(select(Movimento.categoria_codigo, func.count(Movimento.id)).where(
+        Movimento.empresa_id == e.id).group_by(Movimento.categoria_codigo)).all())
     linhas = {ln.id: ln for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == e.modelo_id)).all()} if e.modelo_id else {}
     out = []
     for c in rows:
@@ -539,7 +543,7 @@ def contas(eid: int, inicio: str = "", fim: str = "", regime: str = "competencia
         out.append({"id": c.id, "origem": c.origem, "codigo": c.codigo, "descricao": c.descricao,
                     "nome": _nome_completo(c, por_cod) if c.origem == "BLING" else c.descricao,
                     "tipo": c.tipo, "ativa": c.ativa, "linha_id": c.linha_id if ln else None,
-                    "linha_nome": ln.nome if ln else None, "titulos": qtd.get(c.codigo, 0) if c.origem == "BLING" else None,
+                    "linha_nome": ln.nome if ln else None, "movimentos": qtd.get(c.codigo, 0) if c.origem == "BLING" else None,
                     "total": totais.get(c.id)})
     out.sort(key=lambda x: (x["origem"] != "DOMINIO", not x["ativa"], x["tipo"] != "R", x["nome"].lower()))
     return {"empresa": _emp_json(s, e), "contas": out}
@@ -610,28 +614,21 @@ async def contas_copiar(eid: int, request: Request, u=Depends(usuario), s=Depend
 
 
 @app.get("/api/contas/{cid}/detalhe")
-def conta_detalhe(cid: int, inicio: str, fim: str, regime: str = "competencia", _u=Depends(usuario), s=Depends(get_db)):
-    """Botão Consultar: títulos do Bling da categoria, ou os CFOPs da Domínio que formam o grupo."""
+def conta_detalhe(cid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    """Botão Consultar: lançamentos de Caixa e Bancos da categoria (Bling) ou os CFOPs que formam o grupo (Domínio)."""
     c = s.get(ContaOrigem, cid) or _404()
     _mes_ok(inicio, "Início")
     _mes_ok(fim, "Fim")
-    meses = set(dre.meses_entre(inicio, fim))
     if c.origem == "BLING":
-        itens = []
-        for x in s.scalars(select(Lancamento).where(Lancamento.empresa_id == c.empresa_id,
-                                                    Lancamento.categoria_codigo == c.codigo)).all():
-            d = dre.data_lancamento(x, regime)
-            if not d or f"{d.year:04d}-{d.month:02d}" not in meses:
-                continue
-            itens.append({"tipo": "A receber" if x.tipo == "R" else "A pagar", "id_bling": x.id_externo,
-                          "data": d.isoformat(), "emissao": x.data_emissao.isoformat() if x.data_emissao else None,
-                          "vencimento": x.vencimento.isoformat() if x.vencimento else None,
-                          "contato": x.contato, "historico": x.historico, "documento": x.documento,
-                          "valor": float(x.valor or 0), "situacao": SITUACOES.get(x.situacao, str(x.situacao)),
-                          "cancelado": x.situacao == bling.SITUACAO_CANCELADA})
-        itens.sort(key=lambda x: (x["data"], x["contato"]))
-        return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "titulos", "itens": itens,
-                "total": round(sum(i["valor"] for i in itens if not i["cancelado"]), 2)}
+        d_ini, d_fim = dre.periodo_datas(inicio, fim)
+        itens = [{"id_bling": x.id_externo, "data": x.data.isoformat(), "tipo": "Entrada" if x.deb_cred == "C" else "Saída",
+                  "conta_financeira": x.conta_financeira, "contato": x.contato, "descricao": x.descricao,
+                  "origem": ORIGENS_CAIXA.get(x.origem_tipo, x.origem_tipo), "valor": round(x.assinado, 2)}
+                 for x in s.scalars(select(Movimento).where(Movimento.empresa_id == c.empresa_id, Movimento.categoria_codigo == c.codigo,
+                                                            Movimento.data >= d_ini, Movimento.data <= d_fim)
+                                    .order_by(Movimento.data, Movimento.id)).all()]
+        return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "caixa", "itens": itens,
+                "total": round(sum(i["valor"] for i in itens), 2)}
     itens = []
     for v in s.scalars(select(DominioValor).where(DominioValor.empresa_id == c.empresa_id, DominioValor.mes >= inicio,
                                                   DominioValor.mes <= fim).order_by(DominioValor.mes, DominioValor.cfop)).all():
@@ -643,8 +640,8 @@ def conta_detalhe(cid: int, inicio: str, fim: str, regime: str = "competencia", 
             "total": round(sum(i["valor"] for i in itens), 2)}
 
 
-SITUACOES = {1: "Em aberto", 2: "Pago/recebido", 3: "Parcial", 4: "Devolvido", 5: "Cancelado", 6: "Devolvido parcial",
-             7: "Confirmado"}
+ORIGENS_CAIXA = {"caixa": "Lançamento manual", "duplicata": "Conta a pagar/receber", "bordero": "Baixa (borderô)",
+                 "estoque": "Estoque"}
 
 
 # ------------------------------------------------------------------ modelos de DRE
@@ -751,7 +748,7 @@ def modelo_excluir(mid: int, u=Depends(admin), s=Depends(get_db)):
 
 
 # ------------------------------------------------------------------ DRE
-def _calc(s, eid, inicio, fim, regime):
+def _calc(s, eid, inicio, fim):
     e = s.get(Empresa, eid) or _404()
     _mes_ok(inicio, "Início")
     _mes_ok(fim, "Fim")
@@ -759,32 +756,30 @@ def _calc(s, eid, inicio, fim, regime):
         raise HTTPException(400, "O início é depois do fim.")
     if len(dre.meses_entre(inicio, fim)) > 36:
         raise HTTPException(400, "Período máximo de 36 meses.")
-    if regime not in ("competencia", "vencimento"):
-        raise HTTPException(400, "Regime inválido.")
     if not e.modelo_id:
         raise HTTPException(400, "Escolha um modelo de DRE para a empresa.")
-    return e, dre.calcular(s, e, inicio, fim, regime)
+    return e, dre.calcular(s, e, inicio, fim)
 
 
 @app.get("/api/empresas/{eid}/dre")
-def dre_ver(eid: int, inicio: str, fim: str, regime: str = "competencia", _u=Depends(usuario), s=Depends(get_db)):
-    e, r = _calc(s, eid, inicio, fim, regime)
+def dre_ver(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    e, r = _calc(s, eid, inicio, fim)
     return {"empresa": {"id": e.id, "nome": e.nome, "cnpj": e.cnpj,
                         "bling_sync_periodo": e.bling_sync_periodo, "dominio_sync_periodo": e.dominio_sync_periodo}, **r}
 
 
 @app.get("/api/empresas/{eid}/dre.xlsx")
-def dre_excel(eid: int, inicio: str, fim: str, regime: str = "competencia", _u=Depends(usuario), s=Depends(get_db)):
+def dre_excel(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
-    e, r = _calc(s, eid, inicio, fim, regime)
+    e, r = _calc(s, eid, inicio, fim)
     wb = Workbook()
     ws = wb.active
     ws.title = "DRE"
     ws.append([f"DRE — {e.nome}"])
-    ws.append([f"CNPJ {e.cnpj} · {inicio[5:]}/{inicio[:4]} a {fim[5:]}/{fim[:4]} · regime de "
-               + ("competência" if regime == "competencia" else "vencimento")])
+    ws.append([f"CNPJ {e.cnpj} · {inicio[5:]}/{inicio[:4]} a {fim[5:]}/{fim[:4]} · Bling pelo caixa (pagos e recebidos); "
+               "Domínio pelas notas fiscais do mês"])
     ws.append([])
     cab = ["Linha"] + [f"{m[5:]}/{m[:4]}" for m in r["meses"]] + ["Total", "AV %"]
     ws.append(cab)

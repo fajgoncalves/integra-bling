@@ -1,4 +1,4 @@
-"""Bling API v3 — OAuth 2.0 por empresa, leitura de categorias e contas a pagar/receber.
+"""Bling API v3 — OAuth 2.0 por empresa, leitura de categorias e dos lançamentos de Caixa e Bancos.
 
 Somente leitura: o Integra Bling nunca grava nada no Bling.
 Limite do Bling: poucas requisições por segundo; o cliente espera entre chamadas e repete em 429.
@@ -10,14 +10,14 @@ import threading
 import httpx
 from sqlalchemy import select
 
-from db import SessionLocal, Empresa, ContaOrigem, Lancamento, Job, agora
+from db import SessionLocal, Empresa, ContaOrigem, Movimento, Job, agora
+from sqlalchemy import delete
 from seguranca import cifrar, decifrar, get_config
 
 AUTORIZAR = "https://www.bling.com.br/Api/v3/oauth/authorize"
 TOKEN = "https://www.bling.com.br/Api/v3/oauth/token"
 API = "https://api.bling.com.br/Api/v3"
 INTERVALO = 0.4  # segundos entre chamadas (≈ 2,5 por segundo)
-SITUACAO_CANCELADA = 5
 _trava = threading.Lock()
 _ultima = [0.0]
 
@@ -165,54 +165,53 @@ def sincronizar_categorias(cli: Cliente, s, empresa_id: int) -> int:
     return len(vistos)
 
 
-def _upsert_lista(s, empresa_id, tipo, item, cache):
-    ide = int(item["id"])
-    x = cache.get(ide)
-    valor = round(float(item.get("valor") or 0), 2)
-    sit = int(item.get("situacao") or 1)
-    novo = x is None
-    if novo:
-        x = Lancamento(empresa_id=empresa_id, tipo=tipo, id_externo=ide)
-        s.add(x)
-        cache[ide] = x
-    mudou = novo or float(x.valor or 0) != valor or x.situacao != sit
-    x.valor, x.situacao = valor, sit
-    x.vencimento = _data(item.get("vencimento")) or x.vencimento
-    if item.get("dataEmissao"):
-        x.data_emissao = _data(item["dataEmissao"])
-    nome = (item.get("contato") or {}).get("nome")
-    if nome:
-        x.contato = nome[:200]
-    if mudou:
-        x.detalhado = False
-    x.atualizado_em = agora()
-    return x
+def _movimento(item, empresa_id, categoria=""):
+    d = _data(item.get("data"))
+    if not d:
+        return None
+    dc = str(item.get("debCred") or "").upper()[:1]
+    if dc not in ("C", "D"):
+        dc = "C" if str(item.get("tipoLancamento")) == "2" else "D"
+    return Movimento(
+        empresa_id=empresa_id, id_externo=int(item["id"]), data=d, deb_cred=dc,
+        valor=round(abs(float(item.get("valor") or 0)), 2), categoria_codigo=categoria,
+        conta_financeira=((item.get("contaFinanceira") or {}).get("descricao") or "")[:200],
+        contato=((item.get("contato") or {}).get("nome") or "")[:200],
+        descricao=(item.get("descricao") or item.get("observacoes") or "")[:2000],
+        origem_tipo=str((item.get("origem") or {}).get("tipo") or "")[:20])
 
 
-def _detalhar(cli: Cliente, x: Lancamento):
-    caminho = "/contas/pagar/" if x.tipo == "P" else "/contas/receber/"
-    d = cli.get(caminho + str(x.id_externo)).get("data") or {}
-    cat = (d.get("categoria") or {}).get("id")
-    x.categoria_codigo = str(cat) if cat else ""
-    x.data_emissao = _data(d.get("dataEmissao")) or x.data_emissao
-    x.competencia = _data(d.get("competencia"))
-    x.vencimento = _data(d.get("vencimento")) or x.vencimento
-    x.saldo = round(float(d.get("saldo") or 0), 2)
-    x.historico = (d.get("historico") or "")[:2000]
-    x.documento = str(d.get("numeroDocumento") or "")[:60]
-    contato = d.get("contato") or {}
-    if contato.get("nome"):
-        x.contato = contato["nome"][:200]
-    if d.get("situacao"):
-        x.situacao = int(d["situacao"])
-    x.detalhado = True
+def classificar(todos: dict, por_categoria: dict, pais: dict):
+    """todos: {id: item}; por_categoria: {cod: set(ids)}; pais: {cod: cod_pai}.
+    Devolve ({id: cod}, ids_ambiguos). Quando o filtro do Bling devolve o mesmo lançamento em uma categoria-pai e
+    numa filha, vale a mais específica (a filha); categorias sem parentesco são ambíguas e vão para a consulta individual."""
+    def ancestrais(c):
+        vistos = set()
+        while c in pais and pais[c] and pais[c] not in vistos:
+            c = pais[c]
+            vistos.add(c)
+        return vistos
+
+    cands = {}
+    for cod, ids in por_categoria.items():
+        for i in ids:
+            if i in todos:
+                cands.setdefault(i, set()).add(cod)
+    final, ambiguos = {}, []
+    for i, cs in cands.items():
+        folhas = {c for c in cs if not any(c in ancestrais(o) for o in cs if o != c)}
+        if len(folhas) == 1:
+            final[i] = folhas.pop()
+        else:
+            ambiguos.append(i)
+    return final, ambiguos
 
 
 def sincronizar(job_id: int, cli: Cliente | None = None):
-    """Job de sincronização: categorias + contas a pagar e a receber emitidas no período."""
+    """Job: categorias + lançamentos de Caixa e Bancos (pagos/recebidos) do período, com a categoria de cada um."""
+    import json
     with SessionLocal() as s:
         job = s.get(Job, job_id)
-        import json
         p = json.loads(job.parametros or "{}")
         emp_id = job.empresa_id
         job.status, job.mensagem = "EXECUTANDO", "Lendo categorias do Bling..."
@@ -230,39 +229,49 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
             s2.commit()
 
     try:
+        ini, fim = p["inicio"], p["fim"]
+        filtro = {"dataInicial": ini, "dataFinal": fim, "situacao": "R", "situacaoConciliacao": 3}
         with SessionLocal() as s:
             ncat = sincronizar_categorias(cli, s, emp_id)
-            ini, fim = p["inicio"], p["fim"]
-            cache = {(x.tipo, x.id_externo): x for x in s.scalars(select(Lancamento).where(
-                Lancamento.empresa_id == emp_id)).all()}
-            cp = {k[1]: v for k, v in cache.items() if k[0] == "P"}
-            cr = {k[1]: v for k, v in cache.items() if k[0] == "R"}
-            andamento(f"{ncat} categorias. Lendo contas a pagar...")
-            n_p = 0
-            for it in cli.paginas("/contas/pagar", {"dataEmissaoInicial": ini, "dataEmissaoFinal": fim}):
-                _upsert_lista(s, emp_id, "P", it, cp)
-                n_p += 1
-            s.commit()
-            andamento(f"{ncat} categorias, {n_p} contas a pagar. Lendo contas a receber...")
-            n_r = 0
-            for it in cli.paginas("/contas/receber", {"tipoFiltroData": "E", "dataInicial": ini, "dataFinal": fim}):
-                _upsert_lista(s, emp_id, "R", it, cr)
-                n_r += 1
-            s.commit()
-            pend = [x for x in list(cp.values()) + list(cr.values()) if not x.detalhado]
-            andamento(f"{n_p} a pagar e {n_r} a receber. Buscando a categoria de cada título...", 0, len(pend))
-            for i, x in enumerate(pend, 1):
-                _detalhar(cli, x)
-                if i % 25 == 0:
-                    s.commit()
-                    andamento(f"Buscando a categoria de cada título ({i} de {len(pend)})...", i)
+            cats = s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == emp_id, ContaOrigem.origem == "BLING")).all()
+            pais = {c.codigo: c.pai_codigo for c in cats}
+            codigos = [c.codigo for c in cats if not c.codigo.startswith("_")]
+        andamento(f"{ncat} categorias. Lendo os lançamentos de Caixa e Bancos...")
+        todos = {int(it["id"]): it for it in cli.paginas("/caixas", filtro)}
+        por_cat = {}
+        for n, cod in enumerate(codigos, 1):
+            if n % 5 == 0:
+                andamento(f"{len(todos)} lançamentos de caixa e bancos. Separando por categoria ({n} de {len(codigos)})...", n, len(codigos))
+            ids = {int(it["id"]) for it in cli.paginas("/caixas", {**filtro, "idsCategorias[]": int(cod)})}
+            if ids:
+                por_cat[cod] = ids
+        cat_de, ambiguos = classificar(todos, por_cat, pais)
+        if ambiguos:
+            andamento(f"Conferindo {len(ambiguos)} lançamento(s) um a um...", 0, len(ambiguos))
+            for n, i in enumerate(ambiguos, 1):
+                d = cli.get(f"/caixas/{i}").get("data") or {}
+                cat = (d.get("categoria") or {}).get("id")
+                cat_de[i] = str(cat) if cat else ""
+                if n % 20 == 0:
+                    andamento(f"Conferindo lançamentos um a um ({n} de {len(ambiguos)})...", n)
+        with SessionLocal() as s:
+            d_ini, d_fim = dt.date.fromisoformat(ini), dt.date.fromisoformat(fim)
+            s.execute(delete(Movimento).where(Movimento.empresa_id == emp_id, Movimento.data >= d_ini, Movimento.data <= d_fim))
+            s.flush()
+            sem_cat = 0
+            for i, it in todos.items():
+                m = _movimento(it, emp_id, cat_de.get(i, ""))
+                if not m or m.data < d_ini or m.data > d_fim:
+                    continue
+                sem_cat += not m.categoria_codigo
+                s.add(m)
             emp = s.get(Empresa, emp_id)
             emp.bling_sync_em = agora()
             emp.bling_sync_periodo = f"{ini} a {fim}"
             j = s.get(Job, job_id)
-            j.status, j.progresso, j.total, j.fim = "OK", len(pend), len(pend), agora()
-            j.mensagem = (f"Bling atualizado: {ncat} categorias, {n_p} contas a pagar e {n_r} a receber "
-                          f"emitidas de {_br_data(ini)} a {_br_data(fim)} ({len(pend)} detalhadas agora).")
+            j.status, j.fim = "OK", agora()
+            j.mensagem = (f"Bling atualizado: {ncat} categorias e {len(todos)} lançamentos de caixa e bancos "
+                          f"de {_br_data(ini)} a {_br_data(fim)}" + (f" ({sem_cat} sem categoria)." if sem_cat else "."))
             s.commit()
     except Exception as e:  # noqa: BLE001 — o erro vai para a tela
         with SessionLocal() as s:

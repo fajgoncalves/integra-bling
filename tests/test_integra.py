@@ -26,10 +26,12 @@ CATEGORIAS = [{"id": 10, "idCategoriaPai": 0, "descricao": "Vendas", "tipo": 2},
               {"id": 21, "idCategoriaPai": 20, "descricao": "Comissão de vendedores", "tipo": 1},
               {"id": 22, "idCategoriaPai": 20, "descricao": "Tarifa de comissão marketplace", "tipo": 1},
               {"id": 30, "idCategoriaPai": 0, "descricao": "Tarifas bancárias", "tipo": 1}]
-PAGAR = {101: (21, "2026-01-10", 300.0, 2), 102: (22, "2026-01-20", 120.5, 1), 103: (30, "2026-02-05", 45.0, 2),
-         104: (21, "2026-02-12", 999.0, 5)}  # 104 cancelado
-RECEBER = {201: (10, "2026-01-15", 5000.0, 2)}
-chamadas = {"token": 0, "detalhe": 0}
+# id: (categoria, data, debCred, valor)
+CAIXA = {1: (10, "2026-01-15", "C", 5000.0), 2: (21, "2026-01-10", "D", 300.0), 3: (22, "2026-01-20", "D", 120.5),
+         4: (30, "2026-02-05", "D", 45.0), 5: (21, "2026-02-12", "C", 20.0),  # 5 = estorno de comissão
+         6: (None, "2026-03-01", "D", 1000.0)}  # transferência sem categoria
+PAIS = {c["id"]: c["idCategoriaPai"] for c in CATEGORIAS}
+chamadas = {"token": 0, "caixas": 0}
 
 
 def bling_falso(req: httpx.Request):
@@ -47,18 +49,28 @@ def bling_falso(req: httpx.Request):
     pag = int(q.get("pagina", ["1"])[0])
     if p.path.endswith("/categorias/receitas-despesas"):
         return httpx.Response(200, json={"data": CATEGORIAS if pag == 1 else []})
-    for base, dados, tipo in (("/contas/pagar", PAGAR, "P"), ("/contas/receber", RECEBER, "R")):
-        if p.path.endswith(base):
-            lista = [{"id": i, "situacao": d[3], "vencimento": d[1], "valor": d[2], "contato": {"id": 1}} for i, d in dados.items()]
-            return httpx.Response(200, json={"data": lista if pag == 1 else []})
-        if base + "/" in p.path:
-            i = int(p.path.rsplit("/", 1)[1])
-            chamadas["detalhe"] += 1
-            d = dados[i]
-            return httpx.Response(200, json={"data": {"id": i, "situacao": d[3], "valor": d[2], "vencimento": d[1],
-                                                      "dataEmissao": d[1], "competencia": d[1], "categoria": {"id": d[0]},
-                                                      "contato": {"id": 1, "nome": "Fulano"}, "historico": f"Título {i}"}})
+    if p.path.endswith("/caixas"):
+        chamadas["caixas"] += 1
+        assert q["situacao"] == ["R"] and q["dataInicial"] == ["2026-01-01"]
+        filtro = {int(x) for x in q.get("idsCategorias[]", [])}
+
+        def casa(cat):  # o Bling devolve também os lançamentos das categorias filhas
+            while cat:
+                if cat in filtro:
+                    return True
+                cat = PAIS.get(cat)
+            return False
+        lista = [{"id": i, "debCred": d[2], "valor": d[3], "data": d[1], "descricao": f"Lanç. {i}",
+                  "contato": {"nome": "Fulano"}, "contaFinanceira": {"descricao": "Banco X"}, "origem": {"tipo": "bordero"}}
+                 for i, d in CAIXA.items() if not filtro or casa(d[0])]
+        return httpx.Response(200, json={"data": lista if pag == 1 else []})
     return httpx.Response(404)
+
+
+def test_classificar_ambiguo():
+    todos = {1: {}, 2: {}, 3: {}}
+    final, amb = bling.classificar(todos, {"A": {1, 2}, "B": {2}, "C": {3}, "D": {3}}, {"B": "A"})
+    assert final == {1: "A", 2: "B"} and amb == [3]
 
 
 def central_falsa(req: httpx.Request):
@@ -108,15 +120,17 @@ def test_fluxo_completo():
             bling.sincronizar(jid, bling.Cliente(e["id"], bling_http))
             j = c.get(f"/api/jobs/{jid}").json()
             assert j["status"] == "OK", j["mensagem"]
-            assert chamadas["detalhe"] == 5
-            # segunda sincronização não detalha de novo o que não mudou
+            assert "6 lançamentos" in j["mensagem"] and "1 sem categoria" in j["mensagem"]
+            # sincronizar de novo o mesmo período substitui (não duplica)
             with SessionLocal() as s:
                 j2 = Job(empresa_id=e["id"], tipo="bling_sync", parametros=json.dumps({"inicio": "2026-01-01", "fim": "2026-03-31"}))
                 s.add(j2)
                 s.commit()
                 jid2 = j2.id
             bling.sincronizar(jid2, bling.Cliente(e["id"], bling_http))
-            assert chamadas["detalhe"] == 5
+            with SessionLocal() as s:
+                from db import Movimento
+                assert s.query(Movimento).count() == 6
         finally:
             bling.httpx.Client = orig
 
@@ -136,7 +150,7 @@ def test_fluxo_completo():
         ct = c.get(f"/api/empresas/{e['id']}/contas?inicio=2026-01&fim=2026-03").json()["contas"]
         por = {x["descricao"]: x for x in ct}
         assert por["Comissão de vendedores"]["nome"] == "Despesas comerciais › Comissão de vendedores"
-        assert por["Comissão de vendedores"]["total"] == 300  # o cancelado não entra
+        assert por["Comissão de vendedores"]["total"] == -280  # saída 300, estorno +20
         linhas = {ln["codigo"]: ln["id"] for ln in modelos[0]["linhas"]}
         itens = [{"conta_id": por["Comissão de vendedores"]["id"], "linha_id": linhas["DV_COM"]},
                  {"conta_id": por["Tarifa de comissão marketplace"]["id"], "linha_id": linhas["DV_COM"]},
@@ -144,7 +158,7 @@ def test_fluxo_completo():
         assert c.post(f"/api/empresas/{e['id']}/contas/lote", json={"itens": itens}).json()["alteradas"] == 3
         assert c.put(f"/api/contas/{por['Vendas']['id']}", json={"linha_id": linhas["RB"]}).status_code == 400  # total
         det = c.get(f"/api/contas/{por['Comissão de vendedores']['id']}/detalhe?inicio=2026-01&fim=2026-03").json()
-        assert len(det["itens"]) == 2 and det["total"] == 300
+        assert len(det["itens"]) == 2 and det["total"] == -280 and det["itens"][0]["conta_financeira"] == "Banco X"
         detd = c.get(f"/api/contas/{por['Vendas de mercadorias e produtos (NF de saída)']['id']}/detalhe?inicio=2026-01&fim=2026-03").json()
         assert detd["itens"][0]["cfop"] == 5102 and detd["total"] == 8000
 
@@ -157,11 +171,12 @@ def test_fluxo_completo():
         assert L["DED_DEV"]["total"] == -300
         assert L["RL"]["total"] == 8700 and L["RL"]["av_total"] == 100
         assert L["CMV_DEVC"]["total"] == 200
-        assert L["DV_COM"]["valores"] == [-420.5, 0, 0]
+        assert L["DV_COM"]["valores"] == [-420.5, 20, 0]
         assert len(L["DV_COM"]["composicao"]) == 2
         assert L["DF"]["total"] == -45
-        assert L["LL"]["total"] == round(8700 + 200 - 420.5 - 45, 2)
-        assert any(x["descricao"] == "Vendas" for x in d["nao_associadas"])  # vendas do Bling ficam de fora (Domínio já traz)
+        assert L["LL"]["total"] == round(8700 + 200 - 400.5 - 45, 2)
+        assert any(x["descricao"] == "Vendas" for x in d["nao_associadas"])  # recebimentos de vendas ficam de fora (Domínio já traz)
+        assert any("sem categoria" in a and "1.000,00" in a for a in d["avisos"])
         x = c.get(f"/api/empresas/{e['id']}/dre.xlsx?inicio=2026-01&fim=2026-03")
         assert x.status_code == 200 and x.content[:2] == b"PK"
 
@@ -174,7 +189,7 @@ def test_fluxo_completo():
         assert c.put(f"/api/modelos/{m['id']}", json=m).status_code == 200
         assert c.get(f"/api/empresas/{e['id']}/dre?inicio=2026-01&fim=2026-03").json()["linhas"][-1]["codigo"] == "LL2"
         # as associações continuam depois de salvar o modelo
-        assert c.get(f"/api/empresas/{e['id']}/dre?inicio=2026-01&fim=2026-03").json()["linhas"][12]["total"] == -420.5
+        assert c.get(f"/api/empresas/{e['id']}/dre?inicio=2026-01&fim=2026-03").json()["linhas"][12]["total"] == -400.5
         e2 = c.post("/api/empresas", json={"nome": "Beta"}).json()
         assert c.post("/api/modelos", json={"nome": "Cópia", "copiar_de": m["id"]}).json()["linhas"][-1]["codigo"] == "LL2"
         assert c.post(f"/api/empresas/{e2['id']}/contas/copiar", json={"de_empresa_id": e["id"]}).json()["ok"]

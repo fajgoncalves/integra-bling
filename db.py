@@ -130,27 +130,30 @@ class ContaOrigem(Base):
     atualizado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
 
 
-class Lancamento(Base):
-    """Conta a pagar (P) ou a receber (R) copiada do Bling."""
-    __tablename__ = "lancamentos"
-    __table_args__ = (UniqueConstraint("empresa_id", "tipo", "id_externo"),
-                      Index("ix_lanc_emp_cat", "empresa_id", "categoria_codigo"))
+class Movimento(Base):
+    """Lançamento de Caixa e Bancos do Bling (pagamento ou recebimento efetivado).
+    valor é sempre positivo; deb_cred C = entrada (crédito), D = saída (débito)."""
+    __tablename__ = "movimentos_caixa"
+    __table_args__ = (UniqueConstraint("empresa_id", "id_externo"),
+                      Index("ix_mov_emp_cat", "empresa_id", "categoria_codigo"),
+                      Index("ix_mov_emp_data", "empresa_id", "data"))
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
-    tipo: Mapped[str] = mapped_column(String(1))
     id_externo: Mapped[int] = mapped_column(BigInteger)
-    situacao: Mapped[int] = mapped_column(Integer, default=1)
+    data: Mapped[dt.date] = mapped_column(Date)
+    deb_cred: Mapped[str] = mapped_column(String(1))
     valor: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
-    saldo: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
-    data_emissao: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
-    competencia: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
-    vencimento: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     categoria_codigo: Mapped[str] = mapped_column(String(40), default="")
+    conta_financeira: Mapped[str] = mapped_column(String(200), default="")
     contato: Mapped[str] = mapped_column(String(200), default="")
-    historico: Mapped[str] = mapped_column(Text, default="")
-    documento: Mapped[str] = mapped_column(String(60), default="")
-    detalhado: Mapped[bool] = mapped_column(Boolean, default=False)
+    descricao: Mapped[str] = mapped_column(Text, default="")
+    origem_tipo: Mapped[str] = mapped_column(String(20), default="")
     atualizado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
+
+    @property
+    def assinado(self) -> float:
+        """Entrada positiva, saída negativa."""
+        return float(self.valor or 0) * (1 if self.deb_cred == "C" else -1)
 
 
 class DominioValor(Base):
