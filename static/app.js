@@ -374,10 +374,10 @@ async function consultarConta(c, e) {
     } else if (r.tipo === "cmv") {
       corpo.innerHTML = `<div class="kpi"><div>CMV<b class="neg">R$ ${brl(r.total)}</b></div><div>Produtos<b>${r.itens.length}</b></div>
         ${r.sem_custo.produtos ? `<div style="border-color:#F1D9A6;background:var(--amarelo-cl)">Sem custo<b>${r.sem_custo.produtos}</b></div>` : ""}</div>
-      <div class="suave peq" style="margin-bottom:8px">(Quantidade vendida − devolvida) × custo unitário. Informe os custos na aba <a href="#/empresa/${e.id}/custos" data-fechar>Custo dos produtos</a>.</div>
-      <div class="rolagem"><table><tr><th>Produto</th><th class="num">Vendida</th><th class="num">Devolvida</th><th class="num">Custo unit.</th><th class="num">CMV</th></tr>
+      <div class="suave peq" style="margin-bottom:8px">(Quantidade vendida − devolvida) × custo vigente em cada mês. Informe os custos na aba <a href="#/empresa/${e.id}/custos" data-fechar>Custo dos produtos</a>.</div>
+      <div class="rolagem"><table><tr><th>Produto</th><th class="num">Vendida</th><th class="num">Devolvida</th><th class="num">Custo (fim do período)</th><th class="num">CMV</th></tr>
       ${r.itens.map((i) => `<tr><td>${esc(i.codigo)} · ${esc(i.descricao)}</td><td class="num">${qtdBR(i.qtd_vendida)}</td><td class="num">${qtdBR(i.qtd_devolvida)}</td>
-        <td class="num">${i.custo == null ? '<span class="badge b-aviso">sem custo</span>' : brl4(i.custo)}</td><td class="num">${brl(i.cmv)}</td></tr>`).join("")}</table></div>`;
+        <td class="num">${i.custo == null ? '<span class="badge b-aviso">sem custo</span>' : brl4(i.custo)}${i.meses_sem_custo.length ? `<div class="peq" style="color:var(--amarelo)">sem custo em ${i.meses_sem_custo.map(mesBR).join(", ")}</div>` : ""}</td><td class="num">${brl(i.cmv)}</td></tr>`).join("")}</table></div>`;
     } else {
       const prods = r.produtos && r.produtos.length ? `<h3 style="margin-top:16px">Por produto</h3><div class="rolagem" style="max-height:40vh"><table><tr><th>Produto</th><th>Un</th><th class="num">Quantidade</th><th class="num">Valor dos itens</th></tr>
         ${r.produtos.map((p) => `<tr><td>${esc(p.codigo)} · ${esc(p.descricao)}</td><td>${esc(p.unidade)}</td><td class="num">${qtdBR(p.qtd)}</td><td class="num">${brl(p.valor)}</td></tr>`).join("")}</table></div>` : "";
@@ -450,67 +450,98 @@ async function abaDre(e) {
 // ------------------------------------------------------------------ custo dos produtos (CMV)
 async function abaCustos(e) {
   const filtros = { q: "", sem: false };
+  let vig = sessionStorage.getItem(`ib_vig_${e.id}`) || periodo().inicio;
   $("#aba").innerHTML = `<div class="card">
     <div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
-      <div class="linha"><button class="btn" id="cx-baixar">Baixar planilha</button><label class="btn" style="flex-direction:row">Importar planilha<input type="file" id="cx-imp" accept=".xlsx" hidden></label></div></div>
-    <div class="info peq" style="margin-top:12px">CMV = (quantidade vendida − quantidade devolvida) × custo unitário. As vendas e as devoluções de venda vêm dos itens das notas na Domínio (aba Conexões → Ler da Domínio).
-      Para muitos produtos: baixe a planilha, preencha a coluna <b>Custo unitário</b> e importe. Na DRE, a conta "CMV calculado" vai para a linha de CMV.</div>
+      <div class="linha" style="align-items:flex-end"><label>Custos a partir de <input type="month" id="cx-vig" value="${vig}"></label>
+      <button class="btn" id="cx-baixar">Baixar planilha</button><label class="btn" style="flex-direction:row">Importar planilha<input type="file" id="cx-imp" accept=".xlsx" hidden></label></div></div>
+    <div class="info peq" style="margin-top:12px">CMV de cada mês = (quantidade vendida − devolvida) × <b>custo vigente naquele mês</b>. Cada custo vale a partir do mês informado até o próximo custo do produto.
+      Escolha o mês em <b>Custos a partir de</b> e digite os custos; o que você digitar vale desse mês em diante. Para vários produtos, use a planilha (coluna Vigência). O botão <b>Histórico</b> mostra e apaga vigências.</div>
     <div id="cx-kpi" class="kpi"></div>
     <div class="linha" style="margin-bottom:10px"><input id="cx-q" placeholder="Buscar produto..." style="flex:1;min-width:180px">
-      <label class="chk"><input type="checkbox" id="cx-sem"> Só sem custo</label></div>
+      <label class="chk"><input type="checkbox" id="cx-sem"> Só com mês sem custo</label></div>
     <div class="rolagem"><table id="cx-tab"></table></div></div>`;
   let r = null;
-  const carregar = async () => { const p = periodo(); r = await api(`/api/empresas/${e.id}/produtos?inicio=${p.inicio}&fim=${p.fim}`); desenhar(); };
+  const carregar = async () => { const p = periodo(); r = await api(`/api/empresas/${e.id}/produtos?inicio=${p.inicio}&fim=${p.fim}&vigencia=${vig}`); desenhar(); };
   const desenhar = () => {
     $("#cx-kpi").innerHTML = `<div>Produtos<b>${r.itens.length}</b></div><div>Faturamento dos itens<b>R$ ${brl(r.totais.valor_vendido)}</b></div>
       <div>CMV no período<b>R$ ${brl(r.totais.cmv)}</b></div>
       <div style="${r.sem_custo.produtos ? "border-color:#F1D9A6;background:var(--amarelo-cl)" : ""}">Vendidos sem custo<b>${r.sem_custo.produtos}</b><span class="peq suave">R$ ${brl(r.sem_custo.faturamento)}</span></div>`;
     const q = filtros.q.toLowerCase();
-    const lin = r.itens.filter((i) => (!filtros.sem || i.custo == null) && (!q || `${i.codigo} ${i.descricao}`.toLowerCase().includes(q)));
+    const lin = r.itens.filter((i) => (!filtros.sem || i.meses_sem_custo.length) && (!q || `${i.codigo} ${i.descricao}`.toLowerCase().includes(q)));
     if (!r.itens.length) { $("#cx-tab").innerHTML = `<tr><td class="vazio">Nenhum produto ainda. Leia a Domínio na aba Conexões (precisa do Agente 360 na versão 0.14.0 ou superior).</td></tr>`; return; }
-    $("#cx-tab").innerHTML = `<tr><th>Código</th><th>Descrição</th><th>Un</th><th class="num">Qtd vendida</th><th class="num">Qtd devolvida</th><th class="num">Faturamento</th><th class="num">Preço médio</th><th class="num" style="width:150px">Custo unitário</th><th class="num">CMV</th><th class="num">Margem</th></tr>`
+    $("#cx-tab").innerHTML = `<tr><th>Código</th><th style="min-width:240px">Descrição</th><th>Un</th><th class="num">Qtd vendida</th><th class="num">Qtd devolvida</th><th class="num">Faturamento</th><th class="num">Preço médio</th>
+      <th class="num" style="width:170px">Custo a partir de ${mesBR(vig)}</th><th class="num">CMV</th><th class="num">Margem</th><th></th></tr>`
       + lin.slice(0, 1500).map((i) => {
         const pm = i.qtd_vendida ? i.valor_vendido / i.qtd_vendida : null;
-        const mg = pm && i.custo != null ? (1 - i.custo / pm) * 100 : null;
-        return `<tr data-id="${i.id}"><td class="mono">${esc(i.codigo)}</td><td>${esc(i.descricao)}</td><td>${esc(i.unidade)}</td>
+        const herdado = i.custo != null && !i.custo_proprio_mes;
+        return `<tr data-id="${i.id}"><td class="mono">${esc(i.codigo)}</td><td>${esc(i.descricao)}${i.meses_sem_custo.length ? `<br><span class="badge b-aviso" title="${i.meses_sem_custo.map(mesBR).join(", ")}">sem custo em ${i.meses_sem_custo.length} mês(es)</span>` : ""}</td><td>${esc(i.unidade)}</td>
           <td class="num">${qtdBR(i.qtd_vendida)}</td><td class="num">${i.qtd_devolvida ? qtdBR(i.qtd_devolvida) : ""}</td><td class="num">${brl(i.valor_vendido)}</td>
           <td class="num">${pm == null ? "" : brl(pm)}</td>
-          <td class="num"><input class="cx-custo" inputmode="decimal" style="width:120px;text-align:right" value="${i.custo == null ? "" : brl4(i.custo)}" placeholder="informar"></td>
-          <td class="num">${i.cmv ? brl(i.cmv) : ""}</td><td class="num ${mg != null && mg < 0 ? "neg" : ""}">${mg == null ? "" : pct(mg)}</td></tr>`;
-      }).join("") + (lin.length > 1500 ? `<tr><td colspan="10" class="suave">Mostrando 1.500 de ${lin.length}. Use a busca ou a planilha.</td></tr>` : "");
+          <td class="num"><input class="cx-custo" inputmode="decimal" style="width:120px;text-align:right;${herdado ? "color:var(--suave)" : ""}" value="${i.custo == null ? "" : brl4(i.custo)}" placeholder="informar">
+            ${herdado ? `<div class="peq suave">vigente desde ${mesBR(i.custo_desde)}</div>` : ""}</td>
+          <td class="num">${i.cmv ? brl(i.cmv) : ""}</td><td class="num ${i.margem != null && i.margem < 0 ? "neg" : ""}">${i.margem == null ? "" : pct(i.margem)}</td>
+          <td><button class="btn peq cx-hist">Histórico${i.vigencias > 1 ? ` (${i.vigencias})` : ""}</button></td></tr>`;
+      }).join("") + (lin.length > 1500 ? `<tr><td colspan="11" class="suave">Mostrando 1.500 de ${lin.length}. Use a busca ou a planilha.</td></tr>` : "");
     $$("#cx-tab tr[data-id]").forEach((tr) => {
+      const i = r.itens.find((x) => x.id === Number(tr.dataset.id));
       const inp = $(".cx-custo", tr);
+      const original = inp.value;
       const salvar = () => tentar(async () => {
-        const i = r.itens.find((x) => x.id === Number(tr.dataset.id));
         const novo = inp.value.trim();
-        const atual = i.custo == null ? "" : brl4(i.custo);
-        if (novo === atual) return;
-        const res = await api(`/api/produtos/${i.id}`, { method: "PUT", body: { custo: novo || null } });
-        i.custo = res.custo;
-        tr.style.background = "#E3F5EF"; setTimeout(() => { tr.style.background = ""; }, 700);
+        if (novo === original) return;
+        if (!novo && !i.custo_proprio_mes) { inp.value = original; return; }
+        await api(`/api/produtos/${i.id}`, { method: "PUT", body: { custo: novo || null, vigencia: vig } });
+        tr.style.background = "#E3F5EF";
         await carregar();
       });
       inp.addEventListener("change", salvar);
       inp.addEventListener("keydown", (ev) => {
         if (ev.key === "Enter") { ev.preventDefault(); const prox = tr.nextElementSibling && $(".cx-custo", tr.nextElementSibling); inp.blur(); if (prox) prox.focus(); }
       });
+      $(".cx-hist", tr).onclick = () => historicoCusto(i, () => carregar());
     });
   };
+  $("#cx-vig").onchange = (x) => { if (!x.target.value) return; vig = x.target.value; sessionStorage.setItem(`ib_vig_${e.id}`, vig); tentar(carregar); };
   $("#cx-q").oninput = (x) => { filtros.q = x.target.value; desenhar(); };
   $("#cx-sem").onchange = (x) => { filtros.sem = x.target.checked; desenhar(); };
-  $("#cx-baixar").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/produtos.xlsx?inicio=${p.inicio}&fim=${p.fim}`; };
+  $("#cx-baixar").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/produtos.xlsx?inicio=${p.inicio}&fim=${p.fim}&vigencia=${vig}`; };
   $("#cx-imp").onchange = (ev) => {
     const f = ev.target.files[0];
     if (!f) return;
     const rd = new FileReader();
     rd.onload = () => tentar(async () => {
       const b64 = rd.result.split(",")[1];
-      const res = await api(`/api/empresas/${e.id}/produtos/importar`, { method: "POST", body: { arquivo: b64 } });
-      toast(`${res.atualizados} custo(s) atualizado(s).` + (res.nao_encontrados.length ? ` Não encontrados: ${res.nao_encontrados.slice(0, 5).join(", ")}...` : ""));
+      const res = await api(`/api/empresas/${e.id}/produtos/importar`, { method: "POST", body: { arquivo: b64, vigencia: vig } });
+      toast(`${res.atualizados} custo(s) gravado(s)` + (res.meses.length ? ` (a partir de ${res.meses.map(mesBR).join(", ")})` : "") + "."
+        + (res.nao_encontrados.length ? ` Não encontrados: ${res.nao_encontrados.slice(0, 5).join(", ")}...` : ""));
       ev.target.value = ""; await carregar();
     });
     rd.readAsDataURL(f);
   };
+  await tentar(carregar);
+}
+
+async function historicoCusto(i, aoMudar) {
+  const m = modal(`<div class="linha entre"><div><h2 style="margin:0">${esc(i.codigo)} · ${esc(i.descricao)}</h2><div class="suave peq">Custos por vigência — cada um vale do mês indicado até o próximo.</div></div><button class="btn" data-fechar>Fechar</button></div>
+    <div class="linha" style="margin:14px 0;align-items:flex-end"><label>A partir de <input type="month" id="h-mes" value="${periodo().inicio}"></label>
+      <label>Custo unitário <input id="h-custo" inputmode="decimal" style="width:130px"></label><button class="btn pri" id="h-add">Gravar</button></div>
+    <div id="h-lista" class="suave">Carregando...</div>`, true);
+  const carregar = async () => {
+    const h = await api(`/api/produtos/${i.id}/custos`);
+    $("#h-lista", m).innerHTML = h.custos.length ? `<table><tr><th>A partir de</th><th class="num">Custo</th><th>Lançado por</th><th></th></tr>${h.custos.map((c) => `<tr>
+      <td>${mesBR(c.mes_inicio === "2000-01" ? "" : c.mes_inicio) || "início"}</td><td class="num">${brl4(c.custo)}</td><td class="peq suave">${esc(c.criado_por)} · ${dataHora(c.criado_em)}</td>
+      <td style="text-align:right"><button class="btn peq perigo" data-id="${c.id}">Apagar</button></td></tr>`).join("")}</table>` : "Nenhum custo informado.";
+    $("#h-lista", m).classList.remove("suave");
+    $$("#h-lista button[data-id]", m).forEach((b) => b.onclick = () => tentar(async () => {
+      await api(`/api/produtos/${i.id}/custos/${b.dataset.id}`, { method: "DELETE" }); await carregar(); aoMudar();
+    }, b));
+  };
+  $("#h-add", m).onclick = (ev) => tentar(async () => {
+    if (!$("#h-custo", m).value.trim()) return toast("Informe o custo.", true);
+    await api(`/api/produtos/${i.id}`, { method: "PUT", body: { custo: $("#h-custo", m).value, vigencia: $("#h-mes", m).value } });
+    $("#h-custo", m).value = ""; await carregar(); aoMudar();
+  }, ev.target);
   await tentar(carregar);
 }
 

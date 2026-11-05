@@ -10,7 +10,7 @@ import time
 import httpx
 from sqlalchemy import select, delete
 
-from db import SessionLocal, Empresa, ContaOrigem, DominioValor, DominioItem, Produto, LinhaDRE, Job, agora
+from db import SessionLocal, Empresa, ContaOrigem, DominioValor, DominioItem, Produto, ProdutoCusto, LinhaDRE, Job, agora
 from seguranca import get_config, decifrar
 
 # contas de origem da Domínio (código, descrição, tipo)
@@ -82,10 +82,33 @@ def eh_venda(cfop: int) -> bool:
     return grupo_saida(cfop) == "VENDAS"
 
 
-def cmv(s, empresa_id: int, ini: str, fim: str):
-    """CMV por mês e por produto: (quantidade vendida − quantidade devolvida) × custo unitário.
-    Devolve {mes: cmv}, {produto: {...}} e o faturamento dos produtos sem custo."""
-    custos = {p.produto: p for p in s.scalars(select(Produto).where(Produto.empresa_id == empresa_id)).all()}
+def vigencias(s, empresa_id: int):
+    """{produto(codi_pdi): [(mes_inicio, custo), ...] em ordem}"""
+    out = {}
+    for pr, mes, c in s.execute(select(Produto.produto, ProdutoCusto.mes_inicio, ProdutoCusto.custo)
+                                .join(ProdutoCusto, ProdutoCusto.produto_id == Produto.id)
+                                .where(Produto.empresa_id == empresa_id).order_by(ProdutoCusto.mes_inicio)).all():
+        out.setdefault(pr, []).append((mes, float(c)))
+    return out
+
+
+def custo_no_mes(lista, mes):
+    """Custo vigente no mês: a última vigência com início até o mês (None se não houver)."""
+    atual = None
+    for ini, c in lista or []:
+        if ini <= mes:
+            atual = c
+        else:
+            break
+    return atual
+
+
+def cmv(s, empresa_id: int, ini: str, fim: str, mes_ref: str | None = None):
+    """CMV por mês e por produto: (quantidade vendida − quantidade devolvida) × custo vigente no mês.
+    Devolve {mes: cmv}, {produto: {...}} e os produtos vendidos sem custo em algum mês."""
+    cad = {p.produto: p for p in s.scalars(select(Produto).where(Produto.empresa_id == empresa_id)).all()}
+    vig = vigencias(s, empresa_id)
+    mes_ref = mes_ref or fim
     por_mes, por_prod = {}, {}
     for it in s.scalars(select(DominioItem).where(DominioItem.empresa_id == empresa_id, DominioItem.mes >= ini,
                                                   DominioItem.mes <= fim)).all():
@@ -95,12 +118,13 @@ def cmv(s, empresa_id: int, ini: str, fim: str):
             sinal = -1
         else:
             continue
-        p = custos.get(it.produto)
+        p = cad.get(it.produto)
         x = por_prod.setdefault(it.produto, {"produto": it.produto, "codigo": p.codigo if p else it.produto,
                                              "descricao": p.descricao if p else "", "unidade": p.unidade if p else "",
-                                             "custo": float(p.custo) if p and p.custo is not None else None,
+                                             "custo": custo_no_mes(vig.get(it.produto), mes_ref),
                                              "qtd_vendida": 0.0, "valor_vendido": 0.0, "qtd_devolvida": 0.0,
-                                             "valor_devolvido": 0.0, "cmv": 0.0, "id": p.id if p else None})
+                                             "valor_devolvido": 0.0, "cmv": 0.0, "meses_sem_custo": set(),
+                                             "faturamento_sem_custo": 0.0, "id": p.id if p else None})
         q, v = float(it.qtd or 0), float(it.valor or 0)
         if sinal > 0:
             x["qtd_vendida"] += q
@@ -108,16 +132,23 @@ def cmv(s, empresa_id: int, ini: str, fim: str):
         else:
             x["qtd_devolvida"] += q
             x["valor_devolvido"] += v
-        if x["custo"] is not None:
-            c = sinal * q * x["custo"]
-            x["cmv"] += c
-            por_mes[it.mes] = por_mes.get(it.mes, 0.0) + c
+        cu = custo_no_mes(vig.get(it.produto), it.mes)
+        if cu is None:
+            if sinal > 0:
+                x["meses_sem_custo"].add(it.mes)
+                x["faturamento_sem_custo"] += v
+            continue
+        c = sinal * q * cu
+        x["cmv"] += c
+        por_mes[it.mes] = por_mes.get(it.mes, 0.0) + c
     sem_custo = {"produtos": 0, "faturamento": 0.0}
     for x in por_prod.values():
         x["cmv"] = round(x["cmv"], 2)
-        if x["custo"] is None and x["qtd_vendida"]:
+        x["meses_sem_custo"] = sorted(x["meses_sem_custo"])
+        if x["meses_sem_custo"]:
             sem_custo["produtos"] += 1
-            sem_custo["faturamento"] += x["valor_vendido"]
+            sem_custo["faturamento"] += x["faturamento_sem_custo"]
+    sem_custo["faturamento"] = round(sem_custo["faturamento"], 2)
     return {m: round(v, 2) for m, v in por_mes.items()}, por_prod, sem_custo
 
 

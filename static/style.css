@@ -42,7 +42,7 @@ input:focus,select:focus,textarea:focus{outline:2px solid #BFD3EA;border-color:v
 label{display:flex;flex-direction:column;gap:4px;font-weight:600;font-size:13px}
 label.chk{flex-direction:row;align-items:center;font-weight:500}
 .form{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
-.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:600;background:#EDF1F6;color:var(--suave)}
+.badge{white-space:nowrap;display:inline-block;padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:600;background:#EDF1F6;color:var(--suave)}
 .b-ok{background:var(--verde-cl);color:#11694F}
 .b-erro{background:var(--vermelho-cl);color:var(--vermelho)}
 .b-aviso{background:var(--amarelo-cl);color:var(--amarelo)}

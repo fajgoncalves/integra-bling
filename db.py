@@ -194,9 +194,21 @@ class Produto(Base):
     codigo: Mapped[str] = mapped_column(String(60), default="")
     descricao: Mapped[str] = mapped_column(String(200), default="")
     unidade: Mapped[str] = mapped_column(String(10), default="")
-    custo: Mapped[float | None] = mapped_column(Numeric(15, 4), nullable=True)
+    custo: Mapped[float | None] = mapped_column(Numeric(15, 4), nullable=True)  # legado (antes das vigências)
     custo_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     custo_por: Mapped[str] = mapped_column(String(200), default="")
+
+
+class ProdutoCusto(Base):
+    """Custo unitário do produto a partir de um mês (vale até a próxima vigência)."""
+    __tablename__ = "produtos_custos"
+    __table_args__ = (UniqueConstraint("produto_id", "mes_inicio"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    produto_id: Mapped[int] = mapped_column(ForeignKey("produtos.id", ondelete="CASCADE"), index=True)
+    mes_inicio: Mapped[str] = mapped_column(String(7))
+    custo: Mapped[float] = mapped_column(Numeric(15, 4))
+    criado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
+    criado_por: Mapped[str] = mapped_column(String(200), default="")
 
 
 class Job(Base):

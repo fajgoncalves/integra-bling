@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func
 
 import db
-from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Movimento, DominioValor, DominioItem, Produto, Job,
+from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Movimento, DominioValor, DominioItem, Produto, ProdutoCusto, Job,
                 Auditoria, agora, PERFIS, TIPOS_LINHA)
 import bling
 import dominio
@@ -22,7 +22,7 @@ import dre
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.2.0"
+VERSAO = "1.3.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -48,6 +48,10 @@ def iniciar():
             for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.tipo == "CONTA")).all():
                 ln.sinal = 0
             set_config(s, "migracao_caixa", "1")
+        if get_config(s, "migracao_custo_vigencia") != "1":  # 1.3.0: custo por vigência mensal
+            for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
+                s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
+            set_config(s, "migracao_custo_vigencia", "1")
         for j in s.scalars(select(Job).where(Job.status.in_(("PENDENTE", "EXECUTANDO")))).all():
             j.status, j.fim, j.mensagem = "ERRO", agora(), "Interrompido: o sistema foi reiniciado. Peça de novo."
         s.commit()
@@ -673,32 +677,48 @@ def _num_br(v):
 
 
 @app.get("/api/empresas/{eid}/produtos")
-def produtos(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
-    """Produtos da empresa com venda/devolução no período, custo unitário informado e CMV."""
+def produtos(eid: int, inicio: str, fim: str, vigencia: str = "", _u=Depends(usuario), s=Depends(get_db)):
+    """Produtos da empresa com venda/devolução no período, custo vigente no mês `vigencia` (padrão: o fim) e CMV."""
     e = s.get(Empresa, eid) or _404()
     _mes_ok(inicio, "Início")
     _mes_ok(fim, "Fim")
-    _pm, por_prod, sem_custo = dominio.cmv(s, e.id, inicio, fim)
+    vigencia = _mes_ok(vigencia, "Vigência") if vigencia else fim
+    _pm, por_prod, sem_custo = dominio.cmv(s, e.id, inicio, fim, vigencia)
+    vig = dominio.vigencias(s, e.id)
     itens = []
     for p in s.scalars(select(Produto).where(Produto.empresa_id == e.id)).all():
         x = por_prod.get(p.produto) or {}
+        lista = vig.get(p.produto) or []
+        vale = [m for m, _c in lista if m <= vigencia]
+        liq = x.get("valor_vendido", 0) - x.get("valor_devolvido", 0)
         itens.append({"id": p.id, "produto": p.produto, "codigo": p.codigo, "descricao": p.descricao, "unidade": p.unidade,
-                      "custo": float(p.custo) if p.custo is not None else None, "custo_em": dt2s(p.custo_em), "custo_por": p.custo_por,
+                      "custo": dominio.custo_no_mes(lista, vigencia), "custo_desde": vale[-1] if vale else None,
+                      "custo_proprio_mes": bool(vale) and vale[-1] == vigencia, "vigencias": len(lista),
                       "qtd_vendida": round(x.get("qtd_vendida", 0), 4), "valor_vendido": round(x.get("valor_vendido", 0), 2),
                       "qtd_devolvida": round(x.get("qtd_devolvida", 0), 4), "valor_devolvido": round(x.get("valor_devolvido", 0), 2),
-                      "cmv": x.get("cmv", 0)})
+                      "cmv": x.get("cmv", 0), "meses_sem_custo": x.get("meses_sem_custo", []),
+                      "margem": round((1 - x["cmv"] / liq) * 100, 1) if x.get("cmv") and liq and not x.get("meses_sem_custo") else None})
     itens.sort(key=lambda i: (-i["valor_vendido"], i["descricao"]))
-    return {"itens": itens, "sem_custo": sem_custo,
+    return {"itens": itens, "sem_custo": sem_custo, "vigencia": vigencia,
             "totais": {"valor_vendido": round(sum(i["valor_vendido"] for i in itens), 2),
                        "valor_devolvido": round(sum(i["valor_devolvido"] for i in itens), 2),
                        "cmv": round(sum(i["cmv"] for i in itens), 2)},
             "dominio_sync_periodo": e.dominio_sync_periodo}
 
 
-def _set_custo(p: Produto, custo, u):
+def _set_custo(s, p: Produto, custo, mes, u):
+    """Grava o custo a partir do mês; custo vazio apaga a vigência daquele mês."""
     if custo is not None and custo < 0:
         raise HTTPException(400, "O custo não pode ser negativo.")
-    p.custo = round(custo, 4) if custo is not None else None
+    x = s.scalar(select(ProdutoCusto).where(ProdutoCusto.produto_id == p.id, ProdutoCusto.mes_inicio == mes))
+    if custo is None:
+        if x:
+            s.delete(x)
+        return
+    if not x:
+        x = ProdutoCusto(produto_id=p.id, mes_inicio=mes, custo=0)
+        s.add(x)
+    x.custo, x.criado_em, x.criado_por = round(custo, 4), agora(), u.email
     p.custo_em, p.custo_por = agora(), u.email
 
 
@@ -706,71 +726,121 @@ def _set_custo(p: Produto, custo, u):
 async def produto_custo(pid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
     p = s.get(Produto, pid) or _404()
     b = await request.json()
-    _set_custo(p, _num_br(b.get("custo")), u)
-    audit(s, u.email, "CUSTO", f"{p.empresa_id} {p.codigo} = {p.custo}")
+    mes = _mes_ok(b.get("vigencia"), "Vigência")
+    custo = _num_br(b.get("custo"))
+    _set_custo(s, p, custo, mes, u)
+    audit(s, u.email, "CUSTO", f"{p.empresa_id} {p.codigo} a partir de {mes} = {custo}")
     s.commit()
-    return {"ok": True, "custo": float(p.custo) if p.custo is not None else None}
+    return {"ok": True, "custo": dominio.custo_no_mes(dominio.vigencias(s, p.empresa_id).get(p.produto), mes)}
+
+
+@app.get("/api/produtos/{pid}/custos")
+def produto_historico(pid: int, _u=Depends(usuario), s=Depends(get_db)):
+    p = s.get(Produto, pid) or _404()
+    return {"produto": {"id": p.id, "codigo": p.codigo, "descricao": p.descricao, "unidade": p.unidade},
+            "custos": [{"id": c.id, "mes_inicio": c.mes_inicio, "custo": float(c.custo), "criado_em": dt2s(c.criado_em),
+                        "criado_por": c.criado_por}
+                       for c in s.scalars(select(ProdutoCusto).where(ProdutoCusto.produto_id == p.id)
+                                          .order_by(ProdutoCusto.mes_inicio.desc())).all()]}
+
+
+@app.delete("/api/produtos/{pid}/custos/{cid}")
+def produto_custo_excluir(pid: int, cid: int, u=Depends(usuario), s=Depends(get_db)):
+    c = s.get(ProdutoCusto, cid)
+    if not c or c.produto_id != pid:
+        _404()
+    p = s.get(Produto, pid)
+    audit(s, u.email, "CUSTO_EXCLUI", f"{p.empresa_id} {p.codigo} vigência {c.mes_inicio} ({c.custo})")
+    s.delete(c)
+    s.commit()
+    return {"ok": True}
 
 
 @app.get("/api/empresas/{eid}/produtos.xlsx")
-def produtos_excel(eid: int, inicio: str, fim: str, u=Depends(usuario), s=Depends(get_db)):
+def produtos_excel(eid: int, inicio: str, fim: str, vigencia: str = "", u=Depends(usuario), s=Depends(get_db)):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
     e = s.get(Empresa, eid) or _404()
-    r = produtos(eid, inicio, fim, u, s)
+    r = produtos(eid, inicio, fim, vigencia, u, s)
     wb = Workbook()
     ws = wb.active
     ws.title = "Custos"
-    cab = ["Código interno", "Código", "Descrição", "Unidade", "Custo unitário", "Qtd vendida", "Faturamento",
-           "Qtd devolvida", "CMV no período"]
+    cab = ["Código interno", "Código", "Descrição", "Unidade", "Vigência (AAAA-MM)", "Custo unitário", "Qtd vendida",
+           "Faturamento", "Qtd devolvida", "CMV no período"]
     ws.append(cab)
     for c in ws[1]:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="1F3A5F")
     for i in r["itens"]:
-        ws.append([i["produto"], i["codigo"], i["descricao"], i["unidade"], i["custo"], i["qtd_vendida"], i["valor_vendido"],
-                   i["qtd_devolvida"], i["cmv"]])
-    for col, w in zip("ABCDEFGHI", (14, 16, 50, 9, 15, 13, 15, 13, 15)):
+        ws.append([i["produto"], i["codigo"], i["descricao"], i["unidade"], r["vigencia"], i["custo"], i["qtd_vendida"],
+                   i["valor_vendido"], i["qtd_devolvida"], i["cmv"]])
+    for col, w in zip("ABCDEFGHIJ", (14, 16, 50, 9, 18, 15, 13, 15, 13, 15)):
         ws.column_dimensions[col].width = w
     for row in ws.iter_rows(min_row=2):
-        row[4].number_format = "#,##0.0000"
-        row[4].fill = PatternFill("solid", fgColor="FFF7D6")
-        for c in (row[6], row[8]):
+        row[5].number_format = "#,##0.0000"
+        row[4].fill = row[5].fill = PatternFill("solid", fgColor="FFF7D6")
+        for c in (row[7], row[9]):
             c.number_format = "#,##0.00"
+    ws2 = wb.create_sheet("Como preencher")
+    for t in ("Preencha 'Custo unitário' e, se quiser, troque a 'Vigência (AAAA-MM)': o custo vale a partir desse mês "
+              "até a próxima vigência do produto.",
+              "Para lançar vários meses do mesmo produto, repita a linha com outra vigência.",
+              "Linhas com custo vazio são ignoradas (não apagam nada). Para apagar uma vigência, use o histórico na tela."):
+        ws2.append([t])
+    ws2.column_dimensions["A"].width = 120
     ws.freeze_panes = "A2"
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
     nome = re.sub(r"[^A-Za-z0-9]+", "_", e.nome)[:40]
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                             headers={"Content-Disposition": f'attachment; filename="Custos_{nome}.xlsx"'})
+                             headers={"Content-Disposition": f'attachment; filename="Custos_{nome}_{r["vigencia"]}.xlsx"'})
+
+
+def _mes_planilha(v, padrao):
+    if v in (None, ""):
+        return padrao
+    if isinstance(v, (dt.date, dt.datetime)):
+        return f"{v.year:04d}-{v.month:02d}"
+    t = str(v).strip()
+    m = re.fullmatch(r"(\d{4})[-/](\d{1,2})(?:[-/]\d{1,2})?", t) or None
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
+    m = re.fullmatch(r"(\d{1,2})[-/](\d{4})", t)
+    if m:
+        return f"{int(m.group(2)):04d}-{int(m.group(1)):02d}"
+    raise HTTPException(400, f"Vigência inválida na planilha: {t} (use AAAA-MM).")
 
 
 @app.post("/api/empresas/{eid}/produtos/importar")
 async def produtos_importar(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
-    """Planilha (base64) com 'Código interno' ou 'Código' e 'Custo unitário'. Linhas sem custo são ignoradas."""
+    """Planilha (base64) com 'Código interno' ou 'Código', 'Custo unitário' e (opcional) 'Vigência (AAAA-MM)'."""
     import base64
     from openpyxl import load_workbook
     e = s.get(Empresa, eid) or _404()
     b = await request.json()
+    padrao = _mes_ok(b.get("vigencia"), "Vigência")
     try:
         wb = load_workbook(io.BytesIO(base64.b64decode(b.get("arquivo") or "")), data_only=True, read_only=True)
     except Exception:  # noqa: BLE001
         raise HTTPException(400, "Não consegui abrir a planilha. Use o arquivo .xlsx baixado em Baixar planilha.") from None
-    linhas = list(wb.active.iter_rows(values_only=True))
+    ws = wb["Custos"] if "Custos" in wb.sheetnames else wb.active
+    linhas = list(ws.iter_rows(values_only=True))
     if not linhas:
         raise HTTPException(400, "Planilha vazia.")
     cab = [re.sub(r"\s+", " ", str(c or "").strip().lower()) for c in linhas[0]]
 
     def idx(*nomes):
         return next((cab.index(n) for n in nomes if n in cab), None)
-    i_int, i_cod, i_custo = idx("código interno", "codigo interno"), idx("código", "codigo"), idx("custo unitário", "custo unitario", "custo")
+    i_int, i_cod = idx("código interno", "codigo interno"), idx("código", "codigo")
+    i_custo = idx("custo unitário", "custo unitario", "custo")
+    i_vig = idx("vigência (aaaa-mm)", "vigencia (aaaa-mm)", "vigência", "vigencia", "a partir de")
     if i_custo is None or (i_int is None and i_cod is None):
         raise HTTPException(400, "A planilha precisa das colunas 'Código interno' (ou 'Código') e 'Custo unitário'.")
     prods = s.scalars(select(Produto).where(Produto.empresa_id == e.id)).all()
     por_int = {p.produto: p for p in prods}
     por_cod = {p.codigo.strip().upper(): p for p in prods if p.codigo}
-    ok, nao = 0, []
+    ok, nao, meses = 0, [], set()
     for ln in linhas[1:]:
         if not ln or i_custo >= len(ln) or ln[i_custo] in (None, ""):
             continue
@@ -782,11 +852,14 @@ async def produtos_importar(eid: int, request: Request, u=Depends(usuario), s=De
         if not p:
             nao.append(chave_cod or chave_int)
             continue
-        _set_custo(p, _num_br(ln[i_custo]), u)
+        mes = _mes_planilha(ln[i_vig] if i_vig is not None and i_vig < len(ln) else None, padrao)
+        _set_custo(s, p, _num_br(ln[i_custo]), mes, u)
+        s.flush()
+        meses.add(mes)
         ok += 1
-    audit(s, u.email, "CUSTO_IMPORTA", f"{e.id}: {ok} atualizados, {len(nao)} não encontrados")
+    audit(s, u.email, "CUSTO_IMPORTA", f"{e.id}: {ok} custos ({', '.join(sorted(meses))}), {len(nao)} não encontrados")
     s.commit()
-    return {"ok": True, "atualizados": ok, "nao_encontrados": nao[:50]}
+    return {"ok": True, "atualizados": ok, "meses": sorted(meses), "nao_encontrados": nao[:50]}
 
 
 # ------------------------------------------------------------------ modelos de DRE
