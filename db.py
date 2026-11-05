@@ -169,6 +169,36 @@ class DominioValor(Base):
     qtd: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class DominioItem(Base):
+    """Itens das notas da Domínio por mês, lado (S saída, E entrada), CFOP e produto — base do CMV."""
+    __tablename__ = "dominio_itens"
+    __table_args__ = (UniqueConstraint("empresa_id", "mes", "lado", "cfop", "produto"),
+                      Index("ix_ditem_emp_mes", "empresa_id", "mes"))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    mes: Mapped[str] = mapped_column(String(7))
+    lado: Mapped[str] = mapped_column(String(1))
+    cfop: Mapped[int] = mapped_column(Integer, default=0)
+    produto: Mapped[str] = mapped_column(String(40))
+    qtd: Mapped[float] = mapped_column(Numeric(18, 4), default=0)
+    valor: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+
+
+class Produto(Base):
+    """Produto da empresa (vindo das notas da Domínio) com o custo unitário informado pelo usuário."""
+    __tablename__ = "produtos"
+    __table_args__ = (UniqueConstraint("empresa_id", "produto"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    produto: Mapped[str] = mapped_column(String(40))  # código interno da Domínio (codi_pdi)
+    codigo: Mapped[str] = mapped_column(String(60), default="")
+    descricao: Mapped[str] = mapped_column(String(200), default="")
+    unidade: Mapped[str] = mapped_column(String(10), default="")
+    custo: Mapped[float | None] = mapped_column(Numeric(15, 4), nullable=True)
+    custo_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    custo_por: Mapped[str] = mapped_column(String(200), default="")
+
+
 class Job(Base):
     """Atividade em segundo plano (sincronização com o Bling, leitura da Domínio)."""
     __tablename__ = "jobs"

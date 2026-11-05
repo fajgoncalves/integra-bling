@@ -10,7 +10,7 @@ import time
 import httpx
 from sqlalchemy import select, delete
 
-from db import SessionLocal, Empresa, ContaOrigem, DominioValor, Job, agora
+from db import SessionLocal, Empresa, ContaOrigem, DominioValor, DominioItem, Produto, LinhaDRE, Job, agora
 from seguranca import get_config, decifrar
 
 # contas de origem da Domínio (código, descrição, tipo)
@@ -20,7 +20,10 @@ GRUPOS = [
     ("DEV_VENDA", "Devoluções de venda (NF de entrada)", "D"),
     ("DEV_COMPRA", "Devoluções de compra (NF de saída)", "R"),
     ("OUTRAS_SAIDAS", "Outras saídas (remessas, transferências, ativo etc.)", "R"),
+    ("CMV", "CMV calculado (vendas − devoluções de venda, × custo do produto)", "D"),
 ]
+# sugestão de associação das contas da Domínio no modelo padrão
+SUGESTAO = {"VENDAS": "RB_VENDAS", "SERVICOS": "RB_SERV", "DEV_VENDA": "DED_DEV", "DEV_COMPRA": "CMV_DEVC", "CMV": "CMV"}
 NOMES = {g[0]: g[1] for g in GRUPOS}
 
 DEVOLUCAO_VENDA = {1201, 1202, 1203, 1204, 1410, 1411, 2201, 2202, 2203, 2204, 2410, 2411, 3201, 3202}
@@ -61,6 +64,63 @@ def garantir_contas(s, empresa_id: int):
             s.add(ContaOrigem(empresa_id=empresa_id, origem="DOMINIO", codigo=cod, descricao=desc, tipo=tipo))
 
 
+def aplicar_sugestoes(s, e: Empresa):
+    """Cria as contas da Domínio e associa às linhas sugeridas do modelo, quando ainda não associadas."""
+    garantir_contas(s, e.id)
+    s.flush()
+    if not e.modelo_id:
+        return
+    linhas = {ln.codigo: ln.id for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == e.modelo_id,
+                                                                          LinhaDRE.tipo == "CONTA")).all()}
+    for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == e.id, ContaOrigem.origem == "DOMINIO")).all():
+        sug = SUGESTAO.get(c.codigo)
+        if not c.linha_id and sug in linhas:
+            c.linha_id = linhas[sug]
+
+
+def eh_venda(cfop: int) -> bool:
+    return grupo_saida(cfop) == "VENDAS"
+
+
+def cmv(s, empresa_id: int, ini: str, fim: str):
+    """CMV por mês e por produto: (quantidade vendida − quantidade devolvida) × custo unitário.
+    Devolve {mes: cmv}, {produto: {...}} e o faturamento dos produtos sem custo."""
+    custos = {p.produto: p for p in s.scalars(select(Produto).where(Produto.empresa_id == empresa_id)).all()}
+    por_mes, por_prod = {}, {}
+    for it in s.scalars(select(DominioItem).where(DominioItem.empresa_id == empresa_id, DominioItem.mes >= ini,
+                                                  DominioItem.mes <= fim)).all():
+        if it.lado == "S" and eh_venda(it.cfop):
+            sinal = 1
+        elif it.lado == "E" and it.cfop in DEVOLUCAO_VENDA:
+            sinal = -1
+        else:
+            continue
+        p = custos.get(it.produto)
+        x = por_prod.setdefault(it.produto, {"produto": it.produto, "codigo": p.codigo if p else it.produto,
+                                             "descricao": p.descricao if p else "", "unidade": p.unidade if p else "",
+                                             "custo": float(p.custo) if p and p.custo is not None else None,
+                                             "qtd_vendida": 0.0, "valor_vendido": 0.0, "qtd_devolvida": 0.0,
+                                             "valor_devolvido": 0.0, "cmv": 0.0, "id": p.id if p else None})
+        q, v = float(it.qtd or 0), float(it.valor or 0)
+        if sinal > 0:
+            x["qtd_vendida"] += q
+            x["valor_vendido"] += v
+        else:
+            x["qtd_devolvida"] += q
+            x["valor_devolvido"] += v
+        if x["custo"] is not None:
+            c = sinal * q * x["custo"]
+            x["cmv"] += c
+            por_mes[it.mes] = por_mes.get(it.mes, 0.0) + c
+    sem_custo = {"produtos": 0, "faturamento": 0.0}
+    for x in por_prod.values():
+        x["cmv"] = round(x["cmv"], 2)
+        if x["custo"] is None and x["qtd_vendida"]:
+            sem_custo["produtos"] += 1
+            sem_custo["faturamento"] += x["valor_vendido"]
+    return {m: round(v, 2) for m, v in por_mes.items()}, por_prod, sem_custo
+
+
 def central(s):
     url = get_config(s, "central_url").rstrip("/")
     chave = decifrar(get_config(s, "central_chave"))
@@ -86,7 +146,34 @@ def gravar_resultado(s, empresa_id: int, res: dict, ini_mes: str, fim_mes: str):
     for (mes, g, cfop), (v, q) in soma.items():
         if mes and ini_mes <= mes <= fim_mes:
             s.add(DominioValor(empresa_id=empresa_id, mes=mes, grupo=g, cfop=cfop, valor=round(v, 2), qtd=q))
-    garantir_contas(s, empresa_id)
+    # itens das notas (produtos) — base do CMV
+    s.execute(delete(DominioItem).where(DominioItem.empresa_id == empresa_id, DominioItem.mes >= ini_mes,
+                                        DominioItem.mes <= fim_mes))
+    itens = {}
+    for lado, lista in (("S", res.get("itens_saida") or []), ("E", res.get("itens_entrada") or [])):
+        for x in lista:
+            k = (x["mes"], lado, int(x.get("cfop") or 0), str(x.get("produto") or "").strip()[:40])
+            if not k[0] or not k[3] or not ini_mes <= k[0] <= fim_mes:
+                continue
+            v = itens.setdefault(k, [0.0, 0.0])
+            v[0] += float(x.get("qtd") or 0)
+            v[1] += float(x.get("valor") or 0)
+    for (mes, lado, cfop, prod), (q, v) in itens.items():
+        s.add(DominioItem(empresa_id=empresa_id, mes=mes, lado=lado, cfop=cfop, produto=prod, qtd=round(q, 4), valor=round(v, 2)))
+    cad = {p.produto: p for p in s.scalars(select(Produto).where(Produto.empresa_id == empresa_id)).all()}
+    info = {str(p.get("produto")): p for p in res.get("produtos") or []}
+    for prod in {k[3] for k in itens}:
+        p = cad.get(prod)
+        if not p:
+            p = Produto(empresa_id=empresa_id, produto=prod)
+            s.add(p)
+            cad[prod] = p
+        i = info.get(prod) or {}
+        p.codigo = (i.get("codigo") or p.codigo or prod)[:60]
+        p.descricao = (i.get("descricao") or p.descricao or "")[:200]
+        p.unidade = (i.get("unidade") or p.unidade or "")[:10]
+    e = s.get(Empresa, empresa_id)
+    aplicar_sugestoes(s, e)
 
 
 def importar(job_id: int, http=None, espera=5, limite_s=1800):

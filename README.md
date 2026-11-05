@@ -7,7 +7,8 @@ DRE multiempresa montada com os dados do **Bling** (categorias financeiras e lan
 2. **Conexões e dados**: *Conectar ao Bling* (o usuário do Bling da empresa autoriza a leitura) → *Atualizar do Bling* (categorias + lançamentos de Caixa e Bancos do período, separados por categoria com o filtro do próprio Bling; contas a pagar/receber em aberto não entram). *Ler da Domínio* pede à Central a tarefa `dre_dominio`; o Agente 360 devolve os totais por mês e CFOP.
 3. **Associação de contas**: de um lado as contas de origem (categorias do Bling e grupos da Domínio), do outro a linha da DRE. Botão **Consultar** mostra os lançamentos de caixa (Bling) ou os CFOPs (Domínio) de cada conta. Dá para copiar as associações de outra empresa (casando pelo nome).
 4. **Modelos de DRE**: linhas do tipo *Conta* (recebem as associações; sinal automático = entrada +, saída −), *Total* (fórmula com códigos das linhas de cima, ex. `RB + DED_DEV`) e *Título*. Uma linha marcada como base da análise vertical (AV).
-5. **DRE**: mês a mês — Bling pela data do pagamento/recebimento (regime de caixa), Domínio pelo mês da nota — com análise vertical, composição de cada linha, contas sem associação e exportação para Excel.
+5. **Custo dos produtos (CMV)**: os itens das notas de venda e de devolução de venda vêm da Domínio por produto; o usuário informa o custo unitário de cada produto (na tela ou por planilha). CMV = (qtd vendida − qtd devolvida) × custo, na conta "CMV calculado" da Domínio. Exige Agente 360 0.14.0.
+6. **DRE**: mês a mês — Bling pela data do pagamento/recebimento (regime de caixa), Domínio pelo mês da nota — com análise vertical, composição de cada linha, contas sem associação e exportação para Excel.
 
 ### Grupos da Domínio
 | Conta | Regra |
@@ -17,6 +18,7 @@ DRE multiempresa montada com os dados do **Bling** (categorias financeiras e lan
 | Devoluções de venda | Entradas 1/2.201–204, 1/2.410–411, 3.201–202 |
 | Devoluções de compra | Saídas x.201–212, x.410–413, x.503, x.553, x.555, x.556, x.660–662 |
 | Outras saídas | Demais saídas (remessas, transferências, ativo...) — por padrão fora da DRE |
+| CMV calculado | Itens de venda × custo − itens devolvidos (entradas de devolução de venda) × custo |
 
 ## Publicar no Railway
 1. Projeto com um serviço apontando para este repositório + banco **Postgres**.

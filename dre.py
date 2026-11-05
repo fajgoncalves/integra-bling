@@ -40,8 +40,6 @@ MODELO_PADRAO = [
     ("LL", "(=) Lucro líquido", "TOTAL", 0, "LAIR + IR", True, False),
 ]
 
-# sugestão de associação das contas da Domínio no modelo padrão
-SUGESTAO_DOMINIO = {"VENDAS": "RB_VENDAS", "SERVICOS": "RB_SERV", "DEV_VENDA": "DED_DEV", "DEV_COMPRA": "CMV_DEVC"}
 
 TOKEN = re.compile(r"\s*([+-]?)\s*([A-Za-z0-9_]+)\s*")
 
@@ -141,6 +139,13 @@ def valores_origem(s, empresa_id: int, ini: str, fim: str):
         c = por_cod.get(("DOMINIO", g)) if g else None
         if c:
             vals[c.id][v.mes] += SINAL_DOMINIO.get(g, 1) * float(v.valor or 0)
+    c = por_cod.get(("DOMINIO", "CMV"))
+    sem_custo = {"produtos": 0, "faturamento": 0.0}
+    if c:
+        por_mes, _p, sem_custo = dominio.cmv(s, empresa_id, ini, fim)
+        for m, v in por_mes.items():
+            vals[c.id][m] -= v  # custo: saída
+    sem_categoria["sem_custo"] = sem_custo
     return contas, vals, sem_categoria
 
 
@@ -198,6 +203,17 @@ def calcular(s, empresa, ini: str, fim: str):
         if abs(t) >= 0.005:
             nao.append({"conta_id": c.id, "origem": c.origem, "descricao": c.descricao, "total": round(t, 2),
                         "natureza": "R" if t >= 0 else "D"})
+    cmv_dom = next((c for c in contas if c.origem == "DOMINIO" and c.codigo == "CMV" and c.linha_id), None)
+    if cmv_dom:
+        juntos = [c.descricao for c in contas if c.origem == "BLING" and c.linha_id == cmv_dom.linha_id and vals.get(c.id)]
+        if juntos:
+            avisos.append("A linha do CMV soma o CMV calculado pela Domínio e também pagamentos do Bling ("
+                          + ", ".join(juntos[:4]) + "). Compra de mercadoria paga não é CMV: deixe essas categorias fora "
+                          "da DRE ou leve-as para outra linha, senão o custo é contado duas vezes.")
+    sc = sem_cat.get("sem_custo") or {}
+    if sc.get("produtos") and any(c.origem == "DOMINIO" and c.codigo == "CMV" and c.linha_id for c in contas):
+        avisos.append(f"CMV incompleto: {sc['produtos']} produto(s) vendido(s) no período sem custo informado "
+                      f"(faturamento de R$ {_br(sc['faturamento'])}). Informe na aba Custo dos produtos.")
     if sem_cat["C"] or sem_cat["D"]:
         avisos.append(f"Lançamentos de caixa e bancos sem categoria no período: entradas R$ {_br(sem_cat['C'])}, "
                       f"saídas R$ {_br(sem_cat['D'])} (não entram na DRE; podem ser transferências entre contas).")

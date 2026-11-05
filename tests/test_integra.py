@@ -1,4 +1,5 @@
 """Fluxo completo com Bling e Central simulados. Rodar: python -m pytest -q tests/test_integra.py"""
+import io
 import os
 import sys
 import json
@@ -85,7 +86,13 @@ def central_falsa(req: httpx.Request):
         "saidas": [{"mes": "2026-01", "cfop": 5102, "valor": 8000, "qtd": 4}, {"mes": "2026-01", "cfop": 5202, "valor": 200, "qtd": 1},
                    {"mes": "2026-02", "cfop": 5949, "valor": 50, "qtd": 1}],
         "entradas": [{"mes": "2026-02", "cfop": 1202, "valor": 300, "qtd": 1}, {"mes": "2026-02", "cfop": 1102, "valor": 4000, "qtd": 2}],
-        "servicos": [{"mes": "2026-02", "valor": 1000, "qtd": 1}]}})
+        "servicos": [{"mes": "2026-02", "valor": 1000, "qtd": 1}],
+        "itens_saida": [{"mes": "2026-01", "cfop": 5102, "produto": "100", "qtd": 10, "valor": 6000},
+                        {"mes": "2026-01", "cfop": 5102, "produto": "200", "qtd": 4, "valor": 2000},
+                        {"mes": "2026-01", "cfop": 5202, "produto": "300", "qtd": 1, "valor": 200}],  # devolução de compra: não é CMV
+        "itens_entrada": [{"mes": "2026-02", "cfop": 1202, "produto": "100", "qtd": 1, "valor": 300}],
+        "produtos": [{"produto": "100", "codigo": "CAM-001", "descricao": "Camiseta", "unidade": "UN"},
+                     {"produto": "200", "codigo": "BON-9", "descricao": "Boné", "unidade": "UN"}]}})
 
 
 def test_fluxo_completo():
@@ -100,7 +107,7 @@ def test_fluxo_completo():
         modelos = c.get("/api/modelos").json()
         assert len(modelos) == 1 and any(ln["codigo"] == "LL" for ln in modelos[0]["linhas"])
         e = c.post("/api/empresas", json={"nome": "Alfa", "cnpj": "12.345.678/0001-90", "codigo_dominio": "77"}).json()
-        assert e["modelo_id"] == modelos[0]["id"] and e["contas"]["DOMINIO"]["associadas"] == 4  # sugestões da Domínio
+        assert e["modelo_id"] == modelos[0]["id"] and e["contas"]["DOMINIO"]["associadas"] == 5  # sugestões da Domínio (com o CMV)
         assert c.post("/api/empresas", json={"nome": "Dup", "cnpj": "12345678000190"}).status_code == 400
 
         # OAuth
@@ -146,6 +153,31 @@ def test_fluxo_completo():
         finally:
             dominio.httpx.Client = orig_d
 
+        # custo dos produtos e CMV
+        pr = c.get(f"/api/empresas/{e['id']}/produtos?inicio=2026-01&fim=2026-03").json()
+        P = {x["codigo"]: x for x in pr["itens"]}
+        assert P["CAM-001"]["qtd_vendida"] == 10 and P["CAM-001"]["qtd_devolvida"] == 1 and P["CAM-001"]["custo"] is None
+        assert pr["sem_custo"]["produtos"] == 2
+        assert c.put(f"/api/produtos/{P['CAM-001']['id']}", json={"custo": "25,00"}).json()["custo"] == 25
+        assert c.put(f"/api/produtos/{P['CAM-001']['id']}", json={"custo": "-1"}).status_code == 400
+        d0 = c.get(f"/api/empresas/{e['id']}/dre?inicio=2026-01&fim=2026-03").json()
+        assert any("CMV incompleto: 1 produto" in a for a in d0["avisos"])
+        # importar custo pela planilha baixada
+        import base64
+        from openpyxl import load_workbook
+        x = c.get(f"/api/empresas/{e['id']}/produtos.xlsx?inicio=2026-01&fim=2026-03")
+        wb = load_workbook(io.BytesIO(x.content))
+        ws = wb.active
+        for row in ws.iter_rows(min_row=2):
+            if row[1].value == "BON-9":
+                row[4].value = 50
+        buf = io.BytesIO()
+        wb.save(buf)
+        r = c.post(f"/api/empresas/{e['id']}/produtos/importar", json={"arquivo": base64.b64encode(buf.getvalue()).decode()}).json()
+        assert r["atualizados"] == 2 and r["nao_encontrados"] == []
+        cm = c.get(f"/api/empresas/{e['id']}/produtos?inicio=2026-01&fim=2026-03").json()
+        assert cm["totais"]["cmv"] == 10 * 25 + 4 * 50 - 25 and cm["sem_custo"]["produtos"] == 0
+
         # associação
         ct = c.get(f"/api/empresas/{e['id']}/contas?inicio=2026-01&fim=2026-03").json()["contas"]
         por = {x["descricao"]: x for x in ct}
@@ -174,7 +206,13 @@ def test_fluxo_completo():
         assert L["DV_COM"]["valores"] == [-420.5, 20, 0]
         assert len(L["DV_COM"]["composicao"]) == 2
         assert L["DF"]["total"] == -45
-        assert L["LL"]["total"] == round(8700 + 200 - 400.5 - 45, 2)
+        assert L["CMV"]["valores"] == [-450, 25, 0]
+        assert L["LL"]["total"] == round(8700 + 200 - 425 - 400.5 - 45, 2)
+        ct2 = {x["descricao"]: x for x in c.get(f"/api/empresas/{e['id']}/contas").json()["contas"]}
+        dv = c.get(f"/api/contas/{ct2['Vendas de mercadorias e produtos (NF de saída)']['id']}/detalhe?inicio=2026-01&fim=2026-03").json()
+        assert [p["codigo"] for p in dv["produtos"]] == ["CAM-001", "BON-9"]
+        dc = c.get(f"/api/contas/{ct2['CMV calculado (vendas − devoluções de venda, × custo do produto)']['id']}/detalhe?inicio=2026-01&fim=2026-03").json()
+        assert dc["tipo"] == "cmv" and dc["total"] == -425
         assert any(x["descricao"] == "Vendas" for x in d["nao_associadas"])  # recebimentos de vendas ficam de fora (Domínio já traz)
         assert any("sem categoria" in a and "1.000,00" in a for a in d["avisos"])
         x = c.get(f"/api/empresas/{e['id']}/dre.xlsx?inicio=2026-01&fim=2026-03")

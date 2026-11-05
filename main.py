@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func
 
 import db
-from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Movimento, DominioValor, Job,
+from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Movimento, DominioValor, DominioItem, Produto, Job,
                 Auditoria, agora, PERFIS, TIPOS_LINHA)
 import bling
 import dominio
@@ -22,7 +22,7 @@ import dre
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.1.0"
+VERSAO = "1.2.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -320,16 +320,7 @@ def _emp_json(s, e: Empresa):
 
 
 def _aplicar_sugestoes(s, e: Empresa):
-    """Associa as contas da Domínio às linhas sugeridas do modelo, quando ainda não associadas."""
-    dominio.garantir_contas(s, e.id)
-    s.flush()
-    if not e.modelo_id:
-        return
-    linhas = {ln.codigo: ln.id for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == e.modelo_id)).all()}
-    for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == e.id, ContaOrigem.origem == "DOMINIO")).all():
-        sug = dre.SUGESTAO_DOMINIO.get(c.codigo)
-        if not c.linha_id and sug in linhas:
-            c.linha_id = linhas[sug]
+    dominio.aplicar_sugestoes(s, e)
 
 
 def _ler_empresa(b, e: Empresa, s):
@@ -629,6 +620,27 @@ def conta_detalhe(cid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depend
                                     .order_by(Movimento.data, Movimento.id)).all()]
         return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "caixa", "itens": itens,
                 "total": round(sum(i["valor"] for i in itens), 2)}
+    if c.codigo == "CMV":
+        _pm, por_prod, sem = dominio.cmv(s, c.empresa_id, inicio, fim)
+        itens = sorted(({k: v for k, v in x.items() if k != "id"} for x in por_prod.values()), key=lambda x: -x["valor_vendido"])
+        return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "cmv", "itens": itens,
+                "total": round(-sum(x["cmv"] for x in itens), 2), "sem_custo": sem}
+    produtos_ = []
+    if c.codigo in ("VENDAS", "DEV_VENDA"):
+        cad = {p.produto: p for p in s.scalars(select(Produto).where(Produto.empresa_id == c.empresa_id)).all()}
+        agg = {}
+        for it in s.scalars(select(DominioItem).where(DominioItem.empresa_id == c.empresa_id, DominioItem.mes >= inicio,
+                                                      DominioItem.mes <= fim)).all():
+            ok = (it.lado == "S" and dominio.eh_venda(it.cfop)) if c.codigo == "VENDAS" else \
+                 (it.lado == "E" and it.cfop in dominio.DEVOLUCAO_VENDA)
+            if ok:
+                x = agg.setdefault(it.produto, [0.0, 0.0])
+                x[0] += float(it.qtd or 0)
+                x[1] += float(it.valor or 0)
+        for k, (q, v) in sorted(agg.items(), key=lambda kv: -kv[1][1]):
+            p = cad.get(k)
+            produtos_.append({"codigo": p.codigo if p else k, "descricao": p.descricao if p else "", "unidade": p.unidade if p else "",
+                              "qtd": round(q, 4), "valor": round(v, 2)})
     itens = []
     for v in s.scalars(select(DominioValor).where(DominioValor.empresa_id == c.empresa_id, DominioValor.mes >= inicio,
                                                   DominioValor.mes <= fim).order_by(DominioValor.mes, DominioValor.cfop)).all():
@@ -637,11 +649,144 @@ def conta_detalhe(cid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depend
                                                     "SERVICO": "Serviços prestados"}[v.grupo],
                           "cfop": v.cfop or None, "qtd": v.qtd, "valor": float(v.valor)})
     return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "cfops", "itens": itens,
-            "total": round(sum(i["valor"] for i in itens), 2)}
+            "total": round(sum(i["valor"] for i in itens), 2), "produtos": produtos_}
 
 
 ORIGENS_CAIXA = {"caixa": "Lançamento manual", "duplicata": "Conta a pagar/receber", "bordero": "Baixa (borderô)",
                  "estoque": "Estoque"}
+
+
+# ------------------------------------------------------------------ custo dos produtos (CMV)
+def _num_br(v):
+    """Aceita 12,50 / 1.234,56 / 12.5 / número."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    t = str(v).strip().replace("R$", "").replace(" ", "")
+    if "," in t:
+        t = t.replace(".", "").replace(",", ".")
+    try:
+        return float(t)
+    except ValueError:
+        raise HTTPException(400, f"Valor inválido: {v}") from None
+
+
+@app.get("/api/empresas/{eid}/produtos")
+def produtos(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    """Produtos da empresa com venda/devolução no período, custo unitário informado e CMV."""
+    e = s.get(Empresa, eid) or _404()
+    _mes_ok(inicio, "Início")
+    _mes_ok(fim, "Fim")
+    _pm, por_prod, sem_custo = dominio.cmv(s, e.id, inicio, fim)
+    itens = []
+    for p in s.scalars(select(Produto).where(Produto.empresa_id == e.id)).all():
+        x = por_prod.get(p.produto) or {}
+        itens.append({"id": p.id, "produto": p.produto, "codigo": p.codigo, "descricao": p.descricao, "unidade": p.unidade,
+                      "custo": float(p.custo) if p.custo is not None else None, "custo_em": dt2s(p.custo_em), "custo_por": p.custo_por,
+                      "qtd_vendida": round(x.get("qtd_vendida", 0), 4), "valor_vendido": round(x.get("valor_vendido", 0), 2),
+                      "qtd_devolvida": round(x.get("qtd_devolvida", 0), 4), "valor_devolvido": round(x.get("valor_devolvido", 0), 2),
+                      "cmv": x.get("cmv", 0)})
+    itens.sort(key=lambda i: (-i["valor_vendido"], i["descricao"]))
+    return {"itens": itens, "sem_custo": sem_custo,
+            "totais": {"valor_vendido": round(sum(i["valor_vendido"] for i in itens), 2),
+                       "valor_devolvido": round(sum(i["valor_devolvido"] for i in itens), 2),
+                       "cmv": round(sum(i["cmv"] for i in itens), 2)},
+            "dominio_sync_periodo": e.dominio_sync_periodo}
+
+
+def _set_custo(p: Produto, custo, u):
+    if custo is not None and custo < 0:
+        raise HTTPException(400, "O custo não pode ser negativo.")
+    p.custo = round(custo, 4) if custo is not None else None
+    p.custo_em, p.custo_por = agora(), u.email
+
+
+@app.put("/api/produtos/{pid}")
+async def produto_custo(pid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    p = s.get(Produto, pid) or _404()
+    b = await request.json()
+    _set_custo(p, _num_br(b.get("custo")), u)
+    audit(s, u.email, "CUSTO", f"{p.empresa_id} {p.codigo} = {p.custo}")
+    s.commit()
+    return {"ok": True, "custo": float(p.custo) if p.custo is not None else None}
+
+
+@app.get("/api/empresas/{eid}/produtos.xlsx")
+def produtos_excel(eid: int, inicio: str, fim: str, u=Depends(usuario), s=Depends(get_db)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    e = s.get(Empresa, eid) or _404()
+    r = produtos(eid, inicio, fim, u, s)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Custos"
+    cab = ["Código interno", "Código", "Descrição", "Unidade", "Custo unitário", "Qtd vendida", "Faturamento",
+           "Qtd devolvida", "CMV no período"]
+    ws.append(cab)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F3A5F")
+    for i in r["itens"]:
+        ws.append([i["produto"], i["codigo"], i["descricao"], i["unidade"], i["custo"], i["qtd_vendida"], i["valor_vendido"],
+                   i["qtd_devolvida"], i["cmv"]])
+    for col, w in zip("ABCDEFGHI", (14, 16, 50, 9, 15, 13, 15, 13, 15)):
+        ws.column_dimensions[col].width = w
+    for row in ws.iter_rows(min_row=2):
+        row[4].number_format = "#,##0.0000"
+        row[4].fill = PatternFill("solid", fgColor="FFF7D6")
+        for c in (row[6], row[8]):
+            c.number_format = "#,##0.00"
+    ws.freeze_panes = "A2"
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nome = re.sub(r"[^A-Za-z0-9]+", "_", e.nome)[:40]
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="Custos_{nome}.xlsx"'})
+
+
+@app.post("/api/empresas/{eid}/produtos/importar")
+async def produtos_importar(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    """Planilha (base64) com 'Código interno' ou 'Código' e 'Custo unitário'. Linhas sem custo são ignoradas."""
+    import base64
+    from openpyxl import load_workbook
+    e = s.get(Empresa, eid) or _404()
+    b = await request.json()
+    try:
+        wb = load_workbook(io.BytesIO(base64.b64decode(b.get("arquivo") or "")), data_only=True, read_only=True)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "Não consegui abrir a planilha. Use o arquivo .xlsx baixado em Baixar planilha.") from None
+    linhas = list(wb.active.iter_rows(values_only=True))
+    if not linhas:
+        raise HTTPException(400, "Planilha vazia.")
+    cab = [re.sub(r"\s+", " ", str(c or "").strip().lower()) for c in linhas[0]]
+
+    def idx(*nomes):
+        return next((cab.index(n) for n in nomes if n in cab), None)
+    i_int, i_cod, i_custo = idx("código interno", "codigo interno"), idx("código", "codigo"), idx("custo unitário", "custo unitario", "custo")
+    if i_custo is None or (i_int is None and i_cod is None):
+        raise HTTPException(400, "A planilha precisa das colunas 'Código interno' (ou 'Código') e 'Custo unitário'.")
+    prods = s.scalars(select(Produto).where(Produto.empresa_id == e.id)).all()
+    por_int = {p.produto: p for p in prods}
+    por_cod = {p.codigo.strip().upper(): p for p in prods if p.codigo}
+    ok, nao = 0, []
+    for ln in linhas[1:]:
+        if not ln or i_custo >= len(ln) or ln[i_custo] in (None, ""):
+            continue
+        chave_int = str(ln[i_int]).strip() if i_int is not None and ln[i_int] not in (None, "") else ""
+        chave_cod = str(ln[i_cod]).strip().upper() if i_cod is not None and ln[i_cod] not in (None, "") else ""
+        if chave_int.endswith(".0"):
+            chave_int = chave_int[:-2]
+        p = por_int.get(chave_int) or por_cod.get(chave_cod)
+        if not p:
+            nao.append(chave_cod or chave_int)
+            continue
+        _set_custo(p, _num_br(ln[i_custo]), u)
+        ok += 1
+    audit(s, u.email, "CUSTO_IMPORTA", f"{e.id}: {ok} atualizados, {len(nao)} não encontrados")
+    s.commit()
+    return {"ok": True, "atualizados": ok, "nao_encontrados": nao[:50]}
 
 
 # ------------------------------------------------------------------ modelos de DRE

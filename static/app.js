@@ -4,6 +4,8 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const brl = (v) => v == null ? "" : Number(v).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const brl4 = (v) => v == null ? "" : Number(v).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+const qtdBR = (v) => v == null ? "" : Number(v).toLocaleString("pt-BR", { maximumFractionDigits: 3 });
 const pct = (v) => v == null ? "" : `${Number(v).toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
 const mesBR = (m) => m ? `${m.slice(5, 7)}/${m.slice(0, 4)}` : "";
 const dataBR = (d) => d ? `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}` : "";
@@ -209,7 +211,7 @@ let pollJobs = null;
 async function telaEmpresa(id, aba, params) {
   clearInterval(pollJobs);
   const e = await api(`/api/empresas/${id}`);
-  const abas = [["conexoes", "Conexões e dados"], ["associacao", "Associação de contas"], ["dre", "DRE"]];
+  const abas = [["conexoes", "Conexões e dados"], ["associacao", "Associação de contas"], ["custos", "Custo dos produtos"], ["dre", "DRE"]];
   casca("empresas", `<div class="topo"><div><a href="#/empresas" class="peq">← Empresas</a><h1>${esc(e.nome)}</h1>
       <div class="suave">${cnpjFmt(e.cnpj) || "sem CNPJ"} · Domínio ${esc(e.codigo_dominio || "—")} · Modelo: ${esc(e.modelo_nome || "—")}</div></div>
       <button class="btn" id="editar">Editar empresa</button></div>
@@ -220,6 +222,7 @@ async function telaEmpresa(id, aba, params) {
   if (params.get("bling") === "erro") toast(`Bling: ${params.get("msg") || "não foi possível conectar"}`, true);
   if (aba === "associacao") return abaAssociacao(e);
   if (aba === "dre") return abaDre(e);
+  if (aba === "custos") return abaCustos(e);
   return abaConexoes(e);
 }
 
@@ -238,7 +241,7 @@ function abaConexoes(e) {
       <div class="suave peq" style="margin-top:10px">Lê as categorias financeiras e os lançamentos de <b>Caixa e Bancos</b> do período — só o que foi efetivamente pago ou recebido (somente leitura). Contas a pagar e a receber em aberto não entram. Pode levar alguns minutos.</div>
     </div>
     <div class="card"><h2>Domínio (Central 360)</h2>
-      <div class="suave peq" style="margin-bottom:10px">Faturamento (notas de saída e serviços) e devoluções, por CFOP, lidos pelo Agente 360 no banco da Domínio.</div>
+      <div class="suave peq" style="margin-bottom:10px">Faturamento (notas de saída e serviços), devoluções por CFOP e os <b>produtos de cada nota</b> (base do CMV), lidos pelo Agente 360 no banco da Domínio.</div>
       <div class="suave peq" style="margin-bottom:10px">Última leitura: ${e.dominio_sync_em ? `${dataHora(e.dominio_sync_em)} (${esc(e.dominio_sync_periodo)})` : "nunca"}</div>
       <div class="linha"><label>De <input type="month" id="d-ini" value="${p.inicio}"></label><label>Até <input type="month" id="d-fim" value="${p.fim}"></label></div>
       <div class="linha" style="margin-top:12px"><button class="btn pri" id="d-imp">Ler da Domínio</button></div>
@@ -368,10 +371,19 @@ async function consultarConta(c, e) {
       <div class="rolagem"><table><tr><th>Data</th><th>Conta</th><th>Contato</th><th>Descrição</th><th>Origem</th><th class="num">Valor</th></tr>
       ${r.itens.map((i) => `<tr><td>${dataBR(i.data)}</td><td class="peq">${esc(i.conta_financeira)}</td><td>${esc(i.contato)}</td>
         <td class="peq">${esc(i.descricao)}</td><td class="peq suave">${esc(i.origem)}</td><td class="num ${i.valor < 0 ? "neg" : ""}">${brl(i.valor)}</td></tr>`).join("")}</table></div>`;
+    } else if (r.tipo === "cmv") {
+      corpo.innerHTML = `<div class="kpi"><div>CMV<b class="neg">R$ ${brl(r.total)}</b></div><div>Produtos<b>${r.itens.length}</b></div>
+        ${r.sem_custo.produtos ? `<div style="border-color:#F1D9A6;background:var(--amarelo-cl)">Sem custo<b>${r.sem_custo.produtos}</b></div>` : ""}</div>
+      <div class="suave peq" style="margin-bottom:8px">(Quantidade vendida − devolvida) × custo unitário. Informe os custos na aba <a href="#/empresa/${e.id}/custos" data-fechar>Custo dos produtos</a>.</div>
+      <div class="rolagem"><table><tr><th>Produto</th><th class="num">Vendida</th><th class="num">Devolvida</th><th class="num">Custo unit.</th><th class="num">CMV</th></tr>
+      ${r.itens.map((i) => `<tr><td>${esc(i.codigo)} · ${esc(i.descricao)}</td><td class="num">${qtdBR(i.qtd_vendida)}</td><td class="num">${qtdBR(i.qtd_devolvida)}</td>
+        <td class="num">${i.custo == null ? '<span class="badge b-aviso">sem custo</span>' : brl4(i.custo)}</td><td class="num">${brl(i.cmv)}</td></tr>`).join("")}</table></div>`;
     } else {
+      const prods = r.produtos && r.produtos.length ? `<h3 style="margin-top:16px">Por produto</h3><div class="rolagem" style="max-height:40vh"><table><tr><th>Produto</th><th>Un</th><th class="num">Quantidade</th><th class="num">Valor dos itens</th></tr>
+        ${r.produtos.map((p) => `<tr><td>${esc(p.codigo)} · ${esc(p.descricao)}</td><td>${esc(p.unidade)}</td><td class="num">${qtdBR(p.qtd)}</td><td class="num">${brl(p.valor)}</td></tr>`).join("")}</table></div>` : "";
       corpo.innerHTML = `<div class="kpi"><div>Total<b>R$ ${brl(r.total)}</b></div></div>
-      <div class="rolagem"><table><tr><th>Mês</th><th>Origem</th><th>CFOP</th><th class="num">Notas</th><th class="num">Valor</th></tr>
-      ${r.itens.map((i) => `<tr><td>${mesBR(i.mes)}</td><td>${i.origem}</td><td class="mono">${i.cfop ? String(i.cfop).replace(/^(\d)/, "$1.") : "—"}</td><td class="num">${i.qtd}</td><td class="num">${brl(i.valor)}</td></tr>`).join("")}</table></div>`;
+      <div class="rolagem" style="max-height:40vh"><table><tr><th>Mês</th><th>Origem</th><th>CFOP</th><th class="num">Notas</th><th class="num">Valor</th></tr>
+      ${r.itens.map((i) => `<tr><td>${mesBR(i.mes)}</td><td>${i.origem}</td><td class="mono">${i.cfop ? String(i.cfop).replace(/^(\d)/, "$1.") : "—"}</td><td class="num">${i.qtd}</td><td class="num">${brl(i.valor)}</td></tr>`).join("")}</table></div>${prods}`;
     }
   };
   if ($("#cs-sync", m)) $("#cs-sync", m).onclick = (ev) => tentar(async () => {
@@ -431,6 +443,74 @@ async function abaDre(e) {
   };
   $("#av").onchange = () => r && desenhar();
   $("#xls").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/dre.xlsx?inicio=${p.inicio}&fim=${p.fim}`; };
+  await tentar(carregar);
+}
+
+
+// ------------------------------------------------------------------ custo dos produtos (CMV)
+async function abaCustos(e) {
+  const filtros = { q: "", sem: false };
+  $("#aba").innerHTML = `<div class="card">
+    <div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
+      <div class="linha"><button class="btn" id="cx-baixar">Baixar planilha</button><label class="btn" style="flex-direction:row">Importar planilha<input type="file" id="cx-imp" accept=".xlsx" hidden></label></div></div>
+    <div class="info peq" style="margin-top:12px">CMV = (quantidade vendida − quantidade devolvida) × custo unitário. As vendas e as devoluções de venda vêm dos itens das notas na Domínio (aba Conexões → Ler da Domínio).
+      Para muitos produtos: baixe a planilha, preencha a coluna <b>Custo unitário</b> e importe. Na DRE, a conta "CMV calculado" vai para a linha de CMV.</div>
+    <div id="cx-kpi" class="kpi"></div>
+    <div class="linha" style="margin-bottom:10px"><input id="cx-q" placeholder="Buscar produto..." style="flex:1;min-width:180px">
+      <label class="chk"><input type="checkbox" id="cx-sem"> Só sem custo</label></div>
+    <div class="rolagem"><table id="cx-tab"></table></div></div>`;
+  let r = null;
+  const carregar = async () => { const p = periodo(); r = await api(`/api/empresas/${e.id}/produtos?inicio=${p.inicio}&fim=${p.fim}`); desenhar(); };
+  const desenhar = () => {
+    $("#cx-kpi").innerHTML = `<div>Produtos<b>${r.itens.length}</b></div><div>Faturamento dos itens<b>R$ ${brl(r.totais.valor_vendido)}</b></div>
+      <div>CMV no período<b>R$ ${brl(r.totais.cmv)}</b></div>
+      <div style="${r.sem_custo.produtos ? "border-color:#F1D9A6;background:var(--amarelo-cl)" : ""}">Vendidos sem custo<b>${r.sem_custo.produtos}</b><span class="peq suave">R$ ${brl(r.sem_custo.faturamento)}</span></div>`;
+    const q = filtros.q.toLowerCase();
+    const lin = r.itens.filter((i) => (!filtros.sem || i.custo == null) && (!q || `${i.codigo} ${i.descricao}`.toLowerCase().includes(q)));
+    if (!r.itens.length) { $("#cx-tab").innerHTML = `<tr><td class="vazio">Nenhum produto ainda. Leia a Domínio na aba Conexões (precisa do Agente 360 na versão 0.14.0 ou superior).</td></tr>`; return; }
+    $("#cx-tab").innerHTML = `<tr><th>Código</th><th>Descrição</th><th>Un</th><th class="num">Qtd vendida</th><th class="num">Qtd devolvida</th><th class="num">Faturamento</th><th class="num">Preço médio</th><th class="num" style="width:150px">Custo unitário</th><th class="num">CMV</th><th class="num">Margem</th></tr>`
+      + lin.slice(0, 1500).map((i) => {
+        const pm = i.qtd_vendida ? i.valor_vendido / i.qtd_vendida : null;
+        const mg = pm && i.custo != null ? (1 - i.custo / pm) * 100 : null;
+        return `<tr data-id="${i.id}"><td class="mono">${esc(i.codigo)}</td><td>${esc(i.descricao)}</td><td>${esc(i.unidade)}</td>
+          <td class="num">${qtdBR(i.qtd_vendida)}</td><td class="num">${i.qtd_devolvida ? qtdBR(i.qtd_devolvida) : ""}</td><td class="num">${brl(i.valor_vendido)}</td>
+          <td class="num">${pm == null ? "" : brl(pm)}</td>
+          <td class="num"><input class="cx-custo" inputmode="decimal" style="width:120px;text-align:right" value="${i.custo == null ? "" : brl4(i.custo)}" placeholder="informar"></td>
+          <td class="num">${i.cmv ? brl(i.cmv) : ""}</td><td class="num ${mg != null && mg < 0 ? "neg" : ""}">${mg == null ? "" : pct(mg)}</td></tr>`;
+      }).join("") + (lin.length > 1500 ? `<tr><td colspan="10" class="suave">Mostrando 1.500 de ${lin.length}. Use a busca ou a planilha.</td></tr>` : "");
+    $$("#cx-tab tr[data-id]").forEach((tr) => {
+      const inp = $(".cx-custo", tr);
+      const salvar = () => tentar(async () => {
+        const i = r.itens.find((x) => x.id === Number(tr.dataset.id));
+        const novo = inp.value.trim();
+        const atual = i.custo == null ? "" : brl4(i.custo);
+        if (novo === atual) return;
+        const res = await api(`/api/produtos/${i.id}`, { method: "PUT", body: { custo: novo || null } });
+        i.custo = res.custo;
+        tr.style.background = "#E3F5EF"; setTimeout(() => { tr.style.background = ""; }, 700);
+        await carregar();
+      });
+      inp.addEventListener("change", salvar);
+      inp.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") { ev.preventDefault(); const prox = tr.nextElementSibling && $(".cx-custo", tr.nextElementSibling); inp.blur(); if (prox) prox.focus(); }
+      });
+    });
+  };
+  $("#cx-q").oninput = (x) => { filtros.q = x.target.value; desenhar(); };
+  $("#cx-sem").onchange = (x) => { filtros.sem = x.target.checked; desenhar(); };
+  $("#cx-baixar").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/produtos.xlsx?inicio=${p.inicio}&fim=${p.fim}`; };
+  $("#cx-imp").onchange = (ev) => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => tentar(async () => {
+      const b64 = rd.result.split(",")[1];
+      const res = await api(`/api/empresas/${e.id}/produtos/importar`, { method: "POST", body: { arquivo: b64 } });
+      toast(`${res.atualizados} custo(s) atualizado(s).` + (res.nao_encontrados.length ? ` Não encontrados: ${res.nao_encontrados.slice(0, 5).join(", ")}...` : ""));
+      ev.target.value = ""; await carregar();
+    });
+    rd.readAsDataURL(f);
+  };
   await tentar(carregar);
 }
 
@@ -573,6 +653,7 @@ async function telaConfig() {
 
 // ------------------------------------------------------------------ rotas
 async function rota() {
+  $$(".modal-fundo").forEach((m) => m.remove());
   const [caminho, qs] = (location.hash.slice(1) || "/empresas").split("?");
   const params = new URLSearchParams(qs || "");
   const p = caminho.split("/").filter(Boolean);
