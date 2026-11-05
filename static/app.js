@@ -301,12 +301,12 @@ async function abaAssociacao(e) {
     desenhar();
   };
   const opcoes = () => {
-    let html = '<option value="">— não entra na DRE —</option>', grupo = null;
-    for (const ln of modelo.linhas) {
-      if (ln.tipo === "TITULO") { if (grupo) html += "</optgroup>"; html += `<optgroup label="${esc(ln.nome)}">`; grupo = 1; }
-      if (ln.tipo === "CONTA") html += `<option value="${ln.id}">${esc(ln.nome)}</option>`;
+    let html = '<option value="">— não entra na DRE —</option>';
+    for (const g of modelo.linhas.filter((x) => x.tipo === "GRUPO")) {
+      const fs = modelo.linhas.filter((x) => x.tipo === "CONTA" && x.pai_codigo === g.codigo);
+      if (fs.length) html += `<optgroup label="${esc(g.nome)}">${fs.map((ln) => `<option value="${ln.id}">${esc(ln.nome)}</option>`).join("")}</optgroup>`;
     }
-    return html + (grupo ? "</optgroup>" : "");
+    return html;
   };
   const desenhar = () => {
     const ops = opcoes();
@@ -399,7 +399,7 @@ async function abaDre(e) {
     <div class="linha"><label class="chk"><input type="checkbox" id="av" checked> Análise vertical</label><button class="btn" id="xls">Baixar Excel</button></div></div>
     <div id="dre-avisos" style="margin-top:12px"></div><div id="dre" style="margin-top:8px" class="suave">Carregando...</div></div>
     <div class="card" id="nao-assoc" style="display:none"></div>`;
-  const abertas = new Set();
+  const abertas = new Set(), fechados = new Set();
   let r = null;
   const carregar = async () => {
     const p = periodo();
@@ -413,16 +413,18 @@ async function abaDre(e) {
     if (!r.empresa.dominio_sync_periodo) fontes.push("a Domínio ainda não foi lida");
     $("#dre-avisos").innerHTML = (fontes.length ? `<div class="aviso">Atenção: ${fontes.join(" e ")} para esta empresa (aba Conexões).</div>` : "")
       + r.avisos.map((a) => `<div class="aviso">${esc(a)}</div>`).join("")
-      + `<div class="suave peq">Bling pelo caixa (pagos e recebidos em ${esc(r.empresa.bling_sync_periodo || "—")}) · Domínio pelas notas fiscais (${esc(r.empresa.dominio_sync_periodo || "—")}) · Base da análise vertical: ${esc(r.base_av || "—")}. Clique numa linha para ver de onde vêm os valores.</div>`;
+      + `<div class="suave peq">Bling pelo caixa (pagos e recebidos em ${esc(r.empresa.bling_sync_periodo || "—")}) · Domínio pelas notas fiscais (${esc(r.empresa.dominio_sync_periodo || "—")}) · Base da análise vertical: ${esc(r.base_av || "—")}. Clique num grupo para recolher ou abrir; numa conta, para ver de onde vêm os valores.</div>`;
     const cols = r.meses.length + 2 + (av ? 1 : 0);
     const cel = (v) => `<td class="num ${v < 0 ? "neg" : ""}">${v ? brl(v) : '<span class="suave">–</span>'}</td>`;
     let html = `<div class="rolagem"><table class="dre"><tr><th>Linha</th>${r.meses.map((m) => `<th class="num">${mesBR(m)}</th>`).join("")}<th class="num">Total</th>${av ? '<th class="num">AV</th>' : ""}</tr>`;
     for (const ln of r.linhas) {
-      if (ln.tipo === "TITULO") { html += `<tr class="titulo"><td colspan="${cols}">${esc(ln.nome)}</td></tr>`; continue; }
+      if (ln.tipo === "CONTA" && fechados.has(ln.pai_id)) continue;
       const temComp = ln.composicao.length > 0;
-      html += `<tr class="${ln.destaque ? "destaque" : ""}" data-l="${ln.id}"><td class="${temComp ? "clicavel" : ""}">${temComp ? (abertas.has(ln.id) ? "▾ " : "▸ ") : ""}${esc(ln.nome)}</td>
+      const seta = ln.tipo === "GRUPO" ? (fechados.has(ln.id) ? "▸ " : "▾ ") : temComp ? (abertas.has(ln.id) ? "▾ " : "▸ ") : "";
+      const cls = ln.tipo === "GRUPO" ? "grupo" : ln.tipo === "TOTAL" ? "destaque" : "conta";
+      html += `<tr class="${cls}" data-l="${ln.id}" data-t="${ln.tipo}"><td class="${ln.tipo === "GRUPO" || temComp ? "clicavel" : ""}">${seta}${esc(ln.nome)}</td>
         ${ln.valores.map(cel).join("")}${cel(ln.total)}${av ? `<td class="num suave">${pct(ln.av_total)}</td>` : ""}</tr>`;
-      if (abertas.has(ln.id)) for (const c of ln.composicao) {
+      if (ln.tipo === "CONTA" && abertas.has(ln.id)) for (const c of ln.composicao) {
         html += `<tr class="comp"><td>${c.origem === "BLING" ? "Bling" : "Domínio"} · ${esc(c.descricao)}</td>${c.valores.map(cel).join("")}${cel(c.total)}${av ? "<td></td>" : ""}</tr>`;
       }
     }
@@ -430,7 +432,8 @@ async function abaDre(e) {
     $("#dre").classList.remove("suave");
     $$("#dre tr[data-l] td.clicavel").forEach((td) => td.onclick = () => {
       const id = Number(td.parentElement.dataset.l);
-      if (abertas.has(id)) abertas.delete(id); else abertas.add(id);
+      const conj = td.parentElement.dataset.t === "GRUPO" ? fechados : abertas;
+      if (conj.has(id)) conj.delete(id); else conj.add(id);
       desenhar();
     });
     const na = $("#nao-assoc");
@@ -563,65 +566,182 @@ async function telaModelos() {
   $$(".dup").forEach((b) => b.onclick = () => novo(Number(b.dataset.id), b.dataset.nome));
 }
 
+function codigoDe(nome, existentes) {
+  let base = (nome || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase().replace(/\([^)]*\)/g, " ")
+    .replace(/[^A-Z0-9]+/g, " ").trim().split(" ").filter((w) => w.length > 2 || /\d/.test(w)).slice(0, 3)
+    .map((w, i, a) => (a.length === 1 ? w.slice(0, 12) : w.slice(0, 5))).join("_") || "LINHA";
+  let c = base, n = 2;
+  while (existentes.has(c)) c = `${base}_${n++}`;
+  return c;
+}
+
 async function telaModelo(id) {
   const m = await api(`/api/modelos/${id}`);
   casca("modelos", `<div class="topo"><div><a href="#/modelos" class="peq">← Modelos</a><h1>Editar modelo</h1></div>
-    <div class="linha">${EU.perfil === "ADMIN" ? '<button class="btn perigo" id="m-del">Excluir</button>' : ""}<button class="btn pri" id="m-salvar">Salvar modelo</button></div></div>
+    <div class="linha">${EU.perfil === "ADMIN" ? '<button class="btn perigo" id="m-del">Excluir</button>' : ""}<button class="btn" id="m-novo">+ Novo</button><button class="btn pri" id="m-salvar">Salvar modelo</button></div></div>
     <div class="card"><div class="form" style="grid-template-columns:1fr 2fr"><label>Nome <input id="m-nome" value="${esc(m.nome)}"></label><label>Descrição <input id="m-desc" value="${esc(m.descricao)}"></label></div></div>
-    <div class="info peq"><b>Como funciona.</b> <b>Conta</b>: recebe as categorias do Bling e os grupos da Domínio que você associar. Sinal <b>automático</b> (recomendado): entradas de caixa somam e saídas subtraem, e um estorno abate a despesa. "Soma" e "Subtrai" forçam o sinal.
-      <b>Total</b>: fórmula com os códigos das linhas de cima, ex.: <span class="mono">RB + DED_DEV + DED_IMP</span> (as despesas já vêm negativas, por isso normalmente é tudo "+").
-      <b>Título</b>: só organiza a leitura. Marque <b>AV</b> na linha que vale 100% na análise vertical (normalmente a Receita líquida).
-      ${m.empresas ? `<br>Este modelo é usado por ${m.empresas} empresa(s): excluir uma linha apaga as associações dela.` : ""}</div>
-    <div class="card"><div class="rolagem" style="max-height:none"><table class="editor"><tr><th></th><th style="width:120px">Código</th><th>Nome</th><th style="width:110px">Tipo</th><th style="width:300px">Sinal / fórmula</th><th style="width:60px">Destaque</th><th style="width:40px">AV</th><th style="width:110px"></th></tr>
-    <tbody id="linhas"></tbody></table></div>
-    <div class="linha" style="margin-top:12px"><button class="btn" id="add-c">+ Conta</button><button class="btn" id="add-t">+ Total</button><button class="btn" id="add-ti">+ Título</button></div></div>`);
-  const linhas = m.linhas.map((x) => ({ ...x }));
+    <div class="info peq">A DRE é feita de <b>grupos</b> (o total do grupo é a soma automática das contas dele), <b>contas</b> (sempre dentro de um grupo; recebem as categorias do Bling e da Domínio) e <b>resultados</b> (fórmula com os grupos e resultados de cima, ex.: <span class="mono">RB + DED</span>).
+      Clique em <b>+ Novo</b> para criar; a conta nova entra no fim do grupo escolhido. As setas mudam a posição dentro do grupo. Marque <b>AV</b> na linha que vale 100% na análise vertical.
+      ${m.empresas ? `<br>Este modelo é usado por ${m.empresas} empresa(s): excluir uma conta apaga as associações dela. Nada muda até clicar em <b>Salvar modelo</b>.` : ""}</div>
+    <div class="card"><div class="rolagem" style="max-height:none"><table class="editor" id="ed"></table></div>
+    <div class="linha" style="margin-top:12px"><button class="btn" id="m-novo2">+ Novo</button><span class="suave peq" id="m-sujo"></span></div></div>`);
+  const L = m.linhas.map((x) => ({ ...x }));
+  let sujo = false;
+  const marcar = () => { sujo = true; $("#m-sujo").textContent = "Alterações não salvas."; };
+  const topo = () => L.filter((x) => x.tipo !== "CONTA");
+  const filhos = (g) => L.filter((x) => x.tipo === "CONTA" && x.pai_codigo === g);
+  const reordenar = (tops) => {  // reconstrói a lista: cada grupo seguido das suas contas
+    const nova = [];
+    for (const t of tops) { nova.push(t); if (t.tipo === "GRUPO") nova.push(...filhos(t.codigo)); }
+    L.splice(0, L.length, ...nova);
+  };
+  const tirarDaFormula = (cod) => {
+    for (const t of L) if (t.tipo === "TOTAL" && t.formula) {
+      t.formula = t.formula.replace(new RegExp(`\\s*[+-]?\\s*\\b${cod}\\b`, "g"), "").replace(/^\s*\+\s*/, "").trim();
+    }
+  };
+  const renomear = (de, para) => {
+    for (const x of L) {
+      if (x.pai_codigo === de) x.pai_codigo = para;
+      if (x.tipo === "TOTAL" && x.formula) x.formula = x.formula.replace(new RegExp(`\\b${de}\\b`, "g"), para);
+    }
+  };
+  const sinalSel = (x) => `<select class="f-sinal"><option value="0" ${!x.sinal ? "selected" : ""}>Automático</option><option value="1" ${x.sinal === 1 ? "selected" : ""}>Sempre soma (+)</option><option value="-1" ${x.sinal === -1 ? "selected" : ""}>Sempre subtrai (−)</option></select>`;
   const desenhar = () => {
-    $("#linhas").innerHTML = linhas.map((x, i) => `<tr class="${x.tipo}" data-i="${i}">
-      <td class="suave peq">${i + 1}</td>
-      <td><input class="mono f-cod" value="${esc(x.codigo)}"></td>
-      <td><input class="f-nome" value="${esc(x.nome)}"></td>
-      <td><select class="f-tipo"><option value="CONTA">Conta</option><option value="TOTAL">Total</option><option value="TITULO">Título</option></select></td>
-      <td>${x.tipo === "CONTA" ? `<select class="f-sinal"><option value="0">Automático</option><option value="1">Sempre soma (+)</option><option value="-1">Sempre subtrai (−)</option></select>`
-        : x.tipo === "TOTAL" ? `<input class="mono f-form" value="${esc(x.formula)}" placeholder="RB + DED">` : ""}</td>
-      <td style="text-align:center"><input type="checkbox" class="f-dest" ${x.destaque ? "checked" : ""}></td>
-      <td style="text-align:center">${x.tipo !== "TITULO" ? `<input type="radio" name="av" class="f-av" ${x.base_av ? "checked" : ""}>` : ""}</td>
-      <td style="white-space:nowrap"><button class="btn peq sobe" title="Subir">↑</button><button class="btn peq desce" title="Descer">↓</button><button class="btn peq perigo del" title="Excluir">✕</button></td></tr>`).join("");
-    $$("#linhas tr").forEach((tr) => {
-      const i = Number(tr.dataset.i), x = linhas[i];
-      $(".f-tipo", tr).value = x.tipo;
-      if ($(".f-sinal", tr)) $(".f-sinal", tr).value = String(x.sinal ?? 1);
-      $(".f-cod", tr).oninput = (ev) => { x.codigo = ev.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""); ev.target.value = x.codigo; };
-      $(".f-nome", tr).oninput = (ev) => { x.nome = ev.target.value; };
-      $(".f-tipo", tr).onchange = (ev) => { x.tipo = ev.target.value; if (x.tipo === "CONTA" && x.sinal == null) x.sinal = 0; desenhar(); };
-      if ($(".f-sinal", tr)) $(".f-sinal", tr).onchange = (ev) => { x.sinal = Number(ev.target.value); };
-      if ($(".f-form", tr)) $(".f-form", tr).oninput = (ev) => { x.formula = ev.target.value.toUpperCase(); };
-      $(".f-dest", tr).onchange = (ev) => { x.destaque = ev.target.checked; };
-      if ($(".f-av", tr)) $(".f-av", tr).onchange = () => { linhas.forEach((y) => { y.base_av = false; }); x.base_av = true; };
-      $(".sobe", tr).onclick = () => { if (i > 0) { [linhas[i - 1], linhas[i]] = [linhas[i], linhas[i - 1]]; desenhar(); } };
-      $(".desce", tr).onclick = () => { if (i < linhas.length - 1) { [linhas[i + 1], linhas[i]] = [linhas[i], linhas[i + 1]]; desenhar(); } };
-      $(".del", tr).onclick = () => { if (confirm(`Excluir a linha ${x.nome}?`)) { linhas.splice(i, 1); desenhar(); } };
+    const grupos = topo().filter((x) => x.tipo === "GRUPO");
+    let h = `<tr><th style="width:84px"></th><th style="width:130px">Código</th><th>Nome</th><th style="width:240px">Cálculo</th><th style="width:40px">AV</th><th style="width:220px">Grupo</th></tr>`;
+    for (const t of topo()) {
+      const i = L.indexOf(t);
+      if (t.tipo === "GRUPO") {
+        const fs = filhos(t.codigo);
+        h += `<tr class="g-linha" data-i="${i}" style="background:#EEF3F9">
+          <td style="white-space:nowrap"><button class="btn peq t-sobe" title="Subir o grupo">↑</button><button class="btn peq t-desce" title="Descer o grupo">↓</button></td>
+          <td><input class="mono f-cod" value="${esc(t.codigo)}"></td><td><input class="f-nome" value="${esc(t.nome)}" style="font-weight:700;color:var(--azul)"></td>
+          <td class="peq suave">Grupo · soma automática de ${fs.length} conta(s)</td>
+          <td style="text-align:center"><input type="radio" name="av" class="f-av" ${t.base_av ? "checked" : ""}></td>
+          <td style="white-space:nowrap"><button class="btn peq g-add">+ Conta</button><button class="btn peq perigo del" title="Excluir grupo">✕</button></td></tr>`;
+        fs.forEach((c, k) => {
+          h += `<tr data-i="${L.indexOf(c)}">
+            <td style="white-space:nowrap;padding-left:18px"><button class="btn peq c-sobe" ${k === 0 ? "disabled" : ""}>↑</button><button class="btn peq c-desce" ${k === fs.length - 1 ? "disabled" : ""}>↓</button></td>
+            <td><input class="mono f-cod" value="${esc(c.codigo)}"></td><td style="padding-left:22px"><input class="f-nome" value="${esc(c.nome)}"></td>
+            <td>${sinalSel(c)}</td><td></td>
+            <td style="white-space:nowrap"><select class="c-grupo" title="Mover para outro grupo" style="width:170px">${grupos.map((g) => `<option value="${esc(g.codigo)}" ${g.codigo === c.pai_codigo ? "selected" : ""}>${esc(g.nome)}</option>`).join("")}</select><button class="btn peq perigo del" title="Excluir conta">✕</button></td></tr>`;
+        });
+        if (!fs.length) h += `<tr><td></td><td colspan="5" class="suave peq" style="padding-left:30px">Grupo sem contas — clique em + Conta.</td></tr>`;
+      } else {
+        h += `<tr class="TOTAL" data-i="${i}">
+          <td style="white-space:nowrap"><button class="btn peq t-sobe">↑</button><button class="btn peq t-desce">↓</button></td>
+          <td><input class="mono f-cod" value="${esc(t.codigo)}"></td><td><input class="f-nome" value="${esc(t.nome)}" style="font-weight:700"></td>
+          <td><input class="mono f-form" value="${esc(t.formula)}" placeholder="RB + DED"></td>
+          <td style="text-align:center"><input type="radio" name="av" class="f-av" ${t.base_av ? "checked" : ""}></td>
+          <td><button class="btn peq perigo del" title="Excluir resultado">✕</button></td></tr>`;
+      }
+    }
+    $("#ed").innerHTML = h;
+    $$("#ed tr[data-i]").forEach((tr) => {
+      const x = L[Number(tr.dataset.i)];
+      const cod = $(".f-cod", tr);
+      cod.onchange = () => {
+        const novo = cod.value.toUpperCase().replace(/[^A-Z0-9_]/g, "");
+        if (!novo || (novo !== x.codigo && L.some((y) => y.codigo === novo))) { toast("Código vazio ou repetido.", true); cod.value = x.codigo; return; }
+        renomear(x.codigo, novo); x.codigo = novo; marcar(); desenhar();
+      };
+      $(".f-nome", tr).oninput = (ev) => { x.nome = ev.target.value; marcar(); };
+      if ($(".f-sinal", tr)) $(".f-sinal", tr).onchange = (ev) => { x.sinal = Number(ev.target.value); marcar(); };
+      if ($(".f-form", tr)) $(".f-form", tr).oninput = (ev) => { x.formula = ev.target.value.toUpperCase(); marcar(); };
+      if ($(".f-av", tr)) $(".f-av", tr).onchange = () => { L.forEach((y) => { y.base_av = false; }); x.base_av = true; marcar(); };
+      const moverTopo = (d) => { const ts = topo(); const k = ts.indexOf(x); const j = k + d; if (j < 0 || j >= ts.length) return; [ts[k], ts[j]] = [ts[j], ts[k]]; reordenar(ts); marcar(); desenhar(); };
+      if ($(".t-sobe", tr)) { $(".t-sobe", tr).onclick = () => moverTopo(-1); $(".t-desce", tr).onclick = () => moverTopo(1); }
+      const moverConta = (d) => {
+        const fs = filhos(x.pai_codigo); const k = fs.indexOf(x); const y = fs[k + d]; if (!y) return;
+        const a = L.indexOf(x), b = L.indexOf(y); [L[a], L[b]] = [L[b], L[a]]; marcar(); desenhar();
+      };
+      if ($(".c-sobe", tr)) { $(".c-sobe", tr).onclick = () => moverConta(-1); $(".c-desce", tr).onclick = () => moverConta(1); }
+      if ($(".c-grupo", tr)) $(".c-grupo", tr).onchange = (ev) => { L.splice(L.indexOf(x), 1); x.pai_codigo = ev.target.value; L.push(x); reordenar(topo()); marcar(); desenhar(); };
+      if ($(".g-add", tr)) $(".g-add", tr).onclick = () => novo("CONTA", x.codigo);
+      $(".del", tr).onclick = () => {
+        if (x.tipo === "GRUPO") {
+          const fs = filhos(x.codigo);
+          if (!confirm(`Excluir o grupo ${x.nome}${fs.length ? ` e as ${fs.length} conta(s) dele` : ""}? As associações dessas contas serão perdidas ao salvar.`)) return;
+          fs.forEach((c) => L.splice(L.indexOf(c), 1));
+        } else if (!confirm(`Excluir ${x.nome}?`)) return;
+        L.splice(L.indexOf(x), 1); tirarDaFormula(x.codigo); marcar(); desenhar();
+      };
     });
   };
-  const add = (tipo) => {
-    let n = linhas.length + 1;
-    while (linhas.some((x) => x.codigo === `L${n}`)) n += 1;
-    linhas.push({ codigo: `L${n}`, nome: tipo === "TITULO" ? "NOVO GRUPO" : tipo === "TOTAL" ? "(=) Novo total" : "(-) Nova conta", tipo, sinal: 0, formula: "", destaque: tipo === "TOTAL", base_av: false });
-    desenhar();
-    const ult = $$("#linhas tr").pop(); ult.scrollIntoView({ block: "center" }); $(".f-nome", ult).select();
+  const formulaSugerida = (pos) => {  // resultado anterior + grupos entre ele e a posição
+    const ts = topo().slice(0, pos + 1), termos = [];
+    for (let k = ts.length - 1; k >= 0; k--) { termos.unshift(ts[k].codigo); if (ts[k].tipo === "TOTAL") break; }
+    return termos.join(" + ");
   };
-  $("#add-c").onclick = () => add("CONTA");
-  $("#add-t").onclick = () => add("TOTAL");
-  $("#add-ti").onclick = () => add("TITULO");
+  const novo = (tipoIni, grupoIni) => {
+    const ts = topo(), grupos = ts.filter((x) => x.tipo === "GRUPO");
+    const md = modal(`<h2>Criar</h2>
+      <div class="linha" style="margin-bottom:12px"><label class="chk"><input type="radio" name="n-tipo" value="CONTA"> Conta</label>
+        <label class="chk"><input type="radio" name="n-tipo" value="GRUPO"> Grupo</label><label class="chk"><input type="radio" name="n-tipo" value="TOTAL"> Resultado (fórmula)</label></div>
+      <div class="form" style="grid-template-columns:1fr">
+        <label id="n-l-grupo">Em qual grupo? <select id="n-grupo">${grupos.map((g) => `<option value="${esc(g.codigo)}">${esc(g.nome)}</option>`).join("")}</select></label>
+        <label>Nome <input id="n-nome" placeholder="Ex.: Marketing digital"></label>
+        <label>Código <input id="n-cod" class="mono" placeholder="gerado pelo nome"></label>
+        <label id="n-l-pos">Posição: depois de <select id="n-pos">${ts.map((t, k) => `<option value="${k}" ${k === ts.length - 1 ? "selected" : ""}>${esc(t.nome)}</option>`).join("")}</select></label>
+        <label id="n-l-res" class="chk"><input type="checkbox" id="n-res" checked> <span id="n-res-txt"></span></label>
+        <label id="n-l-form">Fórmula <input id="n-form" class="mono"></label>
+      </div>
+      <div class="linha" style="margin-top:14px"><button class="btn pri" id="n-ok">Criar</button><button class="btn" data-fechar>Cancelar</button></div>`, true);
+    const tipo = () => ($("input[name=n-tipo]:checked", md) || {}).value;
+    const proxResultado = (pos) => ts.slice(pos + 1).find((t) => t.tipo === "TOTAL");
+    const atualizar = () => {
+      const t = tipo();
+      $("#n-l-grupo", md).style.display = t === "CONTA" ? "" : "none";
+      $("#n-l-pos", md).style.display = t && t !== "CONTA" ? "" : "none";
+      const pr = proxResultado(Number($("#n-pos", md).value));
+      $("#n-l-res", md).style.display = t === "GRUPO" && pr ? "" : "none";
+      if (pr) $("#n-res-txt", md).textContent = `Somar este grupo em "${pr.nome}" (fórmula ${pr.formula} + novo)`;
+      $("#n-l-form", md).style.display = t === "TOTAL" ? "" : "none";
+      if (t === "TOTAL" && !$("#n-form", md).dataset.mexeu) $("#n-form", md).value = formulaSugerida(Number($("#n-pos", md).value));
+    };
+    $$("input[name=n-tipo]", md).forEach((r) => { r.onchange = atualizar; if (r.value === tipoIni) r.checked = true; });
+    if (grupoIni) $("#n-grupo", md).value = grupoIni;
+    $("#n-pos", md).onchange = atualizar;
+    $("#n-form", md).oninput = (ev) => { ev.target.dataset.mexeu = "1"; };
+    $("#n-nome", md).oninput = () => { if (!$("#n-cod", md).dataset.mexeu) $("#n-cod", md).value = codigoDe($("#n-nome", md).value, new Set(L.map((x) => x.codigo))); };
+    $("#n-cod", md).oninput = (ev) => { ev.target.dataset.mexeu = "1"; ev.target.value = ev.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""); };
+    atualizar();
+    $("#n-nome", md).focus();
+    $("#n-ok", md).onclick = () => {
+      const t = tipo(), nome = $("#n-nome", md).value.trim();
+      const cod = $("#n-cod", md).value || codigoDe(nome, new Set(L.map((x) => x.codigo)));
+      if (!t) return toast("Escolha: conta, grupo ou resultado.", true);
+      if (!nome) return toast("Informe o nome.", true);
+      if (L.some((x) => x.codigo === cod)) return toast(`O código ${cod} já existe.`, true);
+      if (t === "CONTA") {
+        if (!grupos.length) return toast("Crie um grupo primeiro.", true);
+        L.push({ codigo: cod, nome, tipo: "CONTA", sinal: 0, formula: "", destaque: false, base_av: false, pai_codigo: $("#n-grupo", md).value });
+        reordenar(topo());
+      } else {
+        const pos = Number($("#n-pos", md).value);
+        const item = { codigo: cod, nome, tipo: t, sinal: 0, formula: t === "TOTAL" ? $("#n-form", md).value.toUpperCase() : "", destaque: t === "TOTAL", base_av: false, pai_codigo: null };
+        const nt = topo(); nt.splice(pos + 1, 0, item); L.push(item); reordenar(nt);
+        const pr = proxResultado(pos);
+        if (t === "GRUPO" && pr && $("#n-res", md).checked) pr.formula = `${pr.formula} + ${cod}`;
+      }
+      md.remove(); marcar(); desenhar();
+      const linha = $$("#ed tr[data-i]").find((tr) => L[Number(tr.dataset.i)].codigo === cod);
+      if (linha) { linha.style.background = "#E3F5EF"; linha.scrollIntoView({ block: "center" }); }
+    };
+  };
+  $("#m-novo").onclick = () => novo();
+  $("#m-novo2").onclick = () => novo();
   $("#m-salvar").onclick = (ev) => tentar(async () => {
-    const r = await api(`/api/modelos/${id}`, { method: "PUT", body: { nome: $("#m-nome").value, descricao: $("#m-desc").value, linhas } });
-    linhas.splice(0, linhas.length, ...r.linhas.map((x) => ({ ...x })));
-    desenhar(); toast("Modelo salvo.");
+    const r = await api(`/api/modelos/${id}`, { method: "PUT", body: { nome: $("#m-nome").value, descricao: $("#m-desc").value, linhas: L } });
+    L.splice(0, L.length, ...r.linhas.map((x) => ({ ...x })));
+    sujo = false; $("#m-sujo").textContent = ""; desenhar(); toast("Modelo salvo.");
   }, ev.target);
   if ($("#m-del")) $("#m-del").onclick = (ev) => tentar(async () => {
     if (!confirm("Excluir este modelo?")) return;
     await api(`/api/modelos/${id}`, { method: "DELETE" }); location.hash = "#/modelos";
   }, ev.target);
+  window.onbeforeunload = () => (sujo ? true : null);
   desenhar();
 }
 
@@ -685,6 +805,7 @@ async function telaConfig() {
 // ------------------------------------------------------------------ rotas
 async function rota() {
   $$(".modal-fundo").forEach((m) => m.remove());
+  window.onbeforeunload = null;
   const [caminho, qs] = (location.hash.slice(1) || "/empresas").split("?");
   const params = new URLSearchParams(qs || "");
   const p = caminho.split("/").filter(Boolean);

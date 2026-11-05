@@ -227,6 +227,8 @@ def test_fluxo_completo():
         assert L["DF"]["total"] == -45
         assert L["CMV"]["valores"] == [-450, 30, 0]
         assert L["LL"]["total"] == round(8700 + 200 - 420 - 400.5 - 45, 2)
+        assert L["DOP"]["tipo"] == "GRUPO" and L["DOP"]["total"] == -400.5  # soma automática das contas do grupo
+        assert L["CUSTOS"]["total"] == -420 + 200 and L["RFIN"]["total"] == -45
         ct2 = {x["descricao"]: x for x in c.get(f"/api/empresas/{e['id']}/contas").json()["contas"]}
         dv = c.get(f"/api/contas/{ct2['Vendas de mercadorias e produtos (NF de saída)']['id']}/detalhe?inicio=2026-01&fim=2026-03").json()
         assert [p["codigo"] for p in dv["produtos"]] == ["CAM-001", "BON-9"]
@@ -241,16 +243,47 @@ def test_fluxo_completo():
         m = c.get(f"/api/modelos/{modelos[0]['id']}").json()
         m["linhas"].append({"codigo": "X", "nome": "Teste", "tipo": "TOTAL", "formula": "LL + NAOEXISTE"})
         assert c.put(f"/api/modelos/{m['id']}", json=m).status_code == 400
-        m["linhas"][-1]["formula"] = "LL - IR"
+        m["linhas"][-1]["formula"] = "LL - IRG"
         m["linhas"][-1]["codigo"] = "LL2"
-        assert c.put(f"/api/modelos/{m['id']}", json=m).status_code == 200
-        assert c.get(f"/api/empresas/{e['id']}/dre?inicio=2026-01&fim=2026-03").json()["linhas"][-1]["codigo"] == "LL2"
+        # conta nova no fim da lista, apontando para o grupo DOP: vai para o fim do grupo
+        m["linhas"].append({"codigo": "DV_MKT", "nome": "Marketing digital", "tipo": "CONTA", "pai_codigo": "DOP"})
+        m["linhas"].append({"codigo": "SOLTA", "nome": "Sem grupo", "tipo": "CONTA"})
+        assert "precisa estar dentro de um grupo" in c.put(f"/api/modelos/{m['id']}", json=m).json()["erro"]
+        m["linhas"].pop()
+        r = c.put(f"/api/modelos/{m['id']}", json=m).json()
+        cods = [x["codigo"] for x in r["linhas"]]
+        assert cods.index("DV_MKT") == cods.index("DA_TRIB") + 1 and cods.index("RO") == cods.index("DV_MKT") + 1
+        assert r["linhas"][-1]["codigo"] == "LL2"
+        mk = next(x["id"] for x in r["linhas"] if x["codigo"] == "DV_MKT")
+        assert c.put(f"/api/contas/{por['Tarifas bancárias']['id']}", json={"linha_id": mk}).status_code == 200
+        dd = {x["codigo"]: x for x in c.get(f"/api/empresas/{e['id']}/dre?inicio=2026-01&fim=2026-03").json()["linhas"]}
+        assert dd["DV_MKT"]["total"] == -45 and dd["DOP"]["total"] == -445.5 and dd["RFIN"]["total"] == 0
         # as associações continuam depois de salvar o modelo
-        assert c.get(f"/api/empresas/{e['id']}/dre?inicio=2026-01&fim=2026-03").json()["linhas"][12]["total"] == -400.5
+        assert dd["DV_COM"]["total"] == -400.5
         e2 = c.post("/api/empresas", json={"nome": "Beta"}).json()
         assert c.post("/api/modelos", json={"nome": "Cópia", "copiar_de": m["id"]}).json()["linhas"][-1]["codigo"] == "LL2"
         assert c.post(f"/api/empresas/{e2['id']}/contas/copiar", json={"de_empresa_id": e["id"]}).json()["ok"]
         assert c.delete(f"/api/modelos/{m['id']}").status_code == 400  # em uso
+
+        # conversão de um modelo no formato antigo (títulos e totais manuais)
+        from db import ModeloDRE, LinhaDRE
+        import dre as D
+        with SessionLocal() as s:
+            mv = ModeloDRE(nome="Antigo")
+            s.add(mv)
+            s.flush()
+            for i, (cod, nome, tipo, form) in enumerate([("T1", "RECEITAS", "TITULO", ""), ("A", "Venda", "CONTA", ""),
+                                                         ("B", "Serviço", "CONTA", ""), ("TA", "(=) Receita", "TOTAL", "A + B"),
+                                                         ("C", "Aluguel", "CONTA", ""), ("R", "(=) Resultado", "TOTAL", "TA + C")], 1):
+                s.add(LinhaDRE(modelo_id=mv.id, ordem=i, codigo=cod, nome=nome, tipo=tipo, formula=form))
+            s.flush()
+            id_c = s.query(LinhaDRE).filter_by(modelo_id=mv.id, codigo="C").one().id
+            assert D.converter_modelo(s, mv)
+            s.commit()
+            ls = {x.codigo: x for x in s.query(LinhaDRE).filter_by(modelo_id=mv.id).all()}
+            assert ls["TA"].tipo == "GRUPO" and ls["A"].pai_id == ls["TA"].id and "T1" not in ls
+            assert ls["C"].id == id_c and ls[next(k for k in ls if ls[k].tipo == "GRUPO" and k != "TA")].id == ls["C"].pai_id
+            assert ls["R"].tipo == "TOTAL" and not D.converter_modelo(s, mv)
 
         # usuários
         assert c.post("/api/usuarios", json={"nome": "Op", "email": "op@x.com", "senha": "senha-forte-2"}).status_code == 200

@@ -45,7 +45,7 @@ class Base(DeclarativeBase):
 
 PERFIS = ("ADMIN", "OPERADOR")
 ORIGENS = ("BLING", "DOMINIO")
-TIPOS_LINHA = ("CONTA", "TOTAL", "TITULO")
+TIPOS_LINHA = ("GRUPO", "CONTA", "TOTAL")
 
 
 class Usuario(Base):
@@ -74,18 +74,21 @@ class ModeloDRE(Base):
 
 
 class LinhaDRE(Base):
-    """Linha do modelo. CONTA recebe valores das contas de origem; TOTAL soma/subtrai linhas anteriores
-    (fórmula com os códigos, ex.: "RB + DED"); TITULO só organiza a leitura.
-    sinal da CONTA: +1 soma, -1 subtrai, 0 automático (receita soma, despesa subtrai)."""
+    """Linha do modelo.
+    GRUPO: soma automática das contas dele. CONTA: fica dentro de um grupo (pai_id) e recebe as associações.
+    TOTAL (resultado): fórmula com códigos de linhas anteriores, ex.: "RB + DED".
+    sinal da CONTA: 0 automático (entrada +, saída −), +1 sempre soma, -1 sempre subtrai.
+    A ordem (ordem) é a da leitura: grupo, as contas dele, próximo grupo ou resultado..."""
     __tablename__ = "linhas_dre"
     __table_args__ = (UniqueConstraint("modelo_id", "codigo"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     modelo_id: Mapped[int] = mapped_column(ForeignKey("modelos_dre.id", ondelete="CASCADE"), index=True)
+    pai_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ordem: Mapped[int] = mapped_column(Integer, default=0)
     codigo: Mapped[str] = mapped_column(String(30))
     nome: Mapped[str] = mapped_column(String(200))
     tipo: Mapped[str] = mapped_column(String(10), default="CONTA")
-    sinal: Mapped[int] = mapped_column(Integer, default=1)
+    sinal: Mapped[int] = mapped_column(Integer, default=0)
     formula: Mapped[str] = mapped_column(Text, default="")
     destaque: Mapped[bool] = mapped_column(Boolean, default=False)
     base_av: Mapped[bool] = mapped_column(Boolean, default=False)  # base da análise vertical (100%)
@@ -238,3 +241,9 @@ class Auditoria(Base):
 
 def criar_tabelas():
     Base.metadata.create_all(engine)
+    # colunas novas em tabelas que já existiam
+    from sqlalchemy import inspect, text
+    cols = {c["name"] for c in inspect(engine).get_columns("linhas_dre")}
+    if "pai_id" not in cols:
+        with engine.begin() as con:
+            con.execute(text("ALTER TABLE linhas_dre ADD COLUMN pai_id INTEGER"))

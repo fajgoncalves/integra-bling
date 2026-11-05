@@ -22,7 +22,7 @@ import dre
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.3.0"
+VERSAO = "1.4.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -48,6 +48,10 @@ def iniciar():
             for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.tipo == "CONTA")).all():
                 ln.sinal = 0
             set_config(s, "migracao_caixa", "1")
+        if get_config(s, "migracao_grupos") != "1":  # 1.4.0: modelo em grupos (soma automática)
+            for m in s.scalars(select(ModeloDRE)).all():
+                dre.converter_modelo(s, m)
+            set_config(s, "migracao_grupos", "1")
         if get_config(s, "migracao_custo_vigencia") != "1":  # 1.3.0: custo por vigência mensal
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
@@ -867,10 +871,11 @@ def _modelo_json(s, m: ModeloDRE, linhas=True):
     d = {"id": m.id, "nome": m.nome, "descricao": m.descricao,
          "empresas": s.scalar(select(func.count(Empresa.id)).where(Empresa.modelo_id == m.id)) or 0}
     if linhas:
+        lns = s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == m.id).order_by(LinhaDRE.ordem, LinhaDRE.id)).all()
+        cod = {ln.id: ln.codigo for ln in lns}
         d["linhas"] = [{"id": ln.id, "ordem": ln.ordem, "codigo": ln.codigo, "nome": ln.nome, "tipo": ln.tipo,
-                        "sinal": ln.sinal, "formula": ln.formula, "destaque": ln.destaque, "base_av": ln.base_av}
-                       for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == m.id)
-                                           .order_by(LinhaDRE.ordem, LinhaDRE.id)).all()]
+                        "sinal": ln.sinal, "formula": ln.formula, "destaque": ln.destaque, "base_av": ln.base_av,
+                        "pai_codigo": cod.get(ln.pai_id)} for ln in lns]
     return d
 
 
@@ -888,12 +893,15 @@ async def modelo_novo(request: Request, u=Depends(usuario), s=Depends(get_db)):
         m = ModeloDRE(nome=nome, descricao=base.descricao)
         s.add(m)
         s.flush()
-        for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == base.id)).all():
-            s.add(LinhaDRE(modelo_id=m.id, ordem=ln.ordem, codigo=ln.codigo, nome=ln.nome, tipo=ln.tipo, sinal=ln.sinal,
-                           formula=ln.formula, destaque=ln.destaque, base_av=ln.base_av))
+        dre.gravar_linhas(s, m.id, [{k: v for k, v in x.items() if k != "id"} for x in _modelo_json(s, base)["linhas"]], {})
     elif b.get("vazio"):
         m = ModeloDRE(nome=nome)
         s.add(m)
+        s.flush()
+        dre.gravar_linhas(s, m.id, [{"codigo": "RECEITAS", "nome": "Receitas", "tipo": "GRUPO"},
+                                    {"codigo": "DESPESAS", "nome": "(-) Despesas", "tipo": "GRUPO"},
+                                    {"codigo": "RESULTADO", "nome": "(=) Resultado", "tipo": "TOTAL",
+                                     "formula": "RECEITAS + DESPESAS", "base_av": False}], {})
     else:
         m = dre.criar_modelo_padrao(s, nome)
     audit(s, u.email, "MODELO_NOVO", nome)
@@ -921,31 +929,14 @@ async def modelo_salvar(mid: int, request: Request, u=Depends(usuario), s=Depend
                 raise HTTPException(400, f"{x['codigo']}: tipo inválido.")
             if not str(x.get("nome") or "").strip():
                 raise HTTPException(400, f"{x['codigo']}: informe o nome da linha.")
+            if x.get("pai_codigo"):
+                x["pai_codigo"] = str(x["pai_codigo"]).strip().upper()
+        linhas = dre.ordenar(linhas)
         erros = dre.validar_modelo(linhas)
         if erros:
             raise HTTPException(400, " ".join(erros[:5]))
         atuais = {ln.id: ln for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == m.id)).all()}
-        manter = set()
-        # códigos podem trocar de linha: libera os códigos antes de gravar
-        for ln in atuais.values():
-            ln.codigo = f"__{ln.id}"
-        s.flush()
-        for i, x in enumerate(linhas, 1):
-            ln = atuais.get(int(x["id"])) if x.get("id") else None
-            if not ln:
-                ln = LinhaDRE(modelo_id=m.id)
-                s.add(ln)
-            ln.ordem, ln.codigo, ln.nome, ln.tipo = i * 10, x["codigo"], str(x["nome"]).strip()[:200], x["tipo"]
-            ln.sinal = int(x.get("sinal") or 0) if x["tipo"] == "CONTA" else 0
-            ln.sinal = max(-1, min(1, ln.sinal))
-            ln.formula = str(x.get("formula") or "").strip()[:2000] if x["tipo"] == "TOTAL" else ""
-            ln.destaque, ln.base_av = bool(x.get("destaque")), bool(x.get("base_av"))
-            s.flush()
-            manter.add(ln.id)
-        for lid, ln in atuais.items():
-            if lid not in manter:
-                s.delete(ln)
-        s.flush()
+        dre.gravar_linhas(s, m.id, linhas, atuais)
         for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == m.id, LinhaDRE.tipo != "CONTA")).all():
             for c in s.scalars(select(ContaOrigem).where(ContaOrigem.linha_id == ln.id)).all():
                 c.linha_id = None
@@ -1006,16 +997,16 @@ def dre_excel(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(ge
         c.fill = PatternFill("solid", fgColor="1F3A5F")
     ws["A1"].font = Font(bold=True, size=14)
     for ln in r["linhas"]:
-        if ln["tipo"] == "TITULO":
-            ws.append([ln["nome"]])
-            ws.cell(ws.max_row, 1).font = Font(bold=True, color="1F3A5F")
-            continue
-        ws.append([ln["nome"]] + ln["valores"] + [ln["total"], (ln["av_total"] or 0) / 100 if ln["av_total"] is not None else None])
+        nome = ("      " + ln["nome"]) if ln["tipo"] == "CONTA" else ln["nome"]
+        ws.append([nome] + ln["valores"] + [ln["total"], (ln["av_total"] or 0) / 100 if ln["av_total"] is not None else None])
         row = ws.max_row
         for col in range(2, len(r["meses"]) + 3):
             ws.cell(row, col).number_format = '#,##0.00;[Red]-#,##0.00'
         ws.cell(row, len(r["meses"]) + 3).number_format = "0.0%"
-        if ln["destaque"]:
+        if ln["tipo"] == "GRUPO":
+            for col in range(1, len(cab) + 1):
+                ws.cell(row, col).font = Font(bold=True, color="1F3A5F")
+        if ln["tipo"] == "TOTAL" or ln["destaque"]:
             for col in range(1, len(cab) + 1):
                 ws.cell(row, col).font = Font(bold=True)
                 ws.cell(row, col).fill = PatternFill("solid", fgColor="E8EEF6")
