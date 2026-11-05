@@ -568,7 +568,7 @@ async function telaModelos() {
 
 function codigoDe(nome, existentes) {
   let base = (nome || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase().replace(/\([^)]*\)/g, " ")
-    .replace(/[^A-Z0-9]+/g, " ").trim().split(" ").filter((w) => w.length > 2 || /\d/.test(w)).slice(0, 3)
+    .replace(/[^A-Z0-9]+/g, " ").trim().split(" ").filter((w) => w.length > 3 || /\d/.test(w)).slice(0, 3)
     .map((w, i, a) => (a.length === 1 ? w.slice(0, 12) : w.slice(0, 5))).join("_") || "LINHA";
   let c = base, n = 2;
   while (existentes.has(c)) c = `${base}_${n++}`;
