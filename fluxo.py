@@ -37,6 +37,9 @@ def calcular(s, empresa_id: int, ini: str, fim: str):
     cfs = s.scalars(select(ContaFinanceira).where(ContaFinanceira.empresa_id == empresa_id)
                     .order_by(ContaFinanceira.ordem, ContaFinanceira.descricao)).all()
     nome_conta = {c.id_externo: c.descricao for c in cfs}
+    if not cfs:
+        avisos.append("Os saldos das contas de Caixa e Bancos ainda não foram lidos. Vá em Conexões e dados e clique em "
+                      "Atualizar do Bling: a atualização lê o histórico de cada conta para calcular o saldo inicial e final.")
     ordem_conta = [c.id_externo for c in cfs]
 
     # saldo antes do período, por conta
@@ -66,7 +69,7 @@ def calcular(s, empresa_id: int, ini: str, fim: str):
     if nao_lidos:
         avisos.append(f"{nao_lidos} lançamento(s) do período foram lidos só para o saldo, sem a categoria: "
                       "atualize o Bling cobrindo todo o período para ver as categorias.")
-    if any(k == 0 for k in list(saldo_ini) + list(conta_mes)):
+    if cfs and any(k == 0 for k in list(saldo_ini) + list(conta_mes)):
         avisos.append("Há lançamentos sem conta bancária identificada (de atualizações anteriores à versão do fluxo): "
                       "atualize o Bling para separar os saldos por conta.")
 
