@@ -56,6 +56,14 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
+        if os.environ.get("INTEGRA_DIAG") != "0":  # diagnóstico temporário: estrutura dos modelos (sem valores)
+            for m in s.scalars(select(ModeloDRE)).all():
+                lns = s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == m.id).order_by(LinhaDRE.ordem)).all()
+                cod = {x.id: x.codigo for x in lns}
+                print(f"DIAG modelo {m.id} {m.nome!r}: " + " | ".join(
+                    f"{x.id}:{x.tipo}:{x.codigo}:{x.nome!r}:pai={cod.get(x.pai_id, x.pai_id)}:ord={x.ordem}" for x in lns), flush=True)
+            for e in s.scalars(select(Empresa)).all():
+                print(f"DIAG empresa {e.id} {e.nome!r} modelo={e.modelo_id}", flush=True)
         for j in s.scalars(select(Job).where(Job.status.in_(("PENDENTE", "EXECUTANDO")))).all():
             j.status, j.fim, j.mensagem = "ERRO", agora(), "Interrompido: o sistema foi reiniciado. Peça de novo."
         s.commit()
