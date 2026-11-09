@@ -174,12 +174,17 @@ def verifica_mercado_livre(c, eid):
     v = c.get(f"/api/empresas/{eid}/mlivre/vendas?inicio=2026-01&fim=2026-02").json()
     assert v["total_pedidos"] == 2 and v["nao_pagos"] == 1
     P = {x["order_id"]: x for x in v["vendas"]}
-    assert P[2000001]["frete"] == 20 and P[2000001]["sem_custo"] and P[2000001]["sku"] == "CAM-001"
+    assert P[2000001]["frete"] == 20 and not P[2000001]["sem_custo"] and P[2000001]["sku"] == "CAM-001"
     assert P[2000002]["devolvido"] == 50 and P[2000002]["tarifa"] == 0  # devolvido inteiro: tarifa estornada
     # impostos e custo
     assert c.put(f"/api/empresas/{eid}/mlivre/config", json={"imposto": "10"}).json()["ml_imposto_aliq"] == 10
     cs = c.get(f"/api/empresas/{eid}/mlivre/custos?vigencia=2026-01").json()
     assert {x["chave"] for x in cs["itens"]} == {"CAM-001", "MLB2"}
+    O = {x["chave"]: x for x in cs["itens"]}
+    assert O["CAM-001"]["origem"] == "CADASTRO" and O["CAM-001"]["custo"] == 25 and O["MLB2"]["origem"] is None
+    # vendas antes da 1ª vigência usam o primeiro custo (estimado)
+    ant = {x["chave"]: x for x in c.get(f"/api/empresas/{eid}/mlivre/custos?vigencia=2025-12").json()["itens"]}
+    assert ant["CAM-001"]["estimado"] is True and ant["CAM-001"]["custo"] == 25
     # copia o custo da aba Custo dos produtos (CAM-001 = 25,00 desde 01/2026, gravado antes no teste)
     assert c.post(f"/api/empresas/{eid}/mlivre/custos/copiar", json={"vigencia": "2026-01"}).json()["copiados"] == 1
     assert c.put(f"/api/empresas/{eid}/mlivre/custos", json={"chave": "MLB2", "custo": "4,00", "vigencia": "2026-01"}).json()["custo"] == 4

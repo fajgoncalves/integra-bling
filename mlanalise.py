@@ -1,14 +1,16 @@
 """Análise do Mercado Livre — DRE própria, margem por produto e por pedido.
 
 Usa só os dados do Mercado Livre (pedidos, itens, frete de cada envio e faturamento mensal) e a tabela de custos
-própria do módulo (por SKU, com vigência mensal). Não lê nem altera a DRE principal.
+própria do módulo (por SKU, com vigência mensal). Quando o SKU não tem custo no módulo, usa o custo da aba Custo dos
+produtos da empresa (casando o SKU com o código do produto) — só leitura: não lê nem altera a DRE principal.
 """
+import re
 import datetime as dt
 from collections import defaultdict
 
 from sqlalchemy import select
 
-from db import Empresa, MLVenda, MLItem, MLTarifa, MLCusto
+from db import Empresa, MLVenda, MLItem, MLTarifa, MLCusto, Produto, ProdutoCusto
 
 # encargos do faturamento → linha da DRE do ML
 LINHA_TIPO = {"CV": "COM", "CXD": "FRETE", "PADS": "ADS"}
@@ -48,19 +50,55 @@ def chave(it: MLItem):
     return it.sku or it.anuncio or it.titulo[:80]
 
 
-def vigencias(s, eid):
-    out = defaultdict(list)
-    for c in s.scalars(select(MLCusto).where(MLCusto.empresa_id == eid).order_by(MLCusto.mes_inicio)).all():
-        out[c.chave].append((c.mes_inicio, float(c.custo)))
-    return out
+def norm(k):
+    """SKU/código comparável: sem espaços, sem caixa e sem zeros à esquerda."""
+    k = re.sub(r"\s+", "", str(k or "")).upper()
+    return k.lstrip("0") or k
 
 
-def custo_no_mes(vig, k, mes):
-    c = None
-    for ini, v in vig.get(k, []):
-        if ini <= mes:
-            c = v
-    return c
+class Custos:
+    """Custo unitário de um produto do ML num mês.
+
+    1º o custo do próprio módulo (aba Custos do Mercado Livre), pela vigência;
+    2º o custo da aba Custo dos produtos da empresa, quando o SKU é igual ao código (ou código interno) do produto.
+    Em vendas de meses anteriores à primeira vigência, usa o primeiro custo informado (marcado como estimado)."""
+
+    def __init__(self, s, eid):
+        self.ml = defaultdict(list)
+        for c in s.scalars(select(MLCusto).where(MLCusto.empresa_id == eid).order_by(MLCusto.mes_inicio)).all():
+            self.ml[c.chave].append((c.mes_inicio, float(c.custo)))
+        cad = defaultdict(list)
+        self.nome_cad = {}
+        for p, mes, v in s.execute(select(Produto, ProdutoCusto.mes_inicio, ProdutoCusto.custo)
+                                   .join(ProdutoCusto, ProdutoCusto.produto_id == Produto.id)
+                                   .where(Produto.empresa_id == eid).order_by(ProdutoCusto.mes_inicio)).all():
+            for k in {norm(p.codigo), norm(p.produto)} - {""}:
+                cad[k].append((mes, float(v)))
+                self.nome_cad[k] = p.descricao
+        self.cad = cad
+
+    @staticmethod
+    def _no_mes(lista, mes):
+        if not lista:
+            return None, False
+        c = None
+        for ini, v in lista:
+            if ini <= mes:
+                c = v
+        return (c, False) if c is not None else (lista[0][1], True)
+
+    def custo(self, k, mes):
+        """(custo, origem 'ML'|'CADASTRO'|None, estimado)"""
+        c, est = self._no_mes(self.ml.get(k), mes)
+        if c is not None:
+            return c, "ML", est
+        c, est = self._no_mes(self.cad.get(norm(k)), mes)
+        if c is not None:
+            return c, "CADASTRO", est
+        return None, None, False
+
+    def vigencias_ml(self, k):
+        return len(self.ml.get(k, []))
 
 
 def linha_tarifa(t: MLTarifa):
@@ -77,10 +115,10 @@ def _fator(v: MLVenda):
     return max(0.0, min(1.0, 1 - float(v.devolvido or 0) / pago)) if pago else 0.0
 
 
-def pedidos(s, emp: Empresa, ini, fim, vig=None):
+def pedidos(s, emp: Empresa, ini, fim, cus=None):
     """[(MLVenda, [MLItem], resultado dict)] dos pedidos pagos do período."""
     d1, d2 = periodo_datas(ini, fim)
-    vig = vig if vig is not None else vigencias(s, emp.id)
+    cus = cus or Custos(s, emp.id)
     aliq = float(emp.ml_imposto_aliq or 0) / 100
     vs = s.scalars(select(MLVenda).where(MLVenda.empresa_id == emp.id, MLVenda.data >= d1, MLVenda.data <= d2,
                                          MLVenda.pago > 0).order_by(MLVenda.data, MLVenda.order_id)).all()
@@ -93,9 +131,10 @@ def pedidos(s, emp: Empresa, ini, fim, vig=None):
     for v in vs:
         mes, f = v.data.strftime("%Y-%m"), _fator(v)
         pago, dev = float(v.pago or 0), float(v.devolvido or 0)
-        cmv, sem = 0.0, []
+        cmv, sem, estimado = 0.0, [], False
         for it in itens[v.order_id]:
-            c = custo_no_mes(vig, chave(it), mes)
+            c, _origem, est = cus.custo(chave(it), mes)
+            estimado = estimado or est
             if c is None:
                 sem.append(chave(it))
             else:
@@ -106,7 +145,7 @@ def pedidos(s, emp: Empresa, ini, fim, vig=None):
         margem = pago - dev - imposto - tarifa - frete - cmv
         out.append((v, itens[v.order_id], {"mes": mes, "fator": f, "vendas": pago, "devolvido": dev, "imposto": imposto,
                                            "tarifa": tarifa, "frete": frete, "frete_lido": v.frete is not None,
-                                           "cmv": cmv, "sem_custo": sem, "margem": margem}))
+                                           "cmv": cmv, "sem_custo": sem, "estimado": estimado, "margem": margem}))
     return out
 
 
@@ -115,6 +154,7 @@ def dre(s, emp: Empresa, ini, fim):
     idx = {m: i for i, m in enumerate(meses)}
     val = {cod: [0.0] * len(meses) for cod, *_ in LINHAS}
     comp = defaultdict(lambda: defaultdict(lambda: [0.0] * len(meses)))
+    estimados = 0
     sem_custo, fretes_nao_lidos, conf = {}, 0, {"comissao_pedidos": 0.0, "frete_pedidos": 0.0}
     for v, its, r in pedidos(s, emp, ini, fim):
         i = idx[r["mes"]]
@@ -125,6 +165,7 @@ def dre(s, emp: Empresa, ini, fim):
         conf["comissao_pedidos"] += r["tarifa"]
         conf["frete_pedidos"] += r["frete"]
         fretes_nao_lidos += bool(v.shipping_id) and not r["frete_lido"]
+        estimados += r["estimado"]
         for it in its:
             if chave(it) in r["sem_custo"]:
                 x = sem_custo.setdefault(chave(it), {"chave": chave(it), "titulo": it.titulo, "vendas": 0.0})
@@ -168,6 +209,9 @@ def dre(s, emp: Empresa, ini, fim):
     if sem_fat:
         avisos.append("Sem faturamento do Mercado Livre lido em " + ", ".join(f"{m[5:]}/{m[:4]}" for m in sem_fat)
                       + " (o período pode não ter fechado): as tarifas desses meses estão zeradas.")
+    if estimados:
+        avisos.append(f"{estimados} pedido(s) de meses anteriores à primeira vigência de custo do produto: foi usado o primeiro "
+                      "custo informado. Para precisão, informe o custo a partir do mês das vendas.")
     if fretes_nao_lidos:
         avisos.append(f"{fretes_nao_lidos} pedido(s) sem o frete do envio lido: a margem por pedido e por produto fica sem esse frete.")
     return {"meses": meses, "linhas": linhas, "avisos": avisos, "sem_custo": sorted(sem_custo.values(), key=lambda x: -x["vendas"]),
@@ -179,10 +223,10 @@ def dre(s, emp: Empresa, ini, fim):
 
 def produtos(s, emp: Empresa, ini, fim):
     """Margem por produto (SKU ou anúncio), com frete do pedido rateado pelo valor dos itens."""
-    vig = vigencias(s, emp.id)
+    cus = Custos(s, emp.id)
     aliq = float(emp.ml_imposto_aliq or 0) / 100
     agg = {}
-    for v, its, r in pedidos(s, emp, ini, fim, vig):
+    for v, its, r in pedidos(s, emp, ini, fim, cus):
         tot_itens = sum(float(i.preco or 0) * float(i.qtd or 0) for i in its) or 1
         for it in its:
             k = chave(it)
@@ -190,7 +234,8 @@ def produtos(s, emp: Empresa, ini, fim):
             parte = bruto / tot_itens
             x = agg.setdefault(k, {"chave": k, "sku": it.sku, "anuncio": it.anuncio, "titulo": it.titulo, "tipos": set(),
                                    "pedidos": 0, "qtd": 0.0, "vendas": 0.0, "devolvido": 0.0, "imposto": 0.0, "tarifa": 0.0,
-                                   "frete": 0.0, "cmv": 0.0, "sem_custo": False})
+                                   "frete": 0.0, "cmv": 0.0, "sem_custo": False, "origens": set(),
+                                   "estimado": False})
             x["tipos"].add({"gold_special": "Clássico", "gold_pro": "Premium"}.get(it.tipo_anuncio, it.tipo_anuncio or "—"))
             x["pedidos"] += 1
             x["qtd"] += float(it.qtd or 0) * r["fator"]
@@ -199,7 +244,10 @@ def produtos(s, emp: Empresa, ini, fim):
             x["imposto"] += aliq * bruto * r["fator"]
             x["tarifa"] += float(it.tarifa or 0) * float(it.qtd or 0) * r["fator"]
             x["frete"] += r["frete"] * parte
-            c = custo_no_mes(vig, k, r["mes"])
+            c, origem, est = cus.custo(k, r["mes"])
+            if origem:
+                x["origens"].add(origem)
+            x["estimado"] = x["estimado"] or est
             if c is None:
                 x["sem_custo"] = True
             else:
@@ -210,7 +258,8 @@ def produtos(s, emp: Empresa, ini, fim):
         x["margem"] = liq - x["imposto"] - x["tarifa"] - x["frete"] - x["cmv"]
         x["margem_pct"] = round(x["margem"] / liq * 100, 1) if liq else None
         x["tipos"] = ", ".join(sorted(x["tipos"]))
-        x["custo_atual"] = custo_no_mes(vig, x["chave"], fim)
+        x["custo_atual"], _o, _e = cus.custo(x["chave"], fim)
+        x["origem_custo"] = " + ".join(sorted({"ML": "Mercado Livre", "CADASTRO": "Custo dos produtos"}[o] for o in x.pop("origens")))
         for k in ("qtd", "vendas", "devolvido", "imposto", "tarifa", "frete", "cmv", "margem"):
             x[k] = round(x[k], 4 if k == "qtd" else 2)
         out.append(x)

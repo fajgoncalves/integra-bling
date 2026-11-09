@@ -25,7 +25,7 @@ import mlanalise
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.10.0"
+VERSAO = "1.10.1"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -721,7 +721,7 @@ def ml_vendas(eid: int, inicio: str, fim: str, q: str = "", _u=Depends(usuario),
                     "descricao": v.descricao, "comprador": v.comprador, "itens": v.itens,
                     "sku": ", ".join(sorted({i.sku for i in its if i.sku})),
                     **{k: round(r[k], 2) for k in ("vendas", "devolvido", "imposto", "tarifa", "frete", "cmv", "margem")},
-                    "frete_lido": r["frete_lido"], "sem_custo": bool(r["sem_custo"])})
+                    "frete_lido": r["frete_lido"], "sem_custo": bool(r["sem_custo"]), "estimado": r["estimado"]})
     return {"total_pedidos": len(out), "nao_pagos": nao_pagos, "vendas": out[-3000:]}
 
 
@@ -743,7 +743,7 @@ def ml_custos(eid: int, vigencia: str = "", _u=Depends(usuario), s=Depends(get_d
     """Produtos já vendidos no ML (por SKU ou anúncio) com o custo vigente no mês `vigencia` (padrão: mês atual)."""
     e = _ml_emp(s, eid)
     mes = _mes_ok(vigencia, "Vigência") if vigencia else agora().strftime("%Y-%m")
-    vig = mlanalise.vigencias(s, e.id)
+    cus = mlanalise.Custos(s, e.id)
     prods = {}
     pagos = select(MLVenda.order_id).where(MLVenda.empresa_id == e.id, MLVenda.pago > 0)
     for it in s.scalars(select(MLItem).where(MLItem.empresa_id == e.id, MLItem.order_id.in_(pagos))).all():
@@ -751,12 +751,12 @@ def ml_custos(eid: int, vigencia: str = "", _u=Depends(usuario), s=Depends(get_d
         x = prods.setdefault(k, {"chave": k, "sku": it.sku, "anuncio": it.anuncio, "titulo": it.titulo, "qtd": 0.0, "vendas": 0.0})
         x["qtd"] += float(it.qtd or 0)
         x["vendas"] += float(it.qtd or 0) * float(it.preco or 0)
-    for k in vig:
+    for k in cus.ml:
         prods.setdefault(k, {"chave": k, "sku": k, "anuncio": "", "titulo": "", "qtd": 0.0, "vendas": 0.0})
     out = []
     for x in prods.values():
-        x["custo"] = mlanalise.custo_no_mes(vig, x["chave"], mes)
-        x["vigencias"] = len(vig.get(x["chave"], []))
+        x["custo"], x["origem"], x["estimado"] = cus.custo(x["chave"], mes)
+        x["vigencias"] = cus.vigencias_ml(x["chave"])
         x["vendas"] = round(x["vendas"], 2)
         x["preco_medio"] = round(x["vendas"] / x["qtd"], 2) if x["qtd"] else None
         out.append(x)
@@ -810,16 +810,12 @@ async def ml_custo_copiar(eid: int, request: Request, u=Depends(usuario), s=Depe
     e = _ml_emp(s, eid)
     b = await request.json()
     mes = _mes_ok(b.get("vigencia"), "Vigência")
-    vig_ml = mlanalise.vigencias(s, e.id)
-    cad, vig_d = {}, dominio.vigencias(s, e.id)
-    for p in s.scalars(select(Produto).where(Produto.empresa_id == e.id)).all():
-        c = dominio.custo_no_mes(vig_d.get(p.produto), mes)
-        if c is not None and p.codigo:
-            cad[str(p.codigo).strip().lower()] = c
+    cus = mlanalise.Custos(s, e.id)
     n = 0
     for k in {mlanalise.chave(it) for it in s.scalars(select(MLItem).where(MLItem.empresa_id == e.id)).all()}:
-        if mlanalise.custo_no_mes(vig_ml, k, mes) is None and k.strip().lower() in cad:
-            s.add(MLCusto(empresa_id=e.id, chave=k, mes_inicio=mes, custo=cad[k.strip().lower()], criado_por=u.email))
+        c, origem, _est = cus.custo(k, mes)
+        if origem == "CADASTRO":
+            s.add(MLCusto(empresa_id=e.id, chave=k, mes_inicio=mes, custo=c, criado_por=u.email))
             n += 1
     audit(s, u.email, "ML_CUSTO_COPIA", f"{e.id} {mes}: {n}")
     s.commit()

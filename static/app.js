@@ -1063,7 +1063,7 @@ async function mlProdutos(e) {
         <th class="num">Tarifa</th><th class="num">Frete</th><th class="num">Custo</th><th class="num">Margem</th><th class="num">%</th></tr>
       ${its.map((x) => `<tr><td>${esc(x.titulo)}<div class="suave peq mono">${esc(x.sku || x.anuncio)}</div></td><td class="peq">${esc(x.tipos)}</td><td class="num">${qtdBR(x.qtd)}</td><td class="num">${brl(x.vendas)}</td>
         <td class="num ${x.devolvido ? "neg" : "suave"}">${x.devolvido ? brl(-x.devolvido) : "–"}</td><td class="num neg">${brl(-x.imposto)}</td><td class="num neg">${brl(-x.tarifa)}</td><td class="num neg">${brl(-x.frete)}</td>
-        <td class="num">${x.sem_custo ? '<span class="badge b-aviso">sem custo</span>' : `<span class="neg">${brl(-x.cmv)}</span>`}</td>
+        <td class="num" title="${esc(x.origem_custo ? `Custo de: ${x.origem_custo}${x.estimado ? " (meses anteriores à 1ª vigência usam o primeiro custo)" : ""}` : "")}">${x.sem_custo ? '<span class="badge b-aviso">sem custo</span>' : `<span class="neg">${brl(-x.cmv)}</span>${x.estimado ? "*" : ""}`}<div class="suave peq">${esc(x.origem_custo || "")}</div></td>
         <td class="num ${x.margem < 0 ? "neg" : ""}"><b>${brl(x.margem)}</b></td><td class="num ${x.margem < 0 ? "neg" : ""}">${pct(x.margem_pct)}</td></tr>`).join("")}</table></div>`;
     $("#res").classList.remove("suave");
   };
@@ -1103,7 +1103,7 @@ async function mlCustos(e) {
       <div class="linha"><label>Custos vigentes em <input type="month" id="vig" value="${p.fim}"></label><input id="q" placeholder="Buscar produto ou SKU..." style="min-width:220px">
         <label class="chk"><input type="checkbox" id="sem"> Só sem custo</label></div>
       <button class="btn" id="copiar" title="Usa o custo cadastrado na aba Custo dos produtos da empresa quando o código do produto é igual ao SKU">Copiar da aba Custo dos produtos</button></div>
-    <div class="suave peq" style="margin:10px 0">Custo unitário por SKU (ou pelo anúncio, quando o anúncio não tem SKU). O valor digitado vale a partir do mês escolhido acima, até haver outro. Estes custos são só do módulo do Mercado Livre.</div>
+    <div class="suave peq" style="margin:10px 0">Custo unitário por SKU (ou pelo anúncio, quando o anúncio não tem SKU). Quando o SKU é igual ao código de um produto da aba <b>Custo dos produtos</b>, aquele custo é usado automaticamente (em cinza). Digite aqui só para usar outro custo no Mercado Livre: vale a partir do mês escolhido acima.</div>
     <div id="res" class="suave">Carregando...</div></div>`;
   let r = null;
   const carregar = async () => { r = await api(`/api/empresas/${e.id}/mlivre/custos?vigencia=${$("#vig").value}`); desenhar(); };
@@ -1111,10 +1111,11 @@ async function mlCustos(e) {
     const q = $("#q").value.toLowerCase(), so = $("#sem").checked;
     const its = r.itens.filter((x) => (!so || x.custo == null) && (!q || x.titulo.toLowerCase().includes(q) || x.chave.toLowerCase().includes(q)));
     $("#res").innerHTML = `<div class="suave peq" style="margin-bottom:6px">${r.itens.filter((x) => x.custo == null).length} de ${r.itens.length} produto(s) sem custo em ${mesBR(r.vigencia)}.</div>
-      <div class="rolagem" style="max-height:65vh"><table><tr><th>Produto</th><th>SKU / anúncio</th><th class="num">Qtd vendida</th><th class="num">Preço médio</th><th class="num" style="min-width:140px">Custo unitário</th><th></th></tr>
+      <div class="rolagem" style="max-height:65vh"><table><tr><th>Produto</th><th>SKU / anúncio</th><th class="num">Qtd vendida</th><th class="num">Preço médio</th><th class="num" style="min-width:140px">Custo unitário</th><th>Origem do custo</th><th></th></tr>
       ${its.map((x) => `<tr data-k="${esc(x.chave)}"><td>${esc(x.titulo) || '<span class="suave">—</span>'}</td><td class="mono peq">${esc(x.sku || x.anuncio)}</td><td class="num">${qtdBR(x.qtd)}</td><td class="num">${brl(x.preco_medio)}</td>
-        <td class="num"><input class="custo" inputmode="decimal" style="width:120px;text-align:right" value="${x.custo == null ? "" : brl4(x.custo)}" placeholder="informar"></td>
-        <td>${x.vigencias ? `<button class="btn peq hist">Histórico (${x.vigencias})</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6" class="vazio">Nada para mostrar. Atualize os pedidos na aba Conexão e dados.</td></tr>'}</table></div>`;
+        <td class="num"><input class="custo" inputmode="decimal" style="width:120px;text-align:right" value="${x.origem === "ML" ? brl4(x.custo) : ""}" placeholder="${x.origem === "CADASTRO" ? brl4(x.custo) : "informar"}"></td>
+        <td class="peq">${x.origem === "ML" ? "Mercado Livre" : x.origem === "CADASTRO" ? '<span class="suave">Custo dos produtos (automático)</span>' : '<span class="badge b-aviso">sem custo</span>'}${x.estimado ? '<div class="suave">1º custo (antes da vigência)</div>' : ""}</td>
+        <td>${x.vigencias ? `<button class="btn peq hist">Histórico (${x.vigencias})</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="7" class="vazio">Nada para mostrar. Atualize os pedidos na aba Conexão e dados.</td></tr>'}</table></div>`;
     $("#res").classList.remove("suave");
     $$("#res tr[data-k]").forEach((tr) => {
       const k = tr.dataset.k;
@@ -1122,7 +1123,7 @@ async function mlCustos(e) {
         if (!ev.target.value.trim()) return;
         await api(`/api/empresas/${e.id}/mlivre/custos`, { method: "PUT", body: { chave: k, custo: ev.target.value, vigencia: $("#vig").value } });
         const x = r.itens.find((i) => i.chave === k);
-        x.custo = Number(ev.target.value.replace(/\./g, "").replace(",", ".")); x.vigencias = (x.vigencias || 0) + 1;
+        x.custo = Number(ev.target.value.replace(/\./g, "").replace(",", ".")); x.origem = "ML"; x.vigencias = (x.vigencias || 0) + 1;
         tr.style.background = "#E3F5EF"; setTimeout(() => { tr.style.background = ""; }, 700);
       });
       if ($(".hist", tr)) $(".hist", tr).onclick = () => tentar(async () => {
