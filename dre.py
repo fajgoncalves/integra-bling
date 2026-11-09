@@ -264,8 +264,10 @@ def valores_origem(s, empresa_id: int, ini: str, fim: str):
     if c and c.linha_id:
         from db import Empresa
         e = s.get(Empresa, empresa_id)
-        for x in dominio.pis_cofins(s, empresa_id, ini, fim, float(e.pis_cofins_aliq or 0)):
+        for x in dominio.pis_cofins(s, empresa_id, ini, fim, float(e.pis_cofins_aliq or 0), e.pis_cofins_fonte or "APURACAO"):
             vals[c.id][x["mes"]] -= x["valor"]
+            if not x["apurado"]:
+                sem_categoria.setdefault("pis_sem_apuracao", []).append(x["mes"])
     c = por_cod.get(("DOMINIO", "CMV"))
     sem_custo = {"produtos": 0, "faturamento": 0.0}
     if c:
@@ -351,6 +353,9 @@ def calcular(s, empresa, ini: str, fim: str):
             avisos.append(f"A linha que recebe o {cod.replace('_', '/')} calculado também soma pagamentos do Bling ("
                           + ", ".join(juntos[:4]) + f"). {txt}: deixe essas categorias fora da DRE ou leve-as para outra "
                           "linha, senão o valor é contado duas vezes.")
+    if sem_cat.get("pis_sem_apuracao"):
+        avisos.append("PIS/COFINS sem apuração na Domínio em " + ", ".join(f"{m[5:]}/{m[:4]}" for m in sem_cat["pis_sem_apuracao"])
+                      + " (ficou zero nesses meses). Apure na Domínio e leia de novo, ou troque para alíquota no cadastro da empresa.")
     sc = sem_cat.get("sem_custo") or {}
     if sc.get("produtos") and any(c.origem == "DOMINIO" and c.codigo == "CMV" and c.linha_id for c in contas):
         avisos.append(f"CMV incompleto: {sc['produtos']} produto(s) vendido(s) no período sem custo informado "

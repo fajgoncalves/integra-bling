@@ -21,7 +21,7 @@ GRUPOS = [
     ("DEV_COMPRA", "Devoluções de compra (NF de saída)", "R"),
     ("OUTRAS_SAIDAS", "Outras saídas (remessas, transferências, ativo etc.)", "R"),
     ("CMV", "CMV calculado (vendas − devoluções de venda, × custo do produto)", "D"),
-    ("PIS_COFINS", "PIS/COFINS calculado (alíquota × faturamento − devoluções de venda)", "D"),
+    ("PIS_COFINS", "PIS/COFINS (débito da apuração na Domínio, ou alíquota × faturamento − devoluções)", "D"),
     ("ICMS_TTD", "ICMS TTD / regime especial (saldo a recolher da apuração na Domínio)", "D"),
 ]
 # sugestão de associação das contas da Domínio no modelo padrão
@@ -157,21 +157,37 @@ def cmv(s, empresa_id: int, ini: str, fim: str, mes_ref: str | None = None):
     return {m: round(v, 2) for m, v in por_mes.items()}, por_prod, sem_custo
 
 
-def pis_cofins(s, empresa_id: int, ini: str, fim: str, aliquota: float):
-    """Por mês: faturamento (vendas + serviços), devoluções de venda, base e PIS/COFINS = base × alíquota."""
+def pis_cofins(s, empresa_id: int, ini: str, fim: str, aliquota: float, fonte: str = "APURACAO"):
+    """Por mês: faturamento, devoluções e o PIS/COFINS — pelo débito apurado na Domínio (fonte APURACAO) ou por
+    alíquota × (faturamento − devoluções) (fonte ALIQUOTA)."""
     meses = {}
     for v in s.scalars(select(DominioValor).where(DominioValor.empresa_id == empresa_id, DominioValor.mes >= ini,
                                                   DominioValor.mes <= fim)).all():
-        g = grupo(v.grupo, v.cfop)
-        if g not in ("VENDAS", "SERVICOS", "DEV_VENDA"):
+        x = meses.setdefault(v.mes, {"mes": v.mes, "faturamento": 0.0, "devolucoes": 0.0, "pis": None, "cofins": None})
+        if v.grupo == "PIS_DEB":
+            x["pis"] = (x["pis"] or 0) + float(v.valor or 0)
             continue
-        x = meses.setdefault(v.mes, {"mes": v.mes, "faturamento": 0.0, "devolucoes": 0.0})
-        x["devolucoes" if g == "DEV_VENDA" else "faturamento"] += float(v.valor or 0)
+        if v.grupo == "COF_DEB":
+            x["cofins"] = (x["cofins"] or 0) + float(v.valor or 0)
+            continue
+        g = grupo(v.grupo, v.cfop)
+        if g in ("VENDAS", "SERVICOS"):
+            x["faturamento"] += float(v.valor or 0)
+        elif g == "DEV_VENDA":
+            x["devolucoes"] += float(v.valor or 0)
     out = []
     for m, x in sorted(meses.items()):
         base = x["faturamento"] - x["devolucoes"]
-        out.append({**x, "faturamento": round(x["faturamento"], 2), "devolucoes": round(x["devolucoes"], 2),
-                    "base": round(base, 2), "aliquota": aliquota, "valor": round(base * aliquota / 100, 2)})
+        if fonte == "APURACAO":
+            apurado = x["pis"] is not None or x["cofins"] is not None
+            valor = (x["pis"] or 0) + (x["cofins"] or 0)
+        else:
+            apurado, valor = True, base * aliquota / 100
+        if not (base or valor):
+            continue
+        out.append({"mes": m, "faturamento": round(x["faturamento"], 2), "devolucoes": round(x["devolucoes"], 2),
+                    "base": round(base, 2), "aliquota": aliquota, "fonte": fonte, "apurado": apurado,
+                    "pis": round(x["pis"] or 0, 2), "cofins": round(x["cofins"] or 0, 2), "valor": round(valor, 2)})
     return out
 
 
@@ -198,6 +214,10 @@ def gravar_resultado(s, empresa_id: int, res: dict, ini_mes: str, fim_mes: str):
         v[0] += float(x.get("valor") or 0)
         v[1] += int(x.get("qtd") or 0)
     # apuração do ICMS no regime especial: saldo a recolher (DRE) + débito e crédito presumido (consulta)
+    for x in res.get("apuracao_pis_cofins") or []:
+        for g, campo in (("PIS_DEB", "pis"), ("COF_DEB", "cofins")):
+            v = soma.setdefault((x["mes"], g, 0), [0.0, 0])
+            v[0] += float(x.get(campo) or 0)
     for x in res.get("apuracao_icms") or []:
         for g, campo in (("ICMS_REG", "saldo_recolher"), ("ICMS_DEB", "debito"), ("ICMS_CP", "credito_presumido")):
             v = soma.setdefault((x["mes"], g, 0), [0.0, 0])

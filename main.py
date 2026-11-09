@@ -23,7 +23,7 @@ import fluxo
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.7.0"
+VERSAO = "1.8.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -353,6 +353,7 @@ def _emp_json(s, e: Empresa):
     return {"id": e.id, "nome": e.nome, "cnpj": e.cnpj, "codigo_dominio": e.codigo_dominio, "ativo": e.ativo,
             "modelo_id": e.modelo_id, "modelo_nome": m.nome if m else None,
             "pis_cofins_aliq": float(e.pis_cofins_aliq if e.pis_cofins_aliq is not None else 9.25),
+            "pis_cofins_fonte": e.pis_cofins_fonte or "APURACAO",
             "bling_conectado": bool(e.bling_refresh), "bling_conectado_em": dt2s(e.bling_conectado_em),
             "bling_app_proprio": bool(e.bling_client_id), "bling_client_id": e.bling_client_id,
             "bling_sync_em": dt2s(e.bling_sync_em), "bling_sync_periodo": e.bling_sync_periodo,
@@ -377,6 +378,10 @@ def _ler_empresa(b, e: Empresa, s):
         e.codigo_dominio = str(b["codigo_dominio"] or "").strip()[:20]
     if "ativo" in b:
         e.ativo = bool(b["ativo"])
+    if "pis_cofins_fonte" in b:
+        if b["pis_cofins_fonte"] not in ("APURACAO", "ALIQUOTA"):
+            raise HTTPException(400, "Origem do PIS/COFINS inválida.")
+        e.pis_cofins_fonte = b["pis_cofins_fonte"]
     if "pis_cofins_aliq" in b:
         a = _num_br(b["pis_cofins_aliq"])
         if a is None or a < 0 or a > 100:
@@ -678,9 +683,10 @@ def conta_detalhe(cid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depend
                 "total": round(-sum(x["saldo_recolher"] for x in itens), 2)}
     if c.codigo == "PIS_COFINS":
         e = s.get(Empresa, c.empresa_id)
-        itens = dominio.pis_cofins(s, c.empresa_id, inicio, fim, float(e.pis_cofins_aliq or 0))
+        fonte = e.pis_cofins_fonte or "APURACAO"
+        itens = dominio.pis_cofins(s, c.empresa_id, inicio, fim, float(e.pis_cofins_aliq or 0), fonte)
         return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "pis", "itens": itens,
-                "total": round(-sum(x["valor"] for x in itens), 2), "aliquota": float(e.pis_cofins_aliq or 0)}
+                "total": round(-sum(x["valor"] for x in itens), 2), "aliquota": float(e.pis_cofins_aliq or 0), "fonte": fonte}
     if c.codigo == "CMV":
         _pm, por_prod, sem = dominio.cmv(s, c.empresa_id, inicio, fim)
         itens = sorted(({k: v for k, v in x.items() if k != "id"} for x in por_prod.values()), key=lambda x: -x["valor_vendido"])

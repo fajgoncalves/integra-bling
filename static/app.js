@@ -168,7 +168,8 @@ async function formEmpresa(e) {
       <label>Nome <input id="e-nome" value="${esc(e?.nome)}"></label>
       <label>CNPJ <input id="e-cnpj" value="${esc(cnpjFmt(e?.cnpj))}"></label>
       <label>Código na Domínio <input id="e-cod" value="${esc(e?.codigo_dominio)}"></label>
-      <label>PIS/COFINS (% sobre faturamento − devoluções) <input id="e-pis" inputmode="decimal" value="${e ? brl4(e.pis_cofins_aliq).replace(/,?0+$/, "") : "9,25"}"></label>
+      <label>PIS/COFINS na DRE <select id="e-pisf"><option value="APURACAO">Débito apurado na Domínio</option><option value="ALIQUOTA">Alíquota × (faturamento − devoluções)</option></select></label>
+      <label>Alíquota PIS/COFINS (%) — se usar alíquota <input id="e-pis" inputmode="decimal" value="${e ? brl4(e.pis_cofins_aliq).replace(/,?0+$/, "") : "9,25"}"></label>
       <label>Modelo de DRE <select id="e-mod">${modelos.map((x) => `<option value="${x.id}" ${e?.modelo_id === x.id ? "selected" : ""}>${esc(x.nome)}</option>`).join("")}</select></label>
     </div>
     <details style="margin-top:14px" ${e?.bling_app_proprio ? "open" : ""}><summary><b>Aplicativo do Bling próprio desta empresa</b> <span class="suave">(opcional)</span></summary>
@@ -179,6 +180,7 @@ async function formEmpresa(e) {
     ${e && e.modelo_id ? `<div class="aviso peq" style="margin-top:12px">Trocar o modelo de DRE apaga as associações desta empresa.</div>` : ""}
     <div class="linha" style="margin-top:16px"><button class="btn pri" id="e-ok">Salvar</button><button class="btn" data-fechar>Cancelar</button>
     ${e && EU.perfil === "ADMIN" ? '<button class="btn perigo" id="e-del" style="margin-left:auto">Excluir empresa</button>' : ""}</div>`);
+  $("#e-pisf", m).value = (e && e.pis_cofins_fonte) || "APURACAO";
   if (!e) {
     const buscar = (ev) => tentar(async () => {
       const r = await api(`/api/central/clientes?q=${encodeURIComponent($("#c-q", m).value)}`);
@@ -194,7 +196,7 @@ async function formEmpresa(e) {
   }
   $("#e-ok", m).onclick = (ev) => tentar(async () => {
     const body = { nome: $("#e-nome", m).value, cnpj: $("#e-cnpj", m).value, codigo_dominio: $("#e-cod", m).value,
-      modelo_id: Number($("#e-mod", m).value), bling_client_id: $("#e-cid", m).value, pis_cofins_aliq: $("#e-pis", m).value };
+      modelo_id: Number($("#e-mod", m).value), bling_client_id: $("#e-cid", m).value, pis_cofins_aliq: $("#e-pis", m).value, pis_cofins_fonte: $("#e-pisf", m).value };
     if ($("#e-sec", m).value) body.bling_client_secret = $("#e-sec", m).value;
     if (e) body.ativo = $("#e-ativo", m).checked;
     if (e && e.modelo_id && body.modelo_id !== e.modelo_id && !confirm("Trocar o modelo apaga as associações desta empresa. Continuar?")) return;
@@ -380,10 +382,14 @@ async function consultarConta(c, e) {
       <div class="rolagem"><table><tr><th>Mês</th><th class="num">Débito das saídas</th><th class="num">Crédito presumido</th><th class="num">Saldo a recolher</th></tr>
       ${r.itens.map((i) => `<tr><td>${mesBR(i.mes)}</td><td class="num">${brl(i.debito)}</td><td class="num">${brl(i.credito_presumido)}</td><td class="num"><b>${brl(i.saldo_recolher)}</b></td></tr>`).join("") || '<tr><td colspan="4" class="vazio">Sem apuração no período (leia a Domínio com o Agente 360 0.14.3 ou superior).</td></tr>'}</table></div>`;
     } else if (r.tipo === "pis") {
-      corpo.innerHTML = `<div class="kpi"><div>PIS/COFINS<b class="neg">R$ ${brl(r.total)}</b></div><div>Alíquota<b>${brl4(r.aliquota)}%</b></div></div>
-      <div class="suave peq" style="margin-bottom:8px">Base = faturamento (vendas + serviços das notas da Domínio, sem canceladas) − devoluções de venda. A alíquota fica no cadastro da empresa.</div>
-      <div class="rolagem"><table><tr><th>Mês</th><th class="num">Faturamento</th><th class="num">Devoluções</th><th class="num">Base</th><th class="num">PIS/COFINS</th></tr>
-      ${r.itens.map((i) => `<tr><td>${mesBR(i.mes)}</td><td class="num">${brl(i.faturamento)}</td><td class="num">${brl(i.devolucoes)}</td><td class="num">${brl(i.base)}</td><td class="num">${brl(i.valor)}</td></tr>`).join("")}</table></div>`;
+      const ap = r.fonte === "APURACAO";
+      corpo.innerHTML = `<div class="kpi"><div>PIS/COFINS<b class="neg">R$ ${brl(r.total)}</b></div><div>Origem<b style="font-size:14px">${ap ? "Débito apurado na Domínio" : `Alíquota de ${brl4(r.aliquota)}%`}</b></div></div>
+      <div class="suave peq" style="margin-bottom:8px">${ap ? "Total de débitos de PIS e de COFINS da apuração do mês na Domínio. Faturamento e devoluções aparecem só para comparação."
+        : "Base = faturamento (vendas + serviços das notas da Domínio, sem canceladas) − devoluções de venda."} A origem fica no cadastro da empresa.</div>
+      <div class="rolagem"><table><tr><th>Mês</th><th class="num">Faturamento</th><th class="num">Devoluções</th>${ap ? '<th class="num">PIS apurado</th><th class="num">COFINS apurada</th>' : '<th class="num">Base</th>'}<th class="num">PIS/COFINS</th><th class="num">% do faturamento</th></tr>
+      ${r.itens.map((i) => `<tr><td>${mesBR(i.mes)}</td><td class="num">${brl(i.faturamento)}</td><td class="num">${brl(i.devolucoes)}</td>
+        ${ap ? `<td class="num">${i.apurado ? brl(i.pis) : '<span class="badge b-aviso">sem apuração</span>'}</td><td class="num">${i.apurado ? brl(i.cofins) : ""}</td>` : `<td class="num">${brl(i.base)}</td>`}
+        <td class="num"><b>${brl(i.valor)}</b></td><td class="num suave">${i.faturamento ? pct(i.valor / i.faturamento * 100) : ""}</td></tr>`).join("")}</table></div>`;
     } else if (r.tipo === "cmv") {
       corpo.innerHTML = `<div class="kpi"><div>CMV<b class="neg">R$ ${brl(r.total)}</b></div><div>Produtos<b>${r.itens.length}</b></div>
         ${r.sem_custo.produtos ? `<div style="border-color:#F1D9A6;background:var(--amarelo-cl)">Sem custo<b>${r.sem_custo.produtos}</b></div>` : ""}</div>

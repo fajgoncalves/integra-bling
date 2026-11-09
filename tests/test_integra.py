@@ -100,6 +100,7 @@ def central_falsa(req: httpx.Request):
                         {"mes": "2026-01", "cfop": 5102, "produto": "200", "qtd": 4, "valor": 2000},
                         {"mes": "2026-01", "cfop": 5202, "produto": "300", "qtd": 1, "valor": 200}],  # devolução de compra: não é CMV
         "itens_entrada": [{"mes": "2026-02", "cfop": 1202, "produto": "100", "qtd": 1, "valor": 300}],
+        "apuracao_pis_cofins": [{"mes": "2026-01", "pis": 100, "cofins": 460, "outros": 0}],
         "apuracao_icms": [{"mes": "2026-02", "debito": 1000, "credito_presumido": 800, "recolhimento_efetivo": 200, "saldo_recolher": 150}],
         "produtos": [{"produto": "100", "codigo": "CAM-001", "descricao": "Camiseta", "unidade": "UN"},
                      {"produto": "200", "codigo": "BON-9", "descricao": "Boné", "unidade": "UN"}]}})
@@ -237,6 +238,11 @@ def test_fluxo_completo():
         assert len(L["DV_COM"]["composicao"]) == 2
         assert L["DF"]["total"] == -45
         assert L["CMV"]["valores"] == [-450, 30, 0]
+        assert L["PIS_COFINS"]["valores"] == [-560, 0, 0]  # padrão: débito apurado na Domínio (fevereiro sem apuração)
+        assert any("PIS/COFINS sem apuração na Domínio em 02/2026" in a for a in d["avisos"])
+        assert c.put(f"/api/empresas/{e['id']}", json={"pis_cofins_fonte": "ALIQUOTA"}).json()["pis_cofins_fonte"] == "ALIQUOTA"
+        d = c.get(f"/api/empresas/{e['id']}/dre?inicio=2026-01&fim=2026-03").json()
+        L = {x["codigo"]: x for x in d["linhas"]}
         assert L["PIS_COFINS"]["valores"] == [-740, -64.75, 0]  # 9,25% de (8.000) e de (1.000 − 300)
         assert L["ICMS_TTD"]["valores"] == [0, -150, 0]
         assert L["DED"]["total"] == -300 - 804.75 - 150 and L["RL"]["total"] == 9000 - 300 - 804.75 - 150
