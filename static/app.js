@@ -533,13 +533,23 @@ async function abaCustos(e) {
     <div id="cx-kpi" class="kpi"></div>
     <div class="linha" style="margin-bottom:10px"><input id="cx-q" placeholder="Buscar produto..." style="flex:1;min-width:180px">
       <label class="chk"><input type="checkbox" id="cx-sem"> Só com mês sem custo</label></div>
-    <div class="rolagem"><table id="cx-tab"></table></div></div>`;
+    <div class="rolagem"><table id="cx-tab"></table></div></div>
+    <div class="card" id="cx-conf"></div>`;
   let r = null;
   const carregar = async () => { const p = periodo(); r = await api(`/api/empresas/${e.id}/produtos?inicio=${p.inicio}&fim=${p.fim}&vigencia=${vig}`); desenhar(); };
   const desenhar = () => {
     $("#cx-kpi").innerHTML = `<div>Produtos<b>${r.itens.length}</b></div><div>Faturamento dos itens<b>R$ ${brl(r.totais.valor_vendido)}</b></div>
       <div>CMV no período<b>R$ ${brl(r.totais.cmv)}</b></div>
       <div style="${r.sem_custo.produtos ? "border-color:#F1D9A6;background:var(--amarelo-cl)" : ""}">Vendidos sem custo<b>${r.sem_custo.produtos}</b><span class="peq suave">R$ ${brl(r.sem_custo.faturamento)}</span></div>`;
+    const cf = r.conferencia || [];
+    const tn = cf.reduce((a, x) => a + x.notas, 0), ti = cf.reduce((a, x) => a + x.itens, 0);
+    $("#cx-conf").innerHTML = cf.length ? `<h2>Conferência: notas × itens (vendas)</h2>
+      <div class="suave peq" style="margin-bottom:8px"><b>Valor das notas</b> = valor contábil das notas de venda (é o que vai para a DRE). <b>Valor dos itens</b> = soma do valor dos produtos nos itens (base desta aba).
+        Diferença positiva costuma ser desconto na nota ou nota cancelada com itens; negativa, frete/IPI/ST somados na nota.</div>
+      <div class="rolagem" style="max-height:none"><table><tr><th>Mês</th><th class="num">Notas</th><th class="num">Valor das notas</th><th class="num">Valor dos itens</th><th class="num">Diferença</th><th class="num">%</th></tr>
+      ${cf.map((x) => `<tr><td>${mesBR(x.mes)}</td><td class="num">${x.qtd_notas}</td><td class="num">${brl(x.notas)}</td><td class="num">${brl(x.itens)}</td>
+        <td class="num ${Math.abs(x.diferenca) > 0.01 ? (x.diferenca > 0 ? "" : "neg") : "suave"}">${brl(x.diferenca)}</td><td class="num suave">${x.notas ? pct(x.diferenca / x.notas * 100) : ""}</td></tr>`).join("")}
+      <tr class="destaque" style="font-weight:700"><td>Total</td><td></td><td class="num">${brl(tn)}</td><td class="num">${brl(ti)}</td><td class="num">${brl(ti - tn)}</td><td class="num">${tn ? pct((ti - tn) / tn * 100) : ""}</td></tr></table></div>` : "";
     const q = filtros.q.toLowerCase();
     const lin = r.itens.filter((i) => (!filtros.sem || i.meses_sem_custo.length) && (!q || `${i.codigo} ${i.descricao}`.toLowerCase().includes(q)));
     if (!r.itens.length) { $("#cx-tab").innerHTML = `<tr><td class="vazio">Nenhum produto ainda. Leia a Domínio na aba Conexões (precisa do Agente 360 na versão 0.14.0 ou superior).</td></tr>`; return; }

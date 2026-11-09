@@ -704,7 +704,22 @@ def produtos(eid: int, inicio: str, fim: str, vigencia: str = "", _u=Depends(usu
                       "cmv": x.get("cmv", 0), "meses_sem_custo": x.get("meses_sem_custo", []),
                       "margem": round((1 - x["cmv"] / liq) * 100, 1) if x.get("cmv") and liq and not x.get("meses_sem_custo") else None})
     itens.sort(key=lambda i: (-i["valor_vendido"], i["descricao"]))
-    return {"itens": itens, "sem_custo": sem_custo, "vigencia": vigencia,
+    # conferência mês a mês: valor contábil das notas de venda (DRE) x soma dos itens de venda
+    conf = {}
+    for v in s.scalars(select(DominioValor).where(DominioValor.empresa_id == e.id, DominioValor.mes >= inicio,
+                                                  DominioValor.mes <= fim, DominioValor.grupo == "SAIDA")).all():
+        if dominio.eh_venda(v.cfop):
+            x = conf.setdefault(v.mes, {"mes": v.mes, "notas": 0.0, "itens": 0.0, "qtd_notas": 0})
+            x["notas"] += float(v.valor or 0)
+            x["qtd_notas"] += v.qtd or 0
+    for it in s.scalars(select(DominioItem).where(DominioItem.empresa_id == e.id, DominioItem.mes >= inicio,
+                                                  DominioItem.mes <= fim, DominioItem.lado == "S")).all():
+        if dominio.eh_venda(it.cfop):
+            x = conf.setdefault(it.mes, {"mes": it.mes, "notas": 0.0, "itens": 0.0, "qtd_notas": 0})
+            x["itens"] += float(it.valor or 0)
+    conferencia = [{**x, "notas": round(x["notas"], 2), "itens": round(x["itens"], 2),
+                    "diferenca": round(x["itens"] - x["notas"], 2)} for _m, x in sorted(conf.items())]
+    return {"itens": itens, "sem_custo": sem_custo, "vigencia": vigencia, "conferencia": conferencia,
             "totais": {"valor_vendido": round(sum(i["valor_vendido"] for i in itens), 2),
                        "valor_devolvido": round(sum(i["valor_devolvido"] for i in itens), 2),
                        "cmv": round(sum(i["cmv"] for i in itens), 2)},
