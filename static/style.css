@@ -100,3 +100,7 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:now
   .conteudo{padding:16px 12px 50px}
   .dre td:first-child{min-width:200px}
 }
+.fx tr.fx-raiz td{font-weight:600}
+.fx .clicavel{cursor:pointer}
+.fx .fx-cat:hover{text-decoration:underline}
+.fx select.fx-sec{padding:3px 6px;font-size:12px}

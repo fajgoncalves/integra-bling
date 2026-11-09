@@ -19,10 +19,11 @@ from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem
 import bling
 import dominio
 import dre
+import fluxo
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.4.1"
+VERSAO = "1.5.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -864,6 +865,83 @@ async def produtos_importar(eid: int, request: Request, u=Depends(usuario), s=De
     audit(s, u.email, "CUSTO_IMPORTA", f"{e.id}: {ok} custos ({', '.join(sorted(meses))}), {len(nao)} não encontrados")
     s.commit()
     return {"ok": True, "atualizados": ok, "meses": sorted(meses), "nao_encontrados": nao[:50]}
+
+
+# ------------------------------------------------------------------ fluxo de caixa realizado (Bling)
+@app.get("/api/empresas/{eid}/fluxo")
+def fluxo_ver(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    e = s.get(Empresa, eid) or _404()
+    _mes_ok(inicio, "Início")
+    _mes_ok(fim, "Fim")
+    if inicio > fim:
+        raise HTTPException(400, "O início é depois do fim.")
+    if len(dre.meses_entre(inicio, fim)) > 36:
+        raise HTTPException(400, "Período máximo de 36 meses.")
+    r = fluxo.calcular(s, e.id, inicio, fim)
+    return {"empresa": {"id": e.id, "nome": e.nome, "bling_sync_periodo": e.bling_sync_periodo,
+                        "bling_sync_em": dt2s(e.bling_sync_em)}, **r}
+
+
+@app.put("/api/empresas/{eid}/fluxo/ordem")
+async def fluxo_ordem(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    """[{conta_id, ordem, secao}] — reorganiza o fluxo (seção só para categorias de primeiro nível)."""
+    s.get(Empresa, eid) or _404()
+    b = await request.json()
+    n = 0
+    for it in b.get("itens") or []:
+        c = s.get(ContaOrigem, int(it.get("conta_id") or 0))
+        if not c or c.empresa_id != eid or c.origem != "BLING":
+            continue
+        if "ordem" in it:
+            c.fluxo_ordem = int(it["ordem"] or 0)
+        if "secao" in it:
+            c.fluxo_secao = it["secao"] if it["secao"] in fluxo.SECOES else None
+        n += 1
+    audit(s, u.email, "FLUXO_ORDEM", f"{eid}: {n}")
+    s.commit()
+    return {"ok": True, "alteradas": n}
+
+
+@app.get("/api/empresas/{eid}/fluxo.xlsx")
+def fluxo_excel(eid: int, inicio: str, fim: str, u=Depends(usuario), s=Depends(get_db)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    r = fluxo_ver(eid, inicio, fim, u, s)
+    e = s.get(Empresa, eid)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Fluxo de caixa"
+    ws.append([f"Fluxo de caixa realizado — {e.nome}"])
+    ws.append([f"{inicio[5:]}/{inicio[:4]} a {fim[5:]}/{fim[:4]} · lançamentos de Caixa e Bancos do Bling"])
+    ws.append([])
+    cab = ["Linha"] + [f"{m[5:]}/{m[:4]}" for m in r["meses"]] + ["Total"]
+    ws.append(cab)
+    for c in ws[4]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F3A5F")
+    ws["A1"].font = Font(bold=True, size=14)
+    for ln in r["linhas"]:
+        if ln["tipo"] == "CATEGORIA" and not ln["tem_mov"]:
+            continue
+        ws.append(["    " * ln["nivel"] + ln["nome"]] + ln["valores"] + [ln["total"]])
+        row = ws.max_row
+        for col in range(2, len(cab) + 1):
+            ws.cell(row, col).number_format = '#,##0.00;[Red]-#,##0.00'
+        if ln["tipo"] in ("SECAO", "VARIACAO", "SALDO_INI", "SALDO_FIM"):
+            for col in range(1, len(cab) + 1):
+                ws.cell(row, col).font = Font(bold=True)
+                ws.cell(row, col).fill = PatternFill("solid", fgColor="E8EEF6")
+    ws.column_dimensions["A"].width = 55
+    for i in range(2, len(cab) + 1):
+        ws.column_dimensions[get_column_letter(i)].width = 14
+    ws.freeze_panes = "B5"
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nome = re.sub(r"[^A-Za-z0-9]+", "_", e.nome)[:40]
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="Fluxo_{nome}_{inicio}_{fim}.xlsx"'})
 
 
 # ------------------------------------------------------------------ modelos de DRE

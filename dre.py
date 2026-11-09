@@ -242,8 +242,12 @@ def valores_origem(s, empresa_id: int, ini: str, fim: str):
     vals = defaultdict(lambda: defaultdict(float))
     d_ini, d_fim = periodo_datas(ini, fim)
     sem_categoria = {"C": 0.0, "D": 0.0}
+    sem_categoria["nao_lidos"] = 0
     for x in s.scalars(select(Movimento).where(Movimento.empresa_id == empresa_id, Movimento.data >= d_ini,
                                                Movimento.data <= d_fim)).all():
+        if not x.categorizado:
+            sem_categoria["nao_lidos"] += 1
+            continue
         c = por_cod.get(("BLING", x.categoria_codigo)) if x.categoria_codigo else None
         if not c:
             sem_categoria[x.deb_cred] += float(x.valor or 0)
@@ -341,6 +345,9 @@ def calcular(s, empresa, ini: str, fim: str):
     if sc.get("produtos") and any(c.origem == "DOMINIO" and c.codigo == "CMV" and c.linha_id for c in contas):
         avisos.append(f"CMV incompleto: {sc['produtos']} produto(s) vendido(s) no período sem custo informado "
                       f"(faturamento de R$ {_br(sc['faturamento'])}). Informe na aba Custo dos produtos.")
+    if sem_cat.get("nao_lidos"):
+        avisos.append(f"{sem_cat['nao_lidos']} lançamento(s) do Bling no período não têm a categoria lida (o período não foi "
+                      "atualizado por inteiro): atualize o Bling cobrindo todo o período da DRE.")
     if sem_cat["C"] or sem_cat["D"]:
         avisos.append(f"Lançamentos de caixa e bancos sem categoria no período: entradas R$ {_br(sem_cat['C'])}, "
                       f"saídas R$ {_br(sem_cat['D'])} (não entram na DRE; podem ser transferências entre contas).")

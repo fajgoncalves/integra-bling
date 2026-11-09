@@ -130,6 +130,8 @@ class ContaOrigem(Base):
     pai_codigo: Mapped[str] = mapped_column(String(40), default="")
     ativa: Mapped[bool] = mapped_column(Boolean, default=True)
     linha_id: Mapped[int | None] = mapped_column(ForeignKey("linhas_dre.id", ondelete="SET NULL"), nullable=True)
+    fluxo_secao: Mapped[str | None] = mapped_column(String(10), nullable=True)  # ENTRADAS/SAIDAS no fluxo de caixa
+    fluxo_ordem: Mapped[int] = mapped_column(Integer, default=0)
     atualizado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
 
 
@@ -151,12 +153,27 @@ class Movimento(Base):
     contato: Mapped[str] = mapped_column(String(200), default="")
     descricao: Mapped[str] = mapped_column(Text, default="")
     origem_tipo: Mapped[str] = mapped_column(String(20), default="")
+    conta_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # conta financeira no Bling
+    categorizado: Mapped[bool] = mapped_column(Boolean, default=True)  # False: só histórico de saldo (categoria não lida)
     atualizado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
 
     @property
     def assinado(self) -> float:
         """Entrada positiva, saída negativa."""
         return float(self.valor or 0) * (1 if self.deb_cred == "C" else -1)
+
+
+class ContaFinanceira(Base):
+    """Conta de Caixa e Bancos do Bling."""
+    __tablename__ = "contas_financeiras"
+    __table_args__ = (UniqueConstraint("empresa_id", "id_externo"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    id_externo: Mapped[int] = mapped_column(BigInteger)
+    descricao: Mapped[str] = mapped_column(String(200), default="")
+    tipo: Mapped[str] = mapped_column(String(30), default="")
+    ativa: Mapped[bool] = mapped_column(Boolean, default=True)
+    ordem: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class DominioValor(Base):
@@ -243,7 +260,13 @@ def criar_tabelas():
     Base.metadata.create_all(engine)
     # colunas novas em tabelas que já existiam
     from sqlalchemy import inspect, text
-    cols = {c["name"] for c in inspect(engine).get_columns("linhas_dre")}
-    if "pai_id" not in cols:
-        with engine.begin() as con:
-            con.execute(text("ALTER TABLE linhas_dre ADD COLUMN pai_id INTEGER"))
+    novas = {"linhas_dre": [("pai_id", "INTEGER")],
+             "movimentos_caixa": [("conta_id", "BIGINT"), ("categorizado", "BOOLEAN DEFAULT TRUE")],
+             "contas_origem": [("fluxo_secao", "VARCHAR(10)"), ("fluxo_ordem", "INTEGER DEFAULT 0")]}
+    insp = inspect(engine)
+    for tab, cols in novas.items():
+        tem = {c["name"] for c in insp.get_columns(tab)}
+        for nome, tipo in cols:
+            if nome not in tem:
+                with engine.begin() as con:
+                    con.execute(text(f"ALTER TABLE {tab} ADD COLUMN {nome} {tipo}"))

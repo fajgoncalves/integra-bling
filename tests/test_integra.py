@@ -30,7 +30,10 @@ CATEGORIAS = [{"id": 10, "idCategoriaPai": 0, "descricao": "Vendas", "tipo": 2},
 # id: (categoria, data, debCred, valor)
 CAIXA = {1: (10, "2026-01-15", "C", 5000.0), 2: (21, "2026-01-10", "D", 300.0), 3: (22, "2026-01-20", "D", 120.5),
          4: (30, "2026-02-05", "D", 45.0), 5: (21, "2026-02-12", "C", 20.0),  # 5 = estorno de comissão
-         6: (None, "2026-03-01", "D", 1000.0)}  # transferência sem categoria
+         6: (None, "2026-03-01", "D", 1000.0),  # transferência do banco para o caixa (sem categoria)...
+         8: (None, "2026-03-01", "C", 1000.0),  # ...e a entrada no caixa
+         90: (10, "2025-12-20", "C", 10000.0), 91: (30, "2024-06-10", "D", 500.0)}  # histórico (saldo inicial 9.500)
+CONTA_DO = {8: (2, "Caixa da loja")}
 PAIS = {c["id"]: c["idCategoriaPai"] for c in CATEGORIAS}
 chamadas = {"token": 0, "caixas": 0}
 
@@ -52,7 +55,8 @@ def bling_falso(req: httpx.Request):
         return httpx.Response(200, json={"data": CATEGORIAS if pag == 1 else []})
     if p.path.endswith("/caixas"):
         chamadas["caixas"] += 1
-        assert q["situacao"] == ["R"] and q["dataInicial"] == ["2026-01-01"]
+        assert q["situacao"] == ["R"]
+        di, df = q["dataInicial"][0], q["dataFinal"][0]
         filtro = {int(x) for x in q.get("idsCategorias[]", [])}
 
         def casa(cat):  # o Bling devolve também os lançamentos das categorias filhas
@@ -62,9 +66,14 @@ def bling_falso(req: httpx.Request):
                 cat = PAIS.get(cat)
             return False
         lista = [{"id": i, "debCred": d[2], "valor": d[3], "data": d[1], "descricao": f"Lanç. {i}",
-                  "contato": {"nome": "Fulano"}, "contaFinanceira": {"descricao": "Banco X"}, "origem": {"tipo": "bordero"}}
-                 for i, d in CAIXA.items() if not filtro or casa(d[0])]
+                  "contato": {"nome": "Fulano"}, "origem": {"tipo": "bordero"},
+                  "contaFinanceira": {"id": CONTA_DO.get(i, (1, ""))[0], "descricao": CONTA_DO.get(i, (1, "Banco X"))[1]}}
+                 for i, d in CAIXA.items() if (not filtro or casa(d[0])) and di <= d[1] <= df]
         return httpx.Response(200, json={"data": lista if pag == 1 else []})
+    if p.path.endswith("/contas-contabeis"):
+        return httpx.Response(200, json={"data": [{"id": 1, "descricao": "Banco X", "tipo": "banco", "situacao": 1},
+                                                  {"id": 2, "descricao": "Caixa da loja", "tipo": "caixa", "situacao": 1}]
+                                         if pag == 1 else []})
     return httpx.Response(404)
 
 
@@ -127,7 +136,7 @@ def test_fluxo_completo():
             bling.sincronizar(jid, bling.Cliente(e["id"], bling_http))
             j = c.get(f"/api/jobs/{jid}").json()
             assert j["status"] == "OK", j["mensagem"]
-            assert "6 lançamentos" in j["mensagem"] and "1 sem categoria" in j["mensagem"]
+            assert "7 lançamentos" in j["mensagem"] and "2 sem categoria" in j["mensagem"] and "2 lançamentos anteriores" in j["mensagem"]
             # sincronizar de novo o mesmo período substitui (não duplica)
             with SessionLocal() as s:
                 j2 = Job(empresa_id=e["id"], tipo="bling_sync", parametros=json.dumps({"inicio": "2026-01-01", "fim": "2026-03-31"}))
@@ -137,7 +146,8 @@ def test_fluxo_completo():
             bling.sincronizar(jid2, bling.Cliente(e["id"], bling_http))
             with SessionLocal() as s:
                 from db import Movimento
-                assert s.query(Movimento).count() == 6
+                assert s.query(Movimento).count() == 9
+                assert s.query(Movimento).filter_by(categorizado=False).count() == 2
         finally:
             bling.httpx.Client = orig
 
@@ -235,7 +245,31 @@ def test_fluxo_completo():
         dc = c.get(f"/api/contas/{ct2['CMV calculado (vendas − devoluções de venda, × custo do produto)']['id']}/detalhe?inicio=2026-01&fim=2026-03").json()
         assert dc["tipo"] == "cmv" and dc["total"] == -420
         assert any(x["descricao"] == "Vendas" for x in d["nao_associadas"])  # recebimentos de vendas ficam de fora (Domínio já traz)
-        assert any("sem categoria" in a and "1.000,00" in a for a in d["avisos"])
+        assert any("sem categoria" in a and "entradas R$ 1.000,00, saídas R$ 1.000,00" in a for a in d["avisos"])
+
+        # fluxo de caixa realizado
+        f = c.get(f"/api/empresas/{e['id']}/fluxo?inicio=2026-01&fim=2026-03").json()
+        F = {}
+        for ln in f["linhas"]:
+            F.setdefault((ln["tipo"], ln["nome"]), ln)
+        assert F[("SALDO_INI", "Saldo inicial")]["valores"][0] == 9500
+        assert F[("SALDO_CONTA_INI", "Banco X")]["valores"] == [9500, 14079.5, 14054.5]
+        assert F[("SECAO", "ENTRADAS")]["total"] == 5000
+        assert F[("CATEGORIA", "Despesas comerciais")]["valores"] == [-420.5, 20, 0]  # pai = soma das filhas
+        assert F[("CATEGORIA", "Comissão de vendedores")]["nivel"] == 2
+        assert F[("SECAO", "SAÍDAS")]["total"] == -445.5
+        assert F[("SEMCAT", "Entradas sem categoria")]["total"] == 1000 and F[("SEMCAT", "Saídas sem categoria")]["total"] == -1000
+        assert F[("VARIACAO", "(=) Variação do caixa no mês")]["valores"] == [4579.5, -25, 0]
+        assert F[("SALDO_FIM", "Saldo final")]["valores"] == [14079.5, 14054.5, 14054.5]
+        assert F[("SALDO_CONTA_FIM", "Caixa da loja")]["total"] == 1000 and F[("SALDO_CONTA_FIM", "Banco X")]["total"] == 13054.5
+        assert not f["avisos"]
+        # reorganizar: tarifas vira a primeira das saídas; vendas passa para saídas (só teste)
+        tar = F[("CATEGORIA", "Tarifas bancárias")]["conta_id"]
+        assert c.put(f"/api/empresas/{e['id']}/fluxo/ordem", json={"itens": [{"conta_id": tar, "ordem": -1}]}).json()["alteradas"] == 1
+        f2 = c.get(f"/api/empresas/{e['id']}/fluxo?inicio=2026-01&fim=2026-03").json()["linhas"]
+        sai = [x["nome"] for x in f2 if x["tipo"] == "CATEGORIA" and x["secao"] == "SAIDAS" and x["nivel"] == 1]
+        assert sai[0] == "Tarifas bancárias"
+        assert c.get(f"/api/empresas/{e['id']}/fluxo.xlsx?inicio=2026-01&fim=2026-03").content[:2] == b"PK"
         x = c.get(f"/api/empresas/{e['id']}/dre.xlsx?inicio=2026-01&fim=2026-03")
         assert x.status_code == 200 and x.content[:2] == b"PK"
 

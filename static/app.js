@@ -212,7 +212,7 @@ let pollJobs = null;
 async function telaEmpresa(id, aba, params) {
   clearInterval(pollJobs);
   const e = await api(`/api/empresas/${id}`);
-  const abas = [["conexoes", "Conexões e dados"], ["associacao", "Associação de contas"], ["custos", "Custo dos produtos"], ["dre", "DRE"]];
+  const abas = [["conexoes", "Conexões e dados"], ["associacao", "Associação de contas"], ["custos", "Custo dos produtos"], ["dre", "DRE"], ["fluxo", "Fluxo de caixa"]];
   casca("empresas", `<div class="topo"><div><a href="#/empresas" class="peq">← Empresas</a><h1>${esc(e.nome)}</h1>
       <div class="suave">${cnpjFmt(e.cnpj) || "sem CNPJ"} · Domínio ${esc(e.codigo_dominio || "—")} · Modelo: ${esc(e.modelo_nome || "—")}</div></div>
       <button class="btn" id="editar">Editar empresa</button></div>
@@ -224,6 +224,7 @@ async function telaEmpresa(id, aba, params) {
   if (aba === "associacao") return abaAssociacao(e);
   if (aba === "dre") return abaDre(e);
   if (aba === "custos") return abaCustos(e);
+  if (aba === "fluxo") return abaFluxo(e);
   return abaConexoes(e);
 }
 
@@ -239,7 +240,7 @@ function abaConexoes(e) {
         <button class="btn ${e.bling_conectado ? "" : "pri"}" id="b-con">${e.bling_conectado ? "Reconectar" : "Conectar ao Bling"}</button>
         <button class="btn pri" id="b-sync" ${e.bling_conectado ? "" : "disabled"}>Atualizar do Bling</button>
         ${e.bling_conectado ? '<button class="btn perigo peq" id="b-des">Desconectar</button>' : ""}</div>
-      <div class="suave peq" style="margin-top:10px">Lê as categorias financeiras e os lançamentos de <b>Caixa e Bancos</b> do período — só o que foi efetivamente pago ou recebido (somente leitura). Contas a pagar e a receber em aberto não entram. Pode levar alguns minutos.</div>
+      <div class="suave peq" style="margin-top:10px">Lê as categorias financeiras e os lançamentos de <b>Caixa e Bancos</b> do período — só o que foi efetivamente pago ou recebido (somente leitura) — e o histórico anterior de cada conta para calcular os saldos do fluxo de caixa. Contas a pagar e a receber em aberto não entram. Pode levar alguns minutos.</div>
     </div>
     <div class="card"><h2>Domínio (Central 360)</h2>
       <div class="suave peq" style="margin-bottom:10px">Faturamento (notas de saída e serviços), devoluções por CFOP e os <b>produtos de cada nota</b> (base do CMV), lidos pelo Agente 360 no banco da Domínio.</div>
@@ -450,6 +451,74 @@ async function abaDre(e) {
   await tentar(carregar);
 }
 
+
+// ------------------------------------------------------------------ fluxo de caixa realizado
+async function abaFluxo(e) {
+  const st = { zeros: false, organizar: false, fechados: new Set(), contasAbertas: false };
+  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
+    <div class="linha"><label class="chk"><input type="checkbox" id="fx-zeros"> Categorias sem movimento</label>
+      <button class="btn" id="fx-org">Organizar ordem</button><button class="btn" id="fx-xls">Baixar Excel</button></div></div>
+    <div id="fx-info" style="margin-top:12px"></div><div id="fx" class="suave">Carregando...</div></div>`;
+  let r = null;
+  const carregar = async () => { const p = periodo(); r = await api(`/api/empresas/${e.id}/fluxo?inicio=${p.inicio}&fim=${p.fim}`); desenhar(); };
+  const salvarOrdem = (itens) => tentar(async () => { await api(`/api/empresas/${e.id}/fluxo/ordem`, { method: "PUT", body: { itens } }); await carregar(); });
+  const irmaos = (ln) => r.linhas.filter((x) => x.tipo === "CATEGORIA" && x.secao === ln.secao && (x.pai || null) === (ln.pai || null) && x.nivel === ln.nivel);
+  const desenhar = () => {
+    $("#fx-info").innerHTML = (r.empresa.bling_sync_periodo ? "" : `<div class="aviso">O Bling ainda não foi atualizado para esta empresa (aba Conexões).</div>`)
+      + r.avisos.map((a) => `<div class="aviso">${esc(a)}</div>`).join("")
+      + `<div class="suave peq">Fiel ao Caixa e Bancos do Bling: categorias e hierarquia do Bling, saldos pela soma de todos os lançamentos de cada conta.
+        Clique numa categoria para ver os lançamentos; nas categorias-pai, use ▾ para recolher. ${st.organizar ? "<b>Modo organizar:</b> setas mudam a ordem entre categorias do mesmo nível; a caixa muda a seção (Entradas/Saídas)." : ""}</div>`;
+    const n = r.meses.length;
+    const cel = (v) => `<td class="num ${v < 0 ? "neg" : ""}">${Math.abs(v) > 0.004 ? brl(v) : '<span class="suave">–</span>'}</td>`;
+    const escondido = (ln) => {  // filho de categoria recolhida
+      let p = ln.pai;
+      while (p) { if (st.fechados.has(p)) return true; const pai = r.linhas.find((x) => x.tipo === "CATEGORIA" && x.codigo === p); p = pai && pai.pai; }
+      return false;
+    };
+    let h = `<div class="rolagem"><table class="dre fx"><tr><th>Fluxo de caixa realizado</th>${r.meses.map((m) => `<th class="num">${mesBR(m)}</th>`).join("")}<th class="num">Total</th></tr>`;
+    r.linhas.forEach((ln, i) => {
+      if (ln.tipo === "CATEGORIA" && !st.zeros && !st.organizar && !ln.tem_mov) return;
+      if (ln.tipo === "CATEGORIA" && escondido(ln)) return;
+      if ((ln.tipo === "SALDO_CONTA_INI" || ln.tipo === "SALDO_CONTA_FIM") && !st.contasAbertas) return;
+      const pad = 12 + ln.nivel * 18;
+      let nome = esc(ln.nome), cls = "conta", extra = "";
+      if (ln.tipo === "SALDO_INI" || ln.tipo === "SALDO_FIM") { cls = "destaque"; nome = `<span class="fx-contas clicavel">${st.contasAbertas ? "▾" : "▸"} ${nome}</span>`; }
+      else if (ln.tipo === "SALDO_CONTA_INI" || ln.tipo === "SALDO_CONTA_FIM") cls = "comp";
+      else if (ln.tipo === "SECAO") cls = "grupo";
+      else if (ln.tipo === "VARIACAO") cls = "destaque";
+      else if (ln.tipo === "CATEGORIA") {
+        const seta = ln.filhos ? `<span class="fx-tog clicavel" data-c="${esc(ln.codigo)}">${st.fechados.has(ln.codigo) ? "▸" : "▾"}</span> ` : "";
+        nome = `${seta}<span class="fx-cat clicavel" data-i="${i}">${nome}</span>${ln.ativa ? "" : ' <span class="badge">inativa</span>'}`;
+        if (ln.nivel === 1) cls = "fx-raiz";
+        if (st.organizar) {
+          const irs = irmaos(ln), k = irs.indexOf(ln);
+          extra = `<span style="white-space:nowrap;margin-right:6px"><button class="btn peq fx-sobe" data-i="${i}" ${k === 0 ? "disabled" : ""}>↑</button><button class="btn peq fx-desce" data-i="${i}" ${k === irs.length - 1 ? "disabled" : ""}>↓</button>
+            ${ln.nivel === 1 ? `<select class="fx-sec" data-i="${i}"><option value="ENTRADAS" ${ln.secao === "ENTRADAS" ? "selected" : ""}>Entradas</option><option value="SAIDAS" ${ln.secao === "SAIDAS" ? "selected" : ""}>Saídas</option></select>` : ""}</span>`;
+        }
+      }
+      const tot = ln.tipo.startsWith("SALDO") ? `<td class="num ${ln.total < 0 ? "neg" : ""}" title="${ln.tipo.includes("INI") ? "Saldo no início do período" : "Saldo no fim do período"}">${brl(ln.total)}</td>` : cel(ln.total);
+      h += `<tr class="${cls}"><td style="padding-left:${pad}px;${st.organizar ? "min-width:420px" : ""}">${extra}${nome}</td>${ln.valores.map(cel).join("")}${tot}</tr>`;
+    });
+    $("#fx").innerHTML = h + "</table></div>";
+    $("#fx").classList.remove("suave");
+    $$("#fx .fx-contas").forEach((x) => x.onclick = () => { st.contasAbertas = !st.contasAbertas; desenhar(); });
+    $$("#fx .fx-tog").forEach((x) => x.onclick = () => { const c = x.dataset.c; if (st.fechados.has(c)) st.fechados.delete(c); else st.fechados.add(c); desenhar(); });
+    $$("#fx .fx-cat").forEach((x) => x.onclick = () => { const ln = r.linhas[Number(x.dataset.i)]; consultarConta({ id: ln.conta_id, nome: ln.nome, origem: "BLING" }, e); });
+    const mover = (i, d) => {
+      const ln = r.linhas[i], irs = irmaos(ln), k = irs.indexOf(ln), j = k + d;
+      if (j < 0 || j >= irs.length) return;
+      [irs[k], irs[j]] = [irs[j], irs[k]];
+      salvarOrdem(irs.map((x, o) => ({ conta_id: x.conta_id, ordem: (o + 1) * 10 })));
+    };
+    $$("#fx .fx-sobe").forEach((b) => b.onclick = () => mover(Number(b.dataset.i), -1));
+    $$("#fx .fx-desce").forEach((b) => b.onclick = () => mover(Number(b.dataset.i), 1));
+    $$("#fx .fx-sec").forEach((sel) => sel.onchange = () => { const ln = r.linhas[Number(sel.dataset.i)]; salvarOrdem([{ conta_id: ln.conta_id, secao: sel.value, ordem: 9999 }]); });
+  };
+  $("#fx-zeros").onchange = (x) => { st.zeros = x.target.checked; desenhar(); };
+  $("#fx-org").onclick = () => { st.organizar = !st.organizar; $("#fx-org").textContent = st.organizar ? "Concluir organização" : "Organizar ordem"; $("#fx-org").classList.toggle("pri", st.organizar); desenhar(); };
+  $("#fx-xls").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/fluxo.xlsx?inicio=${p.inicio}&fim=${p.fim}`; };
+  await tentar(carregar);
+}
 
 // ------------------------------------------------------------------ custo dos produtos (CMV)
 async function abaCustos(e) {

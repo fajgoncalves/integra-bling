@@ -10,7 +10,7 @@ import threading
 import httpx
 from sqlalchemy import select
 
-from db import SessionLocal, Empresa, ContaOrigem, Movimento, Job, agora
+from db import SessionLocal, Empresa, ContaOrigem, Movimento, ContaFinanceira, Job, agora
 from sqlalchemy import delete
 from seguranca import cifrar, decifrar, get_config
 
@@ -178,7 +178,66 @@ def _movimento(item, empresa_id, categoria=""):
         conta_financeira=((item.get("contaFinanceira") or {}).get("descricao") or "")[:200],
         contato=((item.get("contato") or {}).get("nome") or "")[:200],
         descricao=(item.get("descricao") or item.get("observacoes") or "")[:2000],
-        origem_tipo=str((item.get("origem") or {}).get("tipo") or "")[:20])
+        origem_tipo=str((item.get("origem") or {}).get("tipo") or "")[:20],
+        conta_id=int((item.get("contaFinanceira") or {}).get("id") or 0) or None, categorizado=True)
+
+
+HISTORICO_DESDE = dt.date(2010, 1, 1)  # saldos: soma de todos os lançamentos de cada conta desde o início
+
+
+def sincronizar_contas_financeiras(cli, s, emp_id, vistas: dict):
+    """Lista de contas de Caixa e Bancos (/contas-contabeis); sem o escopo, usa as contas vistas nos lançamentos."""
+    contas = {c.id_externo: c for c in s.scalars(select(ContaFinanceira).where(ContaFinanceira.empresa_id == emp_id)).all()}
+    try:
+        lista = list(cli.paginas("/contas-contabeis"))
+    except BlingErro:
+        lista = []
+    for it in lista:
+        vistas[int(it["id"])] = (it.get("descricao") or "", (it.get("tipo") or ""), int(it.get("situacao") or 1) == 1)
+    for i, (desc, tipo, ativa) in vistas.items():
+        c = contas.get(i)
+        if not c:
+            c = ContaFinanceira(empresa_id=emp_id, id_externo=i, ordem=len(contas) + 1)
+            s.add(c)
+            contas[i] = c
+        c.descricao = (desc or c.descricao or f"Conta {i}")[:200]
+        c.tipo = str(tipo or c.tipo or "")[:30]
+        c.ativa = ativa
+
+
+def sincronizar_historico(cli, s, emp_id, antes_de: dt.date, andamento, vistas: dict):
+    """Lançamentos (sem categoria) de todas as contas antes do período, para calcular o saldo inicial."""
+    existentes = {m.id_externo: m for m in s.scalars(select(Movimento).where(Movimento.empresa_id == emp_id,
+                                                                             Movimento.data < antes_de)).all()}
+    vistos = set()
+    ano = HISTORICO_DESDE.year
+    while ano <= antes_de.year:
+        ini = max(dt.date(ano, 1, 1), HISTORICO_DESDE)
+        fim = min(dt.date(ano, 12, 31), antes_de - dt.timedelta(days=1))
+        if ini <= fim:
+            andamento(f"Lendo o histórico de caixa e bancos para os saldos ({ano})...")
+            for it in cli.paginas("/caixas", {"dataInicial": ini.isoformat(), "dataFinal": fim.isoformat(), "situacao": "R",
+                                              "situacaoConciliacao": 3}):
+                novo = _movimento(it, emp_id)
+                if not novo or novo.data >= antes_de:
+                    continue
+                cf = it.get("contaFinanceira") or {}
+                if cf.get("id"):
+                    vistas.setdefault(int(cf["id"]), (cf.get("descricao") or "", "", True))
+                vistos.add(novo.id_externo)
+                m = existentes.get(novo.id_externo)
+                if m:
+                    m.data, m.deb_cred, m.valor, m.conta_id = novo.data, novo.deb_cred, novo.valor, novo.conta_id
+                    m.conta_financeira, m.contato, m.descricao = novo.conta_financeira, novo.contato, novo.descricao
+                else:
+                    novo.categorizado = False
+                    s.add(novo)
+            s.commit()
+        ano += 1
+    for i, m in existentes.items():
+        if i not in vistos:
+            s.delete(m)
+    return len(vistos)
 
 
 def classificar(todos: dict, por_categoria: dict, pais: dict):
@@ -259,19 +318,27 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
             s.execute(delete(Movimento).where(Movimento.empresa_id == emp_id, Movimento.data >= d_ini, Movimento.data <= d_fim))
             s.flush()
             sem_cat = 0
+            vistas = {}
             for i, it in todos.items():
                 m = _movimento(it, emp_id, cat_de.get(i, ""))
                 if not m or m.data < d_ini or m.data > d_fim:
                     continue
+                cf = it.get("contaFinanceira") or {}
+                if cf.get("id"):
+                    vistas.setdefault(int(cf["id"]), (cf.get("descricao") or "", "", True))
                 sem_cat += not m.categoria_codigo
                 s.add(m)
+            s.commit()
+            n_hist = sincronizar_historico(cli, s, emp_id, d_ini, andamento, vistas)
+            sincronizar_contas_financeiras(cli, s, emp_id, vistas)
             emp = s.get(Empresa, emp_id)
             emp.bling_sync_em = agora()
             emp.bling_sync_periodo = f"{ini} a {fim}"
             j = s.get(Job, job_id)
             j.status, j.fim = "OK", agora()
             j.mensagem = (f"Bling atualizado: {ncat} categorias e {len(todos)} lançamentos de caixa e bancos "
-                          f"de {_br_data(ini)} a {_br_data(fim)}" + (f" ({sem_cat} sem categoria)." if sem_cat else "."))
+                          f"de {_br_data(ini)} a {_br_data(fim)}" + (f" ({sem_cat} sem categoria)" if sem_cat else "")
+                          + f"; {n_hist} lançamentos anteriores lidos para os saldos.")
             s.commit()
     except Exception as e:  # noqa: BLE001 — o erro vai para a tela
         with SessionLocal() as s:
