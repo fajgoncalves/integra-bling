@@ -3,15 +3,19 @@
 Módulo separado: os dados do Mercado Livre têm DRE e análises próprias (mlanalise.py) e não entram na DRE principal
 nem na associação de contas. Somente leitura. Um aplicativo (Configurações) serve a todas as empresas; cada empresa
 autoriza com a própria conta de vendedor."""
+import re
+import io
+import csv
 import time
 import json
+import unicodedata
 import datetime as dt
 import threading
 
 import httpx
 from sqlalchemy import select, delete
 
-from db import SessionLocal, Empresa, MLVenda, MLItem, MLTarifa, Job, agora, FUSO
+from db import SessionLocal, Empresa, MLVenda, MLItem, MLTarifa, MLNota, MLCobranca, MLExtrato, Job, agora, FUSO
 from seguranca import cifrar, decifrar, get_config
 
 AUTORIZAR = "https://auth.mercadolivre.com.br/authorization"
@@ -105,7 +109,9 @@ class Cliente:
             if self.sessao is None:
                 s.close()
 
-    def get(self, caminho, params=None, opcional=False):
+    def req(self, metodo, url, params=None, corpo=None, opcional=False, texto=False):
+        """Chamada autenticada. url pode ser um caminho da API do ML ou um endereço completo (Mercado Pago)."""
+        alvo = url if url.startswith("http") else API + url
         renovou = False
         for tentativa in range(6):
             with _trava:
@@ -113,8 +119,8 @@ class Cliente:
                 if espera > 0:
                     time.sleep(espera)
                 _ultima[0] = time.monotonic()
-            r = self.http.get(API + caminho, params=params, headers={"Authorization": f"Bearer {self._access()}",
-                                                                      "Accept": "application/json"})
+            r = self.http.request(metodo, alvo, params=params, json=corpo,
+                                  headers={"Authorization": f"Bearer {self._access()}", "Accept": "application/json"})
             if r.status_code == 401 and not renovou:
                 self._access(forcar=True)
                 renovou = True
@@ -122,16 +128,24 @@ class Cliente:
             if r.status_code == 429 or r.status_code >= 500:
                 time.sleep(min(2 ** tentativa, 20))
                 continue
-            if r.status_code in (403, 404) and opcional:
+            if r.status_code in (400, 403, 404) and opcional:
                 return None
             if r.status_code >= 400:
                 try:
                     msg = r.json().get("message") or r.text
                 except ValueError:
                     msg = r.text
-                raise MLErro(f"Mercado Livre respondeu {r.status_code} em {caminho}: {str(msg)[:300]}")
-            return r.json()
-        raise MLErro(f"O Mercado Livre não respondeu em {caminho}. Tente de novo em alguns minutos.")
+                raise MLErro(f"Mercado Livre respondeu {r.status_code} em {url.split('?')[0]}: {str(msg)[:300]}")
+            if texto:
+                return r.text
+            try:
+                return r.json() if r.content else {}
+            except ValueError:
+                return {}
+        raise MLErro(f"O Mercado Livre não respondeu em {url.split('?')[0]}. Tente de novo em alguns minutos.")
+
+    def get(self, caminho, params=None, opcional=False):
+        return self.req("GET", caminho, params, opcional=opcional)
 
 
 # ------------------------------------------------------------------ conversões
@@ -170,7 +184,7 @@ def venda(o: dict, empresa_id: int):
                           sku=str(item.get("seller_sku") or item.get("seller_custom_field") or "").strip()[:80],
                           titulo=str(item.get("title") or "")[:300], tipo_anuncio=str(it.get("listing_type_id") or "")[:30],
                           qtd=_num(it.get("quantity") or 1), preco=round(_num(it.get("unit_price")), 2),
-                          tarifa=round(_num(it.get("sale_fee")), 2)))
+                          tarifa=round(_num(it.get("sale_fee")), 2), categoria=str(item.get("category_id") or "")[:30]))
     return MLVenda(empresa_id=empresa_id, order_id=int(o["id"]), pack_id=int(o["pack_id"]) if o.get("pack_id") else None,
                    data=d, status=str(o.get("status") or "")[:30], total=round(_num(o.get("total_amount")), 2),
                    pago=round(pago, 2), devolvido=round(devolvido, 2),
@@ -178,6 +192,7 @@ def venda(o: dict, empresa_id: int):
                    itens=int(sum(_num(it.get("quantity")) for it in itens)),
                    descricao=(" + ".join(t for t in titulos if t))[:300],
                    comprador=str((o.get("buyer") or {}).get("nickname") or "")[:120],
+                   pagamentos=",".join(str(p_["id"]) for p_ in o.get("payments") or [] if p_.get("id"))[:300],
                    shipping_id=int((o.get("shipping") or {}).get("id")) if (o.get("shipping") or {}).get("id") else None), lin
 
 
@@ -248,6 +263,337 @@ def frete_vendedor(cli: Cliente, shipping_id: int, seller: int):
     return round(total, 2)
 
 
+# ------------------------------------------------------------------ notas fiscais das vendas
+CHAVE = re.compile(r"(?<!\d)(\d{44})(?!\d)")
+
+
+def _procura(d, nomes):
+    """Primeiro valor de uma das chaves (em qualquer nível do JSON)."""
+    if isinstance(d, dict):
+        for k, v in d.items():
+            if k in nomes and v not in (None, "", []):
+                return v
+        for v in d.values():
+            r = _procura(v, nomes)
+            if r not in (None, "", []):
+                return r
+    elif isinstance(d, list):
+        for v in d:
+            r = _procura(v, nomes)
+            if r not in (None, "", []):
+                return r
+    return None
+
+
+def _nota(d, origem, empresa_id, order_id):
+    if not d or not isinstance(d, (dict, list)):
+        return None
+    if isinstance(d, list):
+        d = d[0] if d else None
+        if not d:
+            return None
+    chave = str(_procura(d, {"invoice_key", "fiscal_key", "key", "access_key", "chave"}) or "")
+    if not CHAVE.fullmatch(chave):
+        m = CHAVE.search(json.dumps(d))
+        chave = m.group(1) if m else ""
+    numero = str(_procura(d, {"invoice_number", "number", "numero"}) or "")[:20]
+    if not chave and not numero:
+        return None
+    tipo = str(_procura(d, {"invoice_type", "transaction_type"}) or "venda").lower()
+    return MLNota(empresa_id=empresa_id, order_id=order_id, origem=origem,
+                  tipo="devolucao" if "devol" in tipo or "return" in tipo else "venda", numero=numero,
+                  serie=str(_procura(d, {"invoice_series", "series", "serie"}) or "")[:10], chave=chave,
+                  status=str(_procura(d, {"status"}) or "")[:30],
+                  data=_data_br(_procura(d, {"issued_date", "authorized_date", "invoice_date", "date_created", "emission_date"})),
+                  valor=_num(_procura(d, {"amount", "total_amount", "invoice_amount", "total"})) or None)
+
+
+def notas_da_venda(cli: Cliente, seller: int, v: MLVenda):
+    """Nota emitida pelo emissor do ML; se não houver, a nota informada no envio (ERP como o Bling)."""
+    out = []
+    n = _nota(cli.get(f"/users/{seller}/invoices/orders/{v.order_id}", opcional=True), "EMISSOR_ML", v.empresa_id, v.order_id)
+    if n:
+        out.append(n)
+    elif v.shipping_id:
+        n = _nota(cli.get(f"/shipments/{v.shipping_id}/invoice_data", {"siteId": "MLB"}, opcional=True), "ENVIO",
+                  v.empresa_id, v.order_id)
+        if n:
+            out.append(n)
+    return out
+
+
+# ------------------------------------------------------------------ faturamento detalhado (cobrança por pedido)
+def cobrancas(cli: Cliente, mes: str, empresa_id: int, andamento=None):
+    out, vistos = [], set()
+    for grupo in ("ML", "MP"):
+        for doc in ("BILL", "CREDIT_NOTE"):
+            off, total = 0, None
+            while total is None or off < total:
+                r = cli.get(f"/billing/integration/periods/key/{mes}-01/group/{grupo}/details",
+                            {"document_type": doc, "offset": off, "limit": 150}, opcional=True)
+                if not r:
+                    break
+                total = int(r.get("total") or 0)
+                res = r.get("results") or []
+                for x in res:
+                    ci = x.get("charge_info") or {}
+                    did = ci.get("detail_id")
+                    if not did or (grupo, int(did)) in vistos:
+                        continue
+                    vistos.add((grupo, int(did)))
+                    nat = "BONUS" if "BONUS" in str(ci.get("detail_type") or "").upper() else "CHARGE"
+                    v = abs(_num(ci.get("detail_amount")))
+                    if doc == "CREDIT_NOTE":
+                        v = v if nat == "CHARGE" else -v  # estorno de cobrança (+) / anulação de bonificação (−)
+                    else:
+                        v = -v if nat == "CHARGE" else v
+                    vendas_ = x.get("sales_info") or []
+                    oid = (vendas_[0] or {}).get("order_id") if vendas_ else None
+                    sid = (x.get("shipping_info") or {}).get("shipping_id")
+                    out.append(MLCobranca(empresa_id=empresa_id, periodo=mes, grupo=grupo, documento=doc, detail_id=int(did),
+                                          natureza=nat, tipo=str(ci.get("detail_sub_type") or "")[:20],
+                                          descricao=str(ci.get("transaction_detail") or "")[:200], valor=round(v, 2),
+                                          data=_data_br(ci.get("creation_date_time")),
+                                          order_id=int(oid) if oid else None, shipping_id=int(sid) if sid else None,
+                                          debitada=(str(ci.get("debited_from_operation") or "").upper() in ("YES", "SI", "SIM", "TRUE"))
+                                          if ci.get("debited_from_operation") is not None else None))
+                if not res:
+                    break
+                off += len(res)
+                if andamento and off % 1500 < len(res):
+                    andamento(f"Lendo as cobranças de {mes[5:]}/{mes[:4]} ({grupo}, {off} de {total})...")
+                if off >= 9900:  # limite de paginação por offset
+                    break
+    return out
+
+
+# ------------------------------------------------------------------ extrato do Mercado Pago (relatório de liberações)
+MP = "https://api.mercadopago.com"
+COLUNAS_EXTRATO = ["DATE", "SOURCE_ID", "EXTERNAL_REFERENCE", "RECORD_TYPE", "DESCRIPTION", "NET_CREDIT_AMOUNT",
+                   "NET_DEBIT_AMOUNT", "GROSS_AMOUNT", "MP_FEE_AMOUNT", "FINANCING_FEE_AMOUNT", "SHIPPING_FEE_AMOUNT",
+                   "TAXES_AMOUNT", "COUPON_AMOUNT", "INSTALLMENTS", "PAYMENT_METHOD", "BALANCE_AMOUNT", "ORDER_ID",
+                   "SHIPPING_ID", "PACK_ID"]
+# nomes aceitos nos arquivos (chave técnica ou tradução em português)
+APELIDOS = {
+    "DATE": ("DATE", "DATA", "DATA_DE_LIBERACAO", "DATA_DA_LIBERACAO", "FECHA"),
+    "SOURCE_ID": ("SOURCE_ID", "ID_DA_OPERACAO_NO_MERCADO_PAGO", "ID_DE_ORIGEM", "ID_DA_OPERACAO", "ID_DA_TRANSACAO", "ID_DE_OPERACAO"),
+    "EXTERNAL_REFERENCE": ("EXTERNAL_REFERENCE", "REFERENCIA_EXTERNA", "CODIGO_DE_REFERENCIA", "CODIGO_DE_REFERENCIA_EXTERNA"),
+    "RECORD_TYPE": ("RECORD_TYPE", "TIPO_DE_REGISTRO"),
+    "DESCRIPTION": ("DESCRIPTION", "DESCRICAO", "DESCRICAO_DA_OPERACAO", "TIPO_DE_OPERACAO"),
+    "NET_CREDIT_AMOUNT": ("NET_CREDIT_AMOUNT", "VALOR_LIQUIDO_CREDITADO", "CREDITO_LIQUIDO", "VALOR_DE_CREDITO_LIQUIDO", "VALOR_CREDITADO", "CREDITO"),
+    "NET_DEBIT_AMOUNT": ("NET_DEBIT_AMOUNT", "VALOR_LIQUIDO_DEBITADO", "DEBITO_LIQUIDO", "VALOR_DE_DEBITO_LIQUIDO", "VALOR_DEBITADO", "DEBITO"),
+    "GROSS_AMOUNT": ("GROSS_AMOUNT", "VALOR_BRUTO", "VALOR_BRUTO_DA_OPERACAO"),
+    "MP_FEE_AMOUNT": ("MP_FEE_AMOUNT", "TARIFA_DO_MERCADO_PAGO", "TARIFA_MERCADO_PAGO", "TARIFAS_DO_MERCADO_PAGO", "TARIFA"),
+    "FINANCING_FEE_AMOUNT": ("FINANCING_FEE_AMOUNT", "TARIFA_DE_PARCELAMENTO", "CUSTO_DE_PARCELAMENTO", "TARIFA_DE_FINANCIAMENTO"),
+    "SHIPPING_FEE_AMOUNT": ("SHIPPING_FEE_AMOUNT", "CUSTO_DE_ENVIO", "TARIFA_DE_ENVIO", "FRETE", "CUSTO_DO_FRETE"),
+    "TAXES_AMOUNT": ("TAXES_AMOUNT", "IMPOSTOS", "IMPOSTOS_COBRADOS", "IMPOSTOS_RETIDOS"),
+    "COUPON_AMOUNT": ("COUPON_AMOUNT", "CUPOM", "DESCONTO_DE_CUPOM", "VALOR_DO_CUPOM"),
+    "INSTALLMENTS": ("INSTALLMENTS", "PARCELAS", "NUMERO_DE_PARCELAS"),
+    "PAYMENT_METHOD": ("PAYMENT_METHOD", "MEIO_DE_PAGAMENTO", "FORMA_DE_PAGAMENTO"),
+    "BALANCE_AMOUNT": ("BALANCE_AMOUNT", "SALDO", "SALDO_DISPONIVEL"),
+    "ORDER_ID": ("ORDER_ID", "ID_DO_PEDIDO", "NUMERO_DO_PEDIDO", "NUMERO_DA_VENDA", "ID_DA_VENDA", "PEDIDO"),
+    "SHIPPING_ID": ("SHIPPING_ID", "ID_DO_ENVIO", "NUMERO_DO_ENVIO"),
+    "PACK_ID": ("PACK_ID", "ID_DO_PACOTE", "NUMERO_DO_PACOTE", "ID_DO_CARRINHO", "NUMERO_DO_CARRINHO"),
+}
+
+
+def _norm_col(t):
+    t = unicodedata.normalize("NFKD", str(t or "")).encode("ascii", "ignore").decode().upper().strip()
+    return re.sub(r"[^A-Z0-9]+", "_", t).strip("_")
+
+
+def _num_txt(v):
+    if v is None or v == "":
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    t = str(v).strip().replace("R$", "").replace(" ", "")
+    if "," in t and "." in t:
+        t = t.replace(".", "").replace(",", ".") if t.rfind(",") > t.rfind(".") else t.replace(",", "")
+    elif "," in t:
+        t = t.replace(",", ".")
+    try:
+        return float(t)
+    except ValueError:
+        return 0.0
+
+
+def _dh(v):
+    if isinstance(v, dt.datetime):
+        return v.replace(tzinfo=None)
+    t = str(v or "").strip()
+    if not t:
+        return None
+    try:
+        d = dt.datetime.fromisoformat(t.replace("Z", "+00:00"))
+        return (d.astimezone(FUSO) if d.tzinfo else d).replace(tzinfo=None)
+    except ValueError:
+        pass
+    for f in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y %H:%M:%S"):
+        try:
+            return dt.datetime.strptime(t[:19], f)
+        except ValueError:
+            continue
+    return None
+
+
+def _int(v):
+    t = re.sub(r"\D", "", str(v or "").split(".")[0])
+    return int(t) if t and len(t) < 19 else None
+
+
+def linhas_extrato(tabela, empresa_id, fonte="API"):
+    """tabela: lista de listas (1ª = cabeçalho) → [MLExtrato]. Ignora linhas de total/saldo inicial sem data."""
+    if not tabela:
+        return [], []
+    cab = [_norm_col(c) for c in tabela[0]]
+    idx = {}
+    for k, nomes in APELIDOS.items():
+        for n in nomes:
+            if n in cab:
+                idx[k] = cab.index(n)
+                break
+    faltam = [k for k in ("DATE", "DESCRIPTION") if k not in idx] + \
+             (["NET_CREDIT_AMOUNT/NET_DEBIT_AMOUNT"] if "NET_CREDIT_AMOUNT" not in idx and "NET_DEBIT_AMOUNT" not in idx else [])
+    if faltam:
+        raise MLErro("O arquivo não parece ser o relatório de liberações do Mercado Pago (faltam as colunas "
+                     + ", ".join(faltam) + "). Colunas encontradas: " + ", ".join(cab[:30]))
+    g = lambda ln, k: ln[idx[k]] if k in idx and idx[k] < len(ln) else None  # noqa: E731
+    out = []
+    for ln in tabela[1:]:
+        d = _dh(g(ln, "DATE"))
+        desc = str(g(ln, "DESCRIPTION") or "").strip()
+        if not d or not desc:
+            continue
+        out.append(MLExtrato(empresa_id=empresa_id, data=d, origem_id=str(g(ln, "SOURCE_ID") or "").split(".")[0][:40],
+                             referencia=str(g(ln, "EXTERNAL_REFERENCE") or "")[:80],
+                             tipo_registro=str(g(ln, "RECORD_TYPE") or "")[:30], descricao=desc[:60],
+                             credito=round(abs(_num_txt(g(ln, "NET_CREDIT_AMOUNT"))), 2),
+                             debito=round(abs(_num_txt(g(ln, "NET_DEBIT_AMOUNT"))), 2),
+                             bruto=round(_num_txt(g(ln, "GROSS_AMOUNT")), 2), tarifa_mp=round(_num_txt(g(ln, "MP_FEE_AMOUNT")), 2),
+                             financiamento=round(_num_txt(g(ln, "FINANCING_FEE_AMOUNT")), 2),
+                             frete=round(_num_txt(g(ln, "SHIPPING_FEE_AMOUNT")), 2), impostos=round(_num_txt(g(ln, "TAXES_AMOUNT")), 2),
+                             cupom=round(_num_txt(g(ln, "COUPON_AMOUNT")), 2),
+                             saldo=round(_num_txt(g(ln, "BALANCE_AMOUNT")), 2) if "BALANCE_AMOUNT" in idx and g(ln, "BALANCE_AMOUNT") not in (None, "") else None,
+                             meio=str(g(ln, "PAYMENT_METHOD") or "")[:40], order_id=_int(g(ln, "ORDER_ID")),
+                             shipping_id=_int(g(ln, "SHIPPING_ID")), pack_id=_int(g(ln, "PACK_ID")), fonte=fonte))
+    return out, [k for k in ("ORDER_ID", "SOURCE_ID", "BALANCE_AMOUNT") if k not in idx]
+
+
+def ler_csv(texto):
+    texto = texto.lstrip("\ufeff")
+    amostra = texto[:5000]
+    try:
+        sep = csv.Sniffer().sniff(amostra, delimiters=";,\t").delimiter
+    except csv.Error:
+        sep = ";" if amostra.count(";") > amostra.count(",") else ","
+    return list(csv.reader(io.StringIO(texto), delimiter=sep))
+
+
+def extrato_api(cli: Cliente, d1: dt.date, d2: dt.date, andamento=None, espera=10, limite_s=900):
+    """Gera o relatório de liberações no Mercado Pago (pela API) e devolve as linhas do arquivo (tabela)."""
+    cfg = cli.req("GET", MP + "/v1/account/release_report/config", opcional=True)
+    if not cfg:  # sem configuração: cria uma, com as colunas que a auditoria usa (não altera configuração existente)
+        cli.req("POST", MP + "/v1/account/release_report/config",
+                corpo={"file_name_prefix": "integra-bling", "include_withdrawal_at_end": False, "execute_after_withdrawal": False,
+                       "display_timezone": "GMT-03", "report_translation": "en", "separator": ";",
+                       "columns": [{"key": k} for k in COLUNAS_EXTRATO]})
+    ini = f"{d1.isoformat()}T03:00:00Z"
+    fim = f"{(d2 + dt.timedelta(days=1)).isoformat()}T02:59:59Z"
+    cli.req("POST", MP + "/v1/account/release_report", corpo={"begin_date": ini, "end_date": fim})
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < limite_s:
+        lista = cli.req("GET", MP + "/v1/account/release_report/list", opcional=True) or []
+        prontos = [x for x in lista if str(x.get("begin_date", ""))[:10] == ini[:10] and str(x.get("end_date", ""))[:10] == fim[:10]
+                   and x.get("file_name") and str(x.get("status") or "processed").lower() in ("processed", "ready", "available", "")]
+        if prontos:
+            arq = sorted(prontos, key=lambda x: str(x.get("date_created") or x.get("id") or ""))[-1]["file_name"]
+            return ler_csv(cli.req("GET", MP + f"/v1/account/release_report/{arq}", texto=True))
+        if andamento:
+            andamento(f"Aguardando o Mercado Pago gerar o relatório de liberações ({int(time.monotonic() - t0)}s)...")
+        time.sleep(espera)
+    raise MLErro("O Mercado Pago não terminou de gerar o relatório de liberações. Tente de novo em alguns minutos, "
+                 "ou baixe o relatório no Mercado Pago e envie o arquivo na aba Extrato.")
+
+
+def identificar_extrato(s, empresa_id, linhas):
+    """Liga cada linha do extrato ao pedido: ORDER_ID, pagamento (SOURCE_ID), referência externa, pacote ou envio."""
+    por_pag, por_pack, por_envio, pedidos_ = {}, {}, {}, set()
+    for oid, pags, pack, sid in s.execute(select(MLVenda.order_id, MLVenda.pagamentos, MLVenda.pack_id, MLVenda.shipping_id)
+                                          .where(MLVenda.empresa_id == empresa_id)).all():
+        pedidos_.add(oid)
+        for p_ in (pags or "").split(","):
+            if p_:
+                por_pag[p_] = oid
+        if pack:
+            por_pack.setdefault(pack, []).append(oid)
+        if sid:
+            por_envio.setdefault(sid, []).append(oid)
+    for x in linhas:
+        oid, como = None, ""
+        if x.order_id and x.order_id in pedidos_:
+            oid, como = x.order_id, "pedido"
+        elif x.origem_id and x.origem_id in por_pag:
+            oid, como = por_pag[x.origem_id], "pagamento"
+        elif _int(x.referencia) in pedidos_:
+            oid, como = _int(x.referencia), "referência"
+        elif x.pack_id and len(por_pack.get(x.pack_id, [])) >= 1:
+            oid, como = por_pack[x.pack_id][0], "pacote"
+        elif x.shipping_id and por_envio.get(x.shipping_id):
+            oid, como = por_envio[x.shipping_id][0], "envio"
+        elif x.order_id:
+            oid, como = x.order_id, "pedido fora do período"
+        x.order_id, x.identificacao = oid, como
+    return linhas
+
+
+def gravar_extrato(s, empresa_id, linhas, d1: dt.date, d2: dt.date):
+    s.execute(delete(MLExtrato).where(MLExtrato.empresa_id == empresa_id, MLExtrato.data >= dt.datetime.combine(d1, dt.time()),
+                                      MLExtrato.data < dt.datetime.combine(d2 + dt.timedelta(days=1), dt.time())))
+    identificar_extrato(s, empresa_id, linhas)
+    n = 0
+    for x in linhas:
+        if d1 <= x.data.date() <= d2:
+            s.add(x)
+            n += 1
+    return n
+
+
+def sincronizar_extrato(job_id: int, cli: Cliente | None = None, espera=10):
+    with SessionLocal() as s:
+        job = s.get(Job, job_id)
+        p = json.loads(job.parametros or "{}")
+        emp_id = job.empresa_id
+        job.status, job.mensagem = "EXECUTANDO", "Pedindo o relatório de liberações ao Mercado Pago..."
+        s.commit()
+    cli = cli or Cliente(emp_id)
+
+    def andamento(msg):
+        with SessionLocal() as s2:
+            s2.get(Job, job_id).mensagem = msg
+            s2.commit()
+
+    try:
+        d1, d2 = dt.date.fromisoformat(p["de"]), dt.date.fromisoformat(p["ate"])
+        tabela = extrato_api(cli, d1, d2, andamento, espera=espera)
+        linhas, faltam = linhas_extrato(tabela, emp_id, "API")
+        with SessionLocal() as s:
+            n = gravar_extrato(s, emp_id, linhas, d1, d2)
+            ident = sum(1 for x in linhas if x.order_id and d1 <= x.data.date() <= d2)
+            j = s.get(Job, job_id)
+            j.status, j.fim = "OK", agora()
+            j.mensagem = (f"Extrato do Mercado Pago de {d1:%d/%m/%Y} a {d2:%d/%m/%Y}: {n} movimentos, {ident} ligados a pedidos."
+                          + (f" O relatório veio sem as colunas {', '.join(faltam)}." if faltam else ""))
+            s.commit()
+    except Exception as e:  # noqa: BLE001
+        with SessionLocal() as s:
+            j = s.get(Job, job_id)
+            j.status, j.fim = "ERRO", agora()
+            j.mensagem = (f"{str(e)[:700]} — Se o Mercado Pago não liberar o relatório pela API, baixe o "
+                          "Relatório de liberações no Mercado Pago (Relatórios → Liberações) e envie o arquivo na aba Extrato.")
+            s.commit()
+
+
 # ------------------------------------------------------------------ job
 def sincronizar(job_id: int, cli: Cliente | None = None):
     with SessionLocal() as s:
@@ -296,6 +642,18 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
                     base = sum(float(x.pago or 0) for x in vs) or len(vs)
                     for x in vs:
                         x.frete = round(f * (float(x.pago or 0) or 1) / base, 2)
+        notas = []
+        if p.get("notas", True):
+            pagos_ = [v for v in vendas.values() if v.pago]
+            for n, v in enumerate(pagos_, 1):
+                if n % 25 == 1:
+                    andamento(f"Lendo a nota fiscal de cada venda ({n} de {len(pagos_)})...", n, len(pagos_))
+                notas += notas_da_venda(cli, seller, v)
+        cobs = []
+        if p.get("cobrancas", True):
+            for n, mes in enumerate(meses, 1):
+                andamento(f"Lendo as cobranças pedido a pedido de {mes[5:]}/{mes[:4]}...", n, len(meses))
+                cobs += cobrancas(cli, mes, emp_id, andamento)
         tarifas = []
         for n, mes in enumerate(meses, 1):
             andamento(f"Lendo o faturamento (tarifas) de {mes[5:]}/{mes[:4]}...", n, len(meses))
@@ -316,11 +674,19 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
                 s.execute(delete(MLVenda).where(MLVenda.empresa_id == emp_id, MLVenda.order_id.in_(lote)))
             s.execute(delete(MLVenda).where(MLVenda.empresa_id == emp_id, MLVenda.data >= d1, MLVenda.data <= d2))
             s.execute(delete(MLTarifa).where(MLTarifa.empresa_id == emp_id, MLTarifa.periodo >= ini, MLTarifa.periodo <= fim))
+            if p.get("cobrancas", True):
+                s.execute(delete(MLCobranca).where(MLCobranca.empresa_id == emp_id, MLCobranca.periodo >= ini,
+                                                   MLCobranca.periodo <= fim))
+            if p.get("notas", True):
+                for k in range(0, len(ids), 5000):
+                    s.execute(delete(MLNota).where(MLNota.empresa_id == emp_id, MLNota.order_id.in_(ids[k:k + 5000])))
             s.flush()
             s.add_all(vendas.values())
             for lin in itens.values():
                 s.add_all(lin)
             s.add_all(tarifas)
+            s.add_all(notas)
+            s.add_all(cobs)
             s.flush()
             emp = s.get(Empresa, emp_id)
             emp.ml_user_id = seller
@@ -330,7 +696,9 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
             pagos = sum(1 for v in vendas.values() if v.pago)
             j.status, j.fim = "OK", agora()
             j.mensagem = (f"Mercado Livre atualizado: {len(vendas)} pedidos ({pagos} pagos) e {len(tarifas)} "
-                          f"tarifas/bonificações do faturamento, de {ini[5:]}/{ini[:4]} a {fim[5:]}/{fim[:4]}.")
+                          f"tarifas/bonificações do faturamento, de {ini[5:]}/{ini[:4]} a {fim[5:]}/{fim[:4]}."
+                          + (f" {len(notas)} notas fiscais." if p.get("notas", True) else "")
+                          + (f" {len(cobs)} cobranças detalhadas." if p.get("cobrancas", True) else ""))
             s.commit()
     except Exception as e:  # noqa: BLE001
         with SessionLocal() as s:

@@ -10,7 +10,7 @@ import time
 import httpx
 from sqlalchemy import select, delete
 
-from db import SessionLocal, Empresa, ContaOrigem, DominioValor, DominioItem, Produto, ProdutoCusto, LinhaDRE, Job, agora
+from db import SessionLocal, Empresa, ContaOrigem, DominioValor, DominioItem, DominioNota, Produto, ProdutoCusto, LinhaDRE, Job, agora
 from seguranca import get_config, decifrar
 
 # contas de origem da Domínio (código, descrição, tipo)
@@ -251,6 +251,24 @@ def gravar_resultado(s, empresa_id: int, res: dict, ini_mes: str, fim_mes: str):
         p.codigo = (i.get("codigo") or p.codigo or prod)[:60]
         p.descricao = (i.get("descricao") or p.descricao or "")[:200]
         p.unidade = (i.get("unidade") or p.unidade or "")[:10]
+    # lista das notas com a chave de acesso (cruzamento com o Mercado Livre). Agente anterior a 0.15 não manda: mantém.
+    if "notas_saida" in res:
+        import datetime as _dt
+        d1 = _dt.date.fromisoformat(ini_mes + "-01")
+        a, m = map(int, fim_mes.split("-"))
+        d2 = _dt.date(a + (m == 12), 1 if m == 12 else m + 1, 1) - _dt.timedelta(days=1)
+        s.execute(delete(DominioNota).where(DominioNota.empresa_id == empresa_id, DominioNota.data >= d1, DominioNota.data <= d2))
+        for lado, lista in (("S", res.get("notas_saida") or []), ("E", res.get("notas_entrada") or [])):
+            for x in lista:
+                try:
+                    d = _dt.date.fromisoformat(str(x.get("data"))[:10])
+                except ValueError:
+                    continue
+                if d1 <= d <= d2:
+                    s.add(DominioNota(empresa_id=empresa_id, lado=lado, data=d, numero=str(x.get("numero") or "")[:20],
+                                      serie=str(x.get("serie") or "")[:10], chave=str(x.get("chave") or "")[:44],
+                                      cfop=int(x.get("cfop") or 0), valor=round(float(x.get("valor") or 0), 2),
+                                      cancelada=bool(x.get("cancelada"))))
     e = s.get(Empresa, empresa_id)
     aplicar_sugestoes(s, e)
 

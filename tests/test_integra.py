@@ -82,13 +82,13 @@ PEDIDOS = [
      "status": "paid", "total_amount": 100.0, "buyer": {"nickname": "COMPRADOR1"}, "shipping": {"id": 41},
      "order_items": [{"item": {"id": "MLB1", "title": "Câmera", "seller_sku": "CAM-001"}, "quantity": 1, "unit_price": 100.0,
                       "sale_fee": 12.0, "listing_type_id": "gold_pro"}],
-     "payments": [{"status": "approved", "transaction_amount": 100.0, "transaction_amount_refunded": 0}]},
+     "payments": [{"id": 9001, "status": "approved", "transaction_amount": 100.0, "transaction_amount_refunded": 0}]},
     {"id": 2000002, "date_created": "2026-01-31T23:30:00.000-04:00", "date_closed": "2026-01-31T23:30:00.000-04:00",  # 01/02 em Brasília
      "status": "cancelled", "total_amount": 50.0, "buyer": {"nickname": "COMPRADOR2"},
      "shipping": {"id": 42},
      "order_items": [{"item": {"id": "MLB2", "title": "Cabo"}, "quantity": 2, "unit_price": 25.0, "sale_fee": 3.0,
                       "listing_type_id": "gold_special"}],
-     "payments": [{"status": "refunded", "transaction_amount": 50.0, "transaction_amount_refunded": 50.0}]},
+     "payments": [{"id": 9002, "status": "refunded", "transaction_amount": 50.0, "transaction_amount_refunded": 50.0}]},
     {"id": 2000003, "date_closed": "2026-02-03T09:00:00.000-03:00", "status": "payment_required", "total_amount": 70.0,
      "order_items": [{"item": {"title": "Tripé"}, "quantity": 1, "sale_fee": 8.0}], "payments": []},
 ]
@@ -102,6 +102,26 @@ FATURAMENTO = {
     ("2026-02", "MP"): {"bill_includes": {"charges": [{"label": "Tarifa de parcelamento", "amount": 2.5, "type": "FIN"}]}},
 }
 ml_chamadas = {"token": 0, "refresh": set()}
+K1, K2 = "31260112345678000190550010000010011000000011", "31260212345678000190550010000010021000000022"
+
+
+def _cob(did, tipo, desc, valor, oid, deb="YES", nat="CHARGE"):
+    return {"charge_info": {"detail_id": did, "detail_amount": valor, "detail_type": nat, "detail_sub_type": tipo,
+                            "transaction_detail": desc, "creation_date_time": "2026-01-15T10:00:00",
+                            "debited_from_operation": deb},
+            "sales_info": [{"order_id": oid}] if oid else [], "shipping_info": {}}
+
+
+DETALHES = {("2026-01", "ML", "BILL"): [_cob(1, "CV", "Tarifa de venda", 13.0, 2000001), _cob(2, "CXD", "Mercado Envios", 20.0, 2000001),
+                                        _cob(3, "CV", "Tarifa de venda", 3.0, 2000002), _cob(4, "CV", "Tarifa de venda", 99.0, 7777)]}
+EXTRATO_CSV = ("DATE;SOURCE_ID;EXTERNAL_REFERENCE;RECORD_TYPE;DESCRIPTION;NET_CREDIT_AMOUNT;NET_DEBIT_AMOUNT;GROSS_AMOUNT;"
+               "MP_FEE_AMOUNT;FINANCING_FEE_AMOUNT;SHIPPING_FEE_AMOUNT;TAXES_AMOUNT;COUPON_AMOUNT;INSTALLMENTS;PAYMENT_METHOD;"
+               "BALANCE_AMOUNT;ORDER_ID;SHIPPING_ID;PACK_ID\n"
+               "2026-01-25T10:00:00.000-03:00;9001;;release;payment;67.00;0.00;100.00;-13.00;0;-20.00;0;0;1;pix;67.00;;;\n"
+               "2026-02-02T10:00:00.000-03:00;9002;;release;payment;47.00;0.00;50.00;-3.00;0;0;0;0;1;pix;114.00;;;\n"
+               "2026-02-03T10:00:00.000-03:00;5550001;2000002;release;refund;0.00;50.00;-50.00;0;0;0;0;0;1;pix;64.00;;;\n"
+               "2026-02-04T10:00:00.000-03:00;8888;XYZ;release;mediation;0.00;10.00;-10.00;0;0;0;0;0;1;;54.00;;;\n"
+               "2026-02-05T10:00:00.000-03:00;7777777;;release;payout;0.00;54.00;-54.00;0;0;0;0;0;1;;0.00;;;\n")
 
 
 def ml_falso(req: httpx.Request):
@@ -127,10 +147,43 @@ def ml_falso(req: httpx.Request):
         rs = [o for o in PEDIDOS if de <= (o.get("date_closed") or o["date_created"])[:10] <= ate]
         off, lim = int(q["offset"][0]), int(q["limit"][0])
         return httpx.Response(200, json={"results": rs[off:off + lim], "paging": {"total": len(rs), "offset": off, "limit": lim}})
+    if url.path == "/users/555/invoices/orders/2000001":
+        return httpx.Response(200, json={"id": 1377978, "status": "authorized", "invoice_number": 1001, "invoice_series": "1",
+                                         "amount": 100.0, "issued_date": "2026-01-10T11:00:00.000-03:00",
+                                         "attributes": {"invoice_key": K1, "xml_location": "x"}})
+    if url.path.startswith("/users/555/invoices/orders/"):
+        return httpx.Response(404, json={"message": "invoice not found"})
+    if url.path == "/shipments/42/invoice_data":
+        assert q["siteId"] == ["MLB"]
+        return httpx.Response(200, json={"fiscal_key": K2, "invoice_number": "1002", "invoice_series": "1"})
+    if url.path.endswith("/invoice_data"):
+        return httpx.Response(404)
+    if "/group/" in url.path and "/billing/integration/periods/key/" in url.path:
+        mes, grupo = url.path.split("/key/")[1][:7], url.path.split("/group/")[1].split("/")[0]
+        rs = DETALHES.get((mes, grupo, q["document_type"][0]), [])
+        off, lim = int(q["offset"][0]), int(q["limit"][0])
+        return httpx.Response(200, json={"offset": off, "limit": lim, "total": len(rs), "results": rs[off:off + lim]})
+    if url.netloc == "api.mercadopago.com":
+        if url.path == "/v1/account/release_report/config":
+            if req.method == "GET":
+                return httpx.Response(404, json={"message": "config not found"})
+            cfg = json.loads(req.content)
+            assert {"key": "ORDER_ID"} in cfg["columns"]
+            return httpx.Response(201, json=cfg)
+        if url.path == "/v1/account/release_report" and req.method == "POST":
+            ml_chamadas["relatorio"] = json.loads(req.content)
+            return httpx.Response(202, json={})
+        if url.path == "/v1/account/release_report/list":
+            b = ml_chamadas.get("relatorio") or {}
+            return httpx.Response(200, json=[{"id": 1, "file_name": "rel-1.csv", "begin_date": b.get("begin_date"),
+                                              "end_date": b.get("end_date"), "status": "processed"}])
+        if url.path == "/v1/account/release_report/rel-1.csv":
+            return httpx.Response(200, text=EXTRATO_CSV)
+        return httpx.Response(404)
     if url.path.startswith("/shipments/"):
         sid = url.path.split("/")[2]
         return httpx.Response(200, json={"senders": [{"user_id": 555, "cost": {"41": 20.0, "42": 9.0}[sid]}]})
-    if "/billing/integration/periods/key/" in url.path:
+    if "/billing/integration/periods/key/" in url.path and "/summary/" in url.path:
         mes = url.path.split("/key/")[1][:7]
         r = FATURAMENTO.get((mes, q["group"][0]))
         return httpx.Response(200, json=r) if r else httpx.Response(404, json={"message": "not found"})
@@ -163,7 +216,14 @@ def verifica_mercado_livre(c, eid):
         mlivre.sincronizar(r["id"], cli)
         j = c.get(f"/api/jobs/{r['id']}").json()
         assert j["status"] == "OK", j["mensagem"]
-        assert "3 pedidos (2 pagos)" in j["mensagem"] and "5 tarifas" in j["mensagem"]
+        assert "3 pedidos (2 pagos)" in j["mensagem"] and "5 tarifas" in j["mensagem"], j["mensagem"]
+        assert "2 notas fiscais" in j["mensagem"] and "4 cobranças detalhadas" in j["mensagem"]
+        # extrato do Mercado Pago pela API (relatório de liberações)
+        rx = c.post(f"/api/empresas/{eid}/mlivre/extrato/atualizar", json={"de": "2026-01-01", "ate": "2026-02-28"}).json()
+        mlivre.sincronizar_extrato(rx["id"], cli, espera=0)
+        jx = c.get(f"/api/jobs/{rx['id']}").json()
+        assert jx["status"] == "OK" and "5 movimentos, 3 ligados" in jx["mensagem"], jx["mensagem"]
+        assert ml_chamadas["relatorio"]["begin_date"] == "2026-01-01T03:00:00Z"
         mlivre.sincronizar(r["id"], cli)  # de novo: substitui
     finally:
         mlivre.httpx.Client = orig
@@ -207,6 +267,44 @@ def verifica_mercado_livre(c, eid):
     assert pr["CAM-001"]["margem"] == 33 and pr["CAM-001"]["tipos"] == "Premium" and pr["MLB2"]["qtd"] == 0
     ts = c.get(f"/api/empresas/{eid}/mlivre/tarifas?inicio=2026-01&fim=2026-02").json()
     assert len(ts) == 5 and {t["linha"] for t in ts if t["tipo"] == "CXD"} == {"Mercado Envios (frete)"}
+    # rastreabilidade: painel por pedido
+    pn = {x["order_id"]: x for x in c.get(f"/api/empresas/{eid}/mlivre/painel?inicio=2026-01&fim=2026-02").json()["pedidos"]}
+    a1, a2 = pn[2000001], pn[2000002]
+    assert a1["nota"]["numero"] == "1001" and a1["nota"]["origem"] == "EMISSOR_ML" and a1["dominio"] == "escriturada"
+    assert a2["nota"]["chave"] == K2 and a2["nota"]["origem"] == "ENVIO" and a2["dominio"] == "não escriturada"
+    assert a1["cobrancas"]["COMISSAO"] == -13 and a1["cobrancas"]["FRETE"] == -20 and a1["fonte_custos"] == "faturamento"
+    assert a1["resultado"] == 100 - 10 - 33 - 25 and a1["extrato_liquido"] == 67 and a1["esperado_extrato"] == 67
+    assert a2["custo_devolucao"] == 3 and a2["extrato_liquido"] == -3 and a2["esperado_extrato"] == -3
+    d = c.get(f"/api/empresas/{eid}/mlivre/pedido/2000001").json()
+    assert d["notas"][0]["dominio"]["numero"] == "1001" and len(d["cobrancas"]) == 2 and d["extrato"][0]["como"] == "pagamento"
+    assert d["itens"][0]["tarifa_pct"] == 12 and d["itens"][0]["custo_unit"] == 25
+    x = c.get(f"/api/empresas/{eid}/mlivre/extrato?de=2026-01-01&ate=2026-02-28").json()
+    assert x["creditos"] == 114 and x["debitos"] == 114 and x["saldo_final"] == 0 and x["nao_identificados"] == 1
+    assert {l["como"] for l in x["linhas"] if l["order_id"]} == {"pagamento", "referência"}
+    a = c.get(f"/api/empresas/{eid}/mlivre/auditoria?inicio=2026-01&fim=2026-02").json()
+    A = {}
+    for x in a["achados"]:
+        A.setdefault(x["codigo"], []).append(x)
+    assert A["COMISSAO_DIVERGENTE"][0]["order_id"] == 2000001 and A["COMISSAO_DIVERGENTE"][0]["diferenca"] == 1
+    assert A["TARIFA_NAO_ESTORNADA"][0]["order_id"] == 2000002 and A["CUSTO_DEVOLUCAO"][0]["cobrado"] == 3
+    assert A["COBRANCA_SEM_VENDA"][0]["order_id"] == 7777 and A["EXTRATO_SEM_PEDIDO"][0]["cobrado"] == -10
+    assert not {"SEM_NOTA", "NOTA_NAO_ESCRITURADA", "EXTRATO_DIVERGENTE", "VENDA_SEM_EXTRATO", "FRETE_DIVERGENTE"} & set(A)
+    assert [n["numero"] for n in a["dominio_sem_ml"]] == ["1009"] and a["tem_cobrancas"] and a["tem_extrato"]
+    # comissão acordada: Premium 11% → 12,00 cobrado acima do esperado 11,00
+    c.put(f"/api/empresas/{eid}/mlivre/config", json={"regras": {"premium_pct": "11"}})
+    a = c.get(f"/api/empresas/{eid}/mlivre/auditoria?inicio=2026-01&fim=2026-02").json()
+    ac = [x for x in a["achados"] if x["codigo"] == "COMISSAO_ACIMA_ACORDADO"]
+    assert ac and ac[0]["esperado"] == 11 and ac[0]["cobrado"] == 12
+    for u_ in ("painel", "auditoria"):
+        assert c.get(f"/api/empresas/{eid}/mlivre/{u_}.xlsx?inicio=2026-01&fim=2026-02").status_code == 200
+    assert c.get(f"/api/empresas/{eid}/mlivre/extrato.xlsx?de=2026-01-01&ate=2026-02-28").status_code == 200
+    # extrato por arquivo (relatório baixado do Mercado Pago, cabeçalho em português e valores com vírgula)
+    import base64
+    arq = ("Data;ID da operação no Mercado Pago;Descrição;Valor líquido creditado;Valor líquido debitado;Saldo;ID do pedido\n"
+           "02/03/2026 10:00:00;9999;payment;10,50;0;10,50;2000001\n")
+    r = c.post(f"/api/empresas/{eid}/mlivre/extrato/arquivo", json={"arquivo": base64.b64encode(arq.encode()).decode(), "nome": "x.csv"}).json()
+    assert r["movimentos"] == 1 and r["identificados"] == 1 and r["de"] == "2026-03-02"
+    assert c.post(f"/api/empresas/{eid}/mlivre/extrato/arquivo", json={"arquivo": base64.b64encode(b"a;b\n1;2").decode()}).status_code == 400
     assert c.post(f"/api/empresas/{eid}/mlivre/desconectar").json()["ml_conectado"] is False
 
 
@@ -235,6 +333,11 @@ def central_falsa(req: httpx.Request):
         "itens_entrada": [{"mes": "2026-02", "cfop": 1202, "produto": "100", "qtd": 1, "valor": 300}],
         "apuracao_pis_cofins": [{"mes": "2026-01", "pis": 100, "cofins": 460, "outros": 0}],
         "apuracao_icms": [{"mes": "2026-02", "debito": 1000, "credito_presumido": 800, "recolhimento_efetivo": 200, "saldo_recolher": 150}],
+        "notas_saida": [{"data": "2026-01-10", "numero": "1001", "serie": "1", "chave": "31260112345678000190550010000010011000000011", "cfop": 5102, "valor": 100,
+                         "cancelada": False},
+                        {"data": "2026-01-20", "numero": "1009", "serie": "1", "chave": "31260112345678000190550010000010091000000099", "cfop": 5102, "valor": 500,
+                         "cancelada": False}],
+        "notas_entrada": [],
         "produtos": [{"produto": "100", "codigo": "CAM-001", "descricao": "Camiseta", "unidade": "UN"},
                      {"produto": "200", "codigo": "BON-9", "descricao": "Boné", "unidade": "UN"}]}})
 

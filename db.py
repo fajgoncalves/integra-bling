@@ -124,6 +124,7 @@ class Empresa(Base):
     ml_sync_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     ml_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
     ml_imposto_aliq: Mapped[float] = mapped_column(Numeric(7, 4), default=0)  # % de impostos sobre vendas (DRE do ML)
+    ml_regras: Mapped[str] = mapped_column(Text, default="")  # JSON: comissão acordada por tipo de anúncio etc. (auditoria)
     dominio_sync_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     dominio_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
     criado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
@@ -262,6 +263,7 @@ class MLVenda(Base):
     comprador: Mapped[str] = mapped_column(String(120), default="")
     shipping_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     frete: Mapped[float | None] = mapped_column(Numeric(15, 2), nullable=True)  # custo do envio para o vendedor (None = não lido)
+    pagamentos: Mapped[str] = mapped_column(String(300), default="")  # ids dos pagamentos no Mercado Pago, separados por vírgula
 
 
 class MLItem(Base):
@@ -278,6 +280,7 @@ class MLItem(Base):
     qtd: Mapped[float] = mapped_column(Numeric(15, 4), default=0)
     preco: Mapped[float] = mapped_column(Numeric(15, 2), default=0)  # unitário
     tarifa: Mapped[float] = mapped_column(Numeric(15, 2), default=0)  # tarifa de venda unitária
+    categoria: Mapped[str] = mapped_column(String(30), default="")
 
 
 class MLCusto(Base):
@@ -291,6 +294,87 @@ class MLCusto(Base):
     custo: Mapped[float] = mapped_column(Numeric(15, 4))
     criado_por: Mapped[str] = mapped_column(String(120), default="")
     criado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: agora())
+
+
+class MLNota(Base):
+    """Nota fiscal de uma venda do Mercado Livre (emitida pelo ML ou informada no envio por um ERP, ex.: Bling)."""
+    __tablename__ = "ml_notas"
+    __table_args__ = (UniqueConstraint("empresa_id", "order_id", "chave", "numero"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    order_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    origem: Mapped[str] = mapped_column(String(20), default="")  # EMISSOR_ML ou ENVIO (nota informada no envio)
+    tipo: Mapped[str] = mapped_column(String(20), default="venda")  # venda / devolucao
+    numero: Mapped[str] = mapped_column(String(20), default="")
+    serie: Mapped[str] = mapped_column(String(10), default="")
+    chave: Mapped[str] = mapped_column(String(44), default="")
+    status: Mapped[str] = mapped_column(String(30), default="")
+    data: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    valor: Mapped[float | None] = mapped_column(Numeric(15, 2), nullable=True)
+
+
+class MLCobranca(Base):
+    """Linha do detalhe do faturamento do ML/MP (cada cobrança ou bonificação, ligada ao pedido quando houver)."""
+    __tablename__ = "ml_cobrancas"
+    __table_args__ = (UniqueConstraint("empresa_id", "grupo", "detail_id"), Index("ix_mlc_emp_order", "empresa_id", "order_id"))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    periodo: Mapped[str] = mapped_column(String(7))
+    grupo: Mapped[str] = mapped_column(String(4))
+    documento: Mapped[str] = mapped_column(String(20), default="BILL")  # BILL ou CREDIT_NOTE (estorno)
+    detail_id: Mapped[int] = mapped_column(BigInteger)
+    natureza: Mapped[str] = mapped_column(String(10), default="CHARGE")  # CHARGE / BONUS
+    tipo: Mapped[str] = mapped_column(String(20), default="")  # CV, CXD, CFONPN...
+    descricao: Mapped[str] = mapped_column(String(200), default="")
+    valor: Mapped[float] = mapped_column(Numeric(15, 2), default=0)  # com sinal: cobrança −, bonificação/estorno +
+    data: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    order_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    shipping_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    debitada: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # descontada na própria operação (extrato)
+
+
+class MLExtrato(Base):
+    """Linha do extrato do Mercado Pago (relatório de liberações), ligada ao pedido quando identificada."""
+    __tablename__ = "ml_extrato"
+    __table_args__ = (Index("ix_mle_emp_data", "empresa_id", "data"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    data: Mapped[dt.datetime] = mapped_column(DateTime)
+    origem_id: Mapped[str] = mapped_column(String(40), default="")  # SOURCE_ID (pagamento, reembolso, saque...)
+    referencia: Mapped[str] = mapped_column(String(80), default="")  # EXTERNAL_REFERENCE
+    tipo_registro: Mapped[str] = mapped_column(String(30), default="")  # RECORD_TYPE
+    descricao: Mapped[str] = mapped_column(String(60), default="")  # DESCRIPTION (payment, refund, shipping, payout...)
+    credito: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    debito: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    bruto: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    tarifa_mp: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    financiamento: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    frete: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    impostos: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    cupom: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    saldo: Mapped[float | None] = mapped_column(Numeric(15, 2), nullable=True)
+    meio: Mapped[str] = mapped_column(String(40), default="")
+    order_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    shipping_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    pack_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    identificacao: Mapped[str] = mapped_column(String(30), default="")  # como foi ligado ao pedido
+    fonte: Mapped[str] = mapped_column(String(10), default="API")  # API ou ARQUIVO
+
+
+class DominioNota(Base):
+    """Nota escriturada na Domínio (lista com a chave de acesso) — base do cruzamento com as vendas do ML."""
+    __tablename__ = "dominio_notas"
+    __table_args__ = (Index("ix_dn_emp_chave", "empresa_id", "chave"), Index("ix_dn_emp_data", "empresa_id", "data"))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    lado: Mapped[str] = mapped_column(String(1))  # S saída, E entrada (devolução)
+    data: Mapped[dt.date] = mapped_column(Date)
+    numero: Mapped[str] = mapped_column(String(20), default="")
+    serie: Mapped[str] = mapped_column(String(10), default="")
+    chave: Mapped[str] = mapped_column(String(44), default="")
+    cfop: Mapped[int] = mapped_column(Integer, default=0)
+    valor: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    cancelada: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class MLTarifa(Base):
@@ -347,8 +431,9 @@ def criar_tabelas():
                           ("ml_user_id", "BIGINT"), ("ml_apelido", "VARCHAR(120) DEFAULT ''"),
                           ("ml_conectado_em", "TIMESTAMP"), ("ml_sync_em", "TIMESTAMP"),
                           ("ml_sync_periodo", "VARCHAR(30) DEFAULT ''"),
-                          ("ml_imposto_aliq", "NUMERIC(7,4) DEFAULT 0")],
-             "ml_vendas": [("frete", "NUMERIC(15,2)")]}
+                          ("ml_imposto_aliq", "NUMERIC(7,4) DEFAULT 0"), ("ml_regras", "TEXT DEFAULT ''")],
+             "ml_vendas": [("frete", "NUMERIC(15,2)"), ("pagamentos", "VARCHAR(300) DEFAULT ''")],
+             "ml_itens": [("categoria", "VARCHAR(30) DEFAULT ''")]}
     insp = inspect(engine)
     for tab, cols in novas.items():
         tem = {c["name"] for c in insp.get_columns(tab)}

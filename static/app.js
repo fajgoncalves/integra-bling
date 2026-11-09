@@ -155,7 +155,7 @@ async function telaEmpresas() {
 
 function statusJob(j) {
   const cls = { OK: "b-ok", ERRO: "b-erro", EXECUTANDO: "b-aviso", PENDENTE: "b-aviso" }[j.status] || "";
-  const nome = { bling_sync: "Bling", dominio_importar: "Domínio", ml_sync: "Mercado Livre" }[j.tipo] || j.tipo;
+  const nome = { bling_sync: "Bling", dominio_importar: "Domínio", ml_sync: "Mercado Livre", ml_extrato: "Extrato Mercado Pago" }[j.tipo] || j.tipo;
   const st = { OK: "concluído", ERRO: "erro", EXECUTANDO: "em andamento", PENDENTE: "na fila" }[j.status] || j.status;
   return `<span class="badge ${cls}">${nome}: ${st}</span>`;
 }
@@ -947,14 +947,14 @@ async function telaMLEmpresas() {
     : `<div class="card vazio">Cadastre as empresas em <a href="#/empresas">Empresas</a>.</div>`;
   $$(".emp").forEach((c) => c.onclick = () => {
     const e = lista.find((x) => x.id === Number(c.dataset.id));
-    location.hash = `#/ml/${e.id}/${e.ml_conectado || e.pedidos ? "dre" : "conexao"}`;
+    location.hash = `#/ml/${e.id}/${e.ml_conectado || e.pedidos ? "vendas" : "conexao"}`;
   });
 }
 
-async function telaML(id, aba, params) {
+async function telaML(id, aba = "vendas", params) {
   clearInterval(pollJobs);
   const e = await api(`/api/empresas/${id}`);
-  const abas = [["dre", "DRE Mercado Livre"], ["produtos", "Margem por produto"], ["pedidos", "Pedidos"], ["custos", "Custos"], ["tarifas", "Tarifas"], ["conexao", "Conexão e dados"]];
+  const abas = [["vendas", "Vendas por pedido"], ["extrato", "Extrato"], ["auditoria", "Auditoria"], ["dre", "DRE Mercado Livre"], ["produtos", "Margem por produto"], ["custos", "Custos"], ["tarifas", "Tarifas"], ["conexao", "Conexão e dados"]];
   casca("ml", `<div class="topo"><div><a href="#/ml" class="peq">← Mercado Livre</a><h1>${esc(e.nome)} <span class="badge b-ml" style="vertical-align:middle">Mercado Livre</span></h1>
       <div class="suave">${e.ml_conectado ? `Conta ${esc(e.ml_apelido || "")}` : "Não conectada"} · impostos sobre vendas: ${brl4(e.ml_imposto_aliq).replace(/,?0+$/, "") || "0"}% · ${e.ml_sync_em ? `dados de ${esc(e.ml_sync_periodo)}` : "nada lido ainda"}</div></div>
       <button class="btn" id="ml-cfg">Configurar</button></div>
@@ -973,10 +973,13 @@ async function telaML(id, aba, params) {
   if (params.get("ml") === "erro") toast(`Mercado Livre: ${params.get("msg") || "não foi possível conectar"}`, true);
   if (aba === "conexao") return mlConexao(e);
   if (aba === "produtos") return mlProdutos(e);
-  if (aba === "pedidos") return mlPedidos(e);
+  if (aba === "vendas" || aba === "pedidos") return mlPainel(e);
+  if (aba === "extrato") return mlExtrato(e);
+  if (aba === "auditoria") return mlAuditoria(e);
   if (aba === "custos") return mlCustos(e);
   if (aba === "tarifas") return mlTarifas(e);
-  return mlDre(e);
+  if (aba === "dre") return mlDre(e);
+  return mlPainel(e);
 }
 
 function mlConexao(e) {
@@ -986,7 +989,9 @@ function mlConexao(e) {
         : `<div class="aviso">Clique em <b>Conectar Mercado Livre</b> e entre com a conta de vendedor desta empresa para autorizar a leitura. O aplicativo fica em Configurações.</div>`}
       <div class="suave peq" style="margin:10px 0">Última atualização: ${e.ml_sync_em ? `${dataHora(e.ml_sync_em)} (${esc(e.ml_sync_periodo)})` : "nunca"}</div>
       <div class="linha"><label>De <input type="month" id="m-ini" value="${p.inicio}"></label><label>Até <input type="month" id="m-fim" value="${p.fim}"></label>
-        <label class="chk"><input type="checkbox" id="m-frete" checked> Ler o frete de cada envio (mais demorado)</label></div>
+        <label class="chk"><input type="checkbox" id="m-frete" checked> Frete de cada envio</label>
+        <label class="chk"><input type="checkbox" id="m-notas" checked> Nota fiscal de cada venda</label>
+        <label class="chk"><input type="checkbox" id="m-cobs" checked> Cobranças detalhadas (pedido a pedido)</label></div>
       <div class="linha" style="margin-top:12px">
         <button class="btn ${e.ml_conectado ? "" : "pri"}" id="m-con">${e.ml_conectado ? "Reconectar" : "Conectar Mercado Livre"}</button>
         <button class="btn pri" id="m-sync" ${e.ml_conectado ? "" : "disabled"}>Atualizar do Mercado Livre</button>
@@ -999,7 +1004,7 @@ function mlConexao(e) {
     await api(`/api/empresas/${e.id}/mlivre/desconectar`, { method: "POST" }); rota();
   }, ev.target);
   $("#m-sync").onclick = (ev) => tentar(async () => {
-    await api(`/api/empresas/${e.id}/mlivre/sincronizar`, { method: "POST", body: { inicio: $("#m-ini").value, fim: $("#m-fim").value, frete: $("#m-frete").checked } });
+    await api(`/api/empresas/${e.id}/mlivre/sincronizar`, { method: "POST", body: { inicio: $("#m-ini").value, fim: $("#m-fim").value, frete: $("#m-frete").checked, notas: $("#m-notas").checked, cobrancas: $("#m-cobs").checked } });
     toast("Atualização do Mercado Livre iniciada."); carregarJobs(e.id);
   }, ev.target);
   carregarJobs(e.id);
@@ -1072,31 +1077,6 @@ async function mlProdutos(e) {
   await tentar(carregar);
 }
 
-async function mlPedidos(e) {
-  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
-    <input id="q" placeholder="Pedido, produto, SKU ou comprador..." style="min-width:260px"></div>
-    <div id="res" style="margin-top:12px" class="suave">Carregando...</div></div>`;
-  const ST = { paid: "pago", cancelled: "cancelado", confirmed: "confirmado", partially_refunded: "reembolso parcial" };
-  const carregar = async () => {
-    const p = periodo();
-    const r = await api(`/api/empresas/${e.id}/mlivre/vendas?inicio=${p.inicio}&fim=${p.fim}&q=${encodeURIComponent($("#q").value)}`);
-    const vs = r.vendas;
-    $("#res").innerHTML = `<div class="suave peq" style="margin-bottom:8px">${r.total_pedidos} pedido(s) pago(s)${r.nao_pagos ? ` · ${r.nao_pagos} sem pagamento (não entram)` : ""}${r.total_pedidos > vs.length ? ` · mostrando os últimos ${vs.length}` : ""}. Resultado de cada venda: pago − reembolso − impostos − tarifa de venda − frete do envio − custo dos produtos.</div>
-      <div class="rolagem" style="max-height:65vh"><table><tr><th>Data</th><th>Pedido</th><th>Produto</th><th>Situação</th><th class="num">Pago</th><th class="num">Reembolso</th><th class="num">Impostos</th>
-        <th class="num">Tarifa</th><th class="num">Frete</th><th class="num">Custo</th><th class="num">Margem</th></tr>
-      ${vs.map((v) => `<tr><td>${dataBR(v.data)}</td><td class="mono peq">${v.order_id}${v.pack_id ? `<div class="suave">pacote ${v.pack_id}</div>` : ""}</td>
-        <td class="peq">${esc(v.descricao)}${v.itens > 1 ? ` <span class="suave">(${v.itens} un)</span>` : ""}<div class="suave">${esc(v.comprador)}${v.sku ? ` · ${esc(v.sku)}` : ""}</div></td>
-        <td class="peq">${esc(ST[v.status] || v.status)}</td><td class="num">${brl(v.vendas)}</td><td class="num ${v.devolvido ? "neg" : "suave"}">${v.devolvido ? brl(-v.devolvido) : "–"}</td>
-        <td class="num neg">${brl(-v.imposto)}</td><td class="num neg">${brl(-v.tarifa)}</td><td class="num">${v.frete_lido ? `<span class="neg">${brl(-v.frete)}</span>` : '<span class="suave">não lido</span>'}</td>
-        <td class="num">${v.sem_custo ? '<span class="badge b-aviso">sem custo</span>' : `<span class="neg">${brl(-v.cmv)}</span>`}</td>
-        <td class="num ${v.margem < 0 ? "neg" : ""}"><b>${brl(v.margem)}</b></td></tr>`).join("") || '<tr><td colspan="11" class="vazio">Nenhum pedido.</td></tr>'}</table></div>`;
-    $("#res").classList.remove("suave");
-  };
-  let t = null;
-  $("#q").oninput = () => { clearTimeout(t); t = setTimeout(() => tentar(carregar), 400); };
-  await tentar(carregar);
-}
-
 async function mlCustos(e) {
   const p = periodo();
   $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">
@@ -1161,6 +1141,190 @@ async function mlTarifas(e) {
   await tentar(carregar);
 }
 
+// ------------------------------------------------------------------ rastreabilidade: vendas por pedido, extrato e auditoria
+const DOM_ST = { "escriturada": "b-ok", "não escriturada": "b-erro", "cancelada na Domínio": "b-erro", "sem nota": "b-aviso", "nota sem chave": "b-aviso", "Domínio não lida": "" };
+const ACHADO = {
+  COMISSAO_DIVERGENTE: "Comissão cobrada ≠ informada na venda", COMISSAO_ACIMA_ACORDADO: "Comissão acima da acordada",
+  COMISSAO_FORA_PADRAO: "Comissão fora do padrão", FRETE_DIVERGENTE: "Frete cobrado ≠ custo do envio",
+  TARIFA_NAO_ESTORNADA: "Tarifa não estornada na devolução", CUSTO_DEVOLUCAO: "Custo de devolução",
+  SEM_NOTA: "Venda sem nota fiscal", NOTA_NAO_ESCRITURADA: "Nota não escriturada na Domínio", NOTA_CANCELADA_DOMINIO: "Nota cancelada na Domínio",
+  NOTA_SEM_CHAVE: "Nota sem chave de acesso", NOTA_VALOR_DIFERENTE: "Valor da nota ≠ valor da venda", VENDA_SEM_EXTRATO: "Venda sem movimento no extrato",
+  EXTRATO_DIVERGENTE: "Extrato ≠ esperado", COBRANCA_SEM_VENDA: "Cobrança sem venda", EXTRATO_SEM_PEDIDO: "Extrato sem pedido",
+};
+const GRAV = { "alta": "b-erro", "média": "b-aviso", "info": "" };
+
+function abrirPedidoML(eid, oid) {
+  tentar(async () => {
+    const d = await api(`/api/empresas/${eid}/mlivre/pedido/${oid}`);
+    const p = d.pedido || {};
+    const sinal = (v) => `<span class="${v < 0 ? "neg" : ""}">${brl(v)}</span>`;
+    modal(`<div class="linha entre"><div><h2 style="margin:0">Pedido ${oid}</h2><div class="suave peq">${dataBR(p.data)} · ${esc(p.status || "")} · ${esc(p.comprador || "")}${p.pack_id ? ` · pacote ${p.pack_id}` : ""}</div></div><button class="btn" data-fechar>Fechar</button></div>
+      <div class="kpi" style="margin-top:12px"><div>Venda<b>R$ ${brl(p.vendas)}</b></div><div>Reembolso<b class="neg">R$ ${brl(-p.devolvido)}</b></div>
+        <div>Cobranças ML/MP<b class="neg">R$ ${brl(p.cobrancas_liq)}</b></div><div>Impostos<b class="neg">R$ ${brl(-p.imposto)}</b></div>
+        <div>Custo dos produtos<b class="neg">R$ ${brl(-p.cmv)}</b></div><div>Resultado<b class="${p.resultado < 0 ? "neg" : ""}">R$ ${brl(p.resultado)}</b></div></div>
+      ${p.custo_devolucao != null ? `<div class="aviso">Venda devolvida/cancelada: custo que ficou com o vendedor R$ ${brl(p.custo_devolucao)} (cobranças não estornadas).</div>` : ""}
+      <h3>Itens</h3><table><tr><th>Produto</th><th>SKU</th><th>Anúncio</th><th class="num">Qtd</th><th class="num">Preço</th><th class="num">Tarifa unit.</th><th class="num">% tarifa</th><th class="num">Custo unit.</th></tr>
+        ${d.itens.map((i) => `<tr><td>${esc(i.titulo)}<div class="suave peq mono">${esc(i.anuncio)} ${esc(i.categoria)}</div></td><td class="mono peq">${esc(i.sku)}</td><td>${esc(i.tipo)}</td><td class="num">${qtdBR(i.qtd)}</td><td class="num">${brl(i.preco)}</td><td class="num">${brl(i.tarifa_unit)}</td><td class="num">${pct(i.tarifa_pct)}</td><td class="num">${i.custo_unit == null ? '<span class="badge b-aviso">sem custo</span>' : brl4(i.custo_unit)}</td></tr>`).join("")}</table>
+      <h3>Nota fiscal</h3>${d.notas.length ? `<table><tr><th>Tipo</th><th>Origem</th><th>Número</th><th>Chave</th><th class="num">Valor</th><th>Na Domínio</th></tr>
+        ${d.notas.map((n) => `<tr><td>${n.tipo === "devolucao" ? "Devolução" : "Venda"}</td><td class="peq">${esc(n.origem)}</td><td>${esc(n.numero)}${n.serie ? `/${esc(n.serie)}` : ""}</td><td class="mono peq">${esc(n.chave)}</td><td class="num">${n.valor == null ? "—" : brl(n.valor)}</td>
+          <td class="peq">${n.dominio ? `${n.dominio.cancelada ? '<span class="badge b-erro">cancelada</span>' : '<span class="badge b-ok">escriturada</span>'} ${dataBR(n.dominio.data)} · CFOP ${n.dominio.cfop} · R$ ${brl(n.dominio.valor)}` : `<span class="badge">${esc(p.dominio || "não encontrada")}</span>`}</td></tr>`).join("")}</table>` : '<div class="aviso">Nenhuma nota encontrada no Mercado Livre para esta venda.</div>'}
+      <h3>Cobranças do Mercado Livre / Mercado Pago (faturamento)</h3>${d.cobrancas.length ? `<table><tr><th>Data</th><th>Documento</th><th>Descrição</th><th>Classe</th><th>Descontada na venda</th><th class="num">Valor</th></tr>
+        ${d.cobrancas.map((c) => `<tr><td>${dataBR(c.data)}</td><td class="peq">${esc(c.documento)} · ${c.grupo}</td><td>${esc(c.descricao)} <span class="mono suave peq">${esc(c.tipo)}</span></td><td class="peq">${esc(c.classe)}</td><td class="peq">${c.debitada == null ? "—" : c.debitada ? "sim" : "não (fatura)"}</td><td class="num">${sinal(c.valor)}</td></tr>`).join("")}
+        <tr class="destaque"><td colspan="5">Total</td><td class="num">${sinal(d.cobrancas.reduce((a, c) => a + c.valor, 0))}</td></tr></table>` : `<div class="suave peq">Sem cobranças detalhadas para este pedido${p.fonte_custos === "pedido" ? " (usado o informado no pedido: tarifa e frete)" : ""}.</div>`}
+      <h3>Extrato do Mercado Pago</h3>${d.extrato.length ? `<table><tr><th>Data</th><th>Movimento</th><th>Operação</th><th class="num">Bruto</th><th class="num">Tarifa MP</th><th class="num">Parcel.</th><th class="num">Frete</th><th class="num">Crédito</th><th class="num">Débito</th></tr>
+        ${d.extrato.map((x) => `<tr><td>${esc(x.data)}</td><td>${esc(x.descricao)}</td><td class="mono peq">${esc(x.origem_id)}<div class="suave">por ${esc(x.como)}</div></td><td class="num">${brl(x.bruto)}</td><td class="num">${brl(x.tarifa_mp)}</td><td class="num">${brl(x.financiamento)}</td><td class="num">${brl(x.frete)}</td><td class="num">${x.credito ? brl(x.credito) : "–"}</td><td class="num neg">${x.debito ? brl(-x.debito) : "–"}</td></tr>`).join("")}
+        <tr class="destaque"><td colspan="7">Líquido no extrato${p.esperado_extrato != null ? ` (esperado R$ ${brl(p.esperado_extrato)})` : ""}</td><td class="num" colspan="2">${brl(p.extrato_liquido)}</td></tr></table>`
+        : `<div class="suave peq">${p.no_periodo_extrato ? "Nenhum movimento no extrato ligado a este pedido." : "O extrato ainda não foi lido para a data desta venda."}</div>`}`);
+  });
+}
+
+async function mlPainel(e) {
+  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
+    <div class="linha"><input id="q" placeholder="Pedido, produto, SKU, NF..." style="min-width:220px">
+      <select id="f"><option value="">Todas as vendas</option><option value="dev">Com devolução</option><option value="nf">Nota com problema</option><option value="ext">Extrato diferente do esperado</option><option value="neg">Resultado negativo</option></select>
+      <button class="btn" id="xls">Baixar Excel</button></div></div>
+    <div id="res" style="margin-top:12px" class="suave">Carregando...</div></div>`;
+  let r = null;
+  const carregar = async () => { const p = periodo(); r = await api(`/api/empresas/${e.id}/mlivre/painel?inicio=${p.inicio}&fim=${p.fim}`); desenhar(); };
+  const desenhar = () => {
+    const q = $("#q").value.toLowerCase(), f = $("#f").value;
+    const ps = r.pedidos.filter((p) => (!q || String(p.order_id).includes(q) || p.descricao.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.nota && (p.nota.numero.includes(q) || p.nota.chave.includes(q))))
+      && (!f || (f === "dev" && p.devolvido) || (f === "nf" && !["escriturada", "Domínio não lida"].includes(p.dominio)) || (f === "ext" && p.esperado_extrato != null && p.extrato_linhas && Math.abs(p.extrato_liquido - p.esperado_extrato) > 0.5) || (f === "neg" && p.resultado < 0)));
+    const t = ps.reduce((a, p) => { a.v += p.vendas; a.d += p.devolvido; a.i += p.imposto; a.c += p.cobrancas_liq; a.m += p.cmv; a.r += p.resultado; return a; }, { v: 0, d: 0, i: 0, c: 0, m: 0, r: 0 });
+    const outras = (p) => Object.entries(p.cobrancas).filter(([k]) => !["COMISSAO", "FRETE"].includes(k)).reduce((a, [, v]) => a + v, 0);
+    $("#res").innerHTML = `<div class="kpi"><div>Vendas<b>R$ ${brl(t.v)}</b></div><div>Reembolsos<b class="neg">R$ ${brl(-t.d)}</b></div><div>Cobranças ML/MP<b class="neg">R$ ${brl(t.c)}</b></div>
+        <div>Impostos<b class="neg">R$ ${brl(-t.i)}</b></div><div>Custo dos produtos<b class="neg">R$ ${brl(-t.m)}</b></div><div>Resultado<b class="${t.r < 0 ? "neg" : ""}">R$ ${brl(t.r)}</b></div></div>
+      <div class="suave peq" style="margin-bottom:8px">${ps.length} de ${r.total} venda(s). Cobranças pelo faturamento do ML pedido a pedido (com estornos); sem o detalhe, usa a tarifa e o frete do pedido. Clique numa venda para ver itens, nota, cobranças e extrato.</div>
+      <div class="rolagem" style="max-height:62vh"><table><tr><th>Data</th><th>Pedido</th><th>Produto</th><th>Nota fiscal</th><th class="num">Venda</th><th class="num">Reembolso</th><th class="num">Impostos</th>
+        <th class="num">Comissão</th><th class="num">Frete</th><th class="num">Outras</th><th class="num">Custo</th><th class="num">Resultado</th><th class="num">Extrato</th></tr>
+      ${ps.map((p) => `<tr class="clicavel" data-o="${p.order_id}"><td>${dataBR(p.data)}</td><td class="mono peq">${p.order_id}<div class="suave">${esc(p.status)}</div></td>
+        <td class="peq">${esc(p.descricao)}<div class="suave">${esc(p.sku)}${p.tipo_anuncio ? ` · ${esc(p.tipo_anuncio)}` : ""}</div></td>
+        <td class="peq">${p.nota ? `${esc(p.nota.numero)}<div class="suave">${p.nota.origem === "EMISSOR_ML" ? "emissor ML" : "ERP"}</div>` : ""}<span class="badge ${DOM_ST[p.dominio] || ""}">${esc(p.dominio)}</span></td>
+        <td class="num">${brl(p.vendas)}</td><td class="num ${p.devolvido ? "neg" : "suave"}">${p.devolvido ? brl(-p.devolvido) : "–"}</td><td class="num neg">${brl(-p.imposto)}</td>
+        <td class="num neg">${brl(p.cobrancas.COMISSAO)}</td><td class="num neg">${brl(p.cobrancas.FRETE)}</td><td class="num ${outras(p) < 0 ? "neg" : ""}">${brl(outras(p))}</td>
+        <td class="num">${p.sem_custo ? '<span class="badge b-aviso">sem custo</span>' : `<span class="neg">${brl(-p.cmv)}</span>`}</td>
+        <td class="num ${p.resultado < 0 ? "neg" : ""}"><b>${brl(p.resultado)}</b>${p.fonte_custos !== "faturamento" ? '<div class="suave peq">estimado</div>' : ""}</td>
+        <td class="num">${p.extrato_linhas ? `${brl(p.extrato_liquido)}${p.esperado_extrato != null && Math.abs(p.extrato_liquido - p.esperado_extrato) > 0.5 ? `<div><span class="badge b-erro">esperado ${brl(p.esperado_extrato)}</span></div>` : ""}` : `<span class="suave">${p.no_periodo_extrato ? "sem movimento" : "–"}</span>`}</td></tr>`).join("") || '<tr><td colspan="13" class="vazio">Nenhuma venda.</td></tr>'}</table></div>`;
+    $("#res").classList.remove("suave");
+    $$("#res tr[data-o]").forEach((tr) => tr.onclick = () => abrirPedidoML(e.id, tr.dataset.o));
+  };
+  $("#q").oninput = () => r && desenhar();
+  $("#f").onchange = () => r && desenhar();
+  $("#xls").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/mlivre/painel.xlsx?inicio=${p.inicio}&fim=${p.fim}`; };
+  await tentar(carregar);
+}
+
+async function mlExtrato(e) {
+  const hoje = new Date().toISOString().slice(0, 10);
+  let de = "2026-09-01", ate = hoje;
+  try { const g = JSON.parse(localStorage.getItem("ib_extrato") || "{}"); de = g.de || de; ate = g.ate || ate; } catch (_) { /* */ }
+  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">
+      <div class="linha"><label>De <input type="date" id="x-de" value="${de}"></label><label>Até <input type="date" id="x-ate" value="${ate}"></label>
+        <select id="x-f"><option value="">Todos os movimentos</option><option value="ent">Só entradas</option><option value="sai">Só saídas</option><option value="ni">Não identificados</option></select>
+        <input id="x-q" placeholder="Pedido, operação..." style="min-width:160px"></div>
+      <div class="linha"><button class="btn pri" id="x-api" ${e.ml_conectado ? "" : "disabled"}>Atualizar pelo Mercado Pago</button><button class="btn" id="x-arq">Enviar arquivo</button><button class="btn" id="x-xls">Baixar Excel</button>
+        <input type="file" id="x-file" accept=".csv,.xlsx" style="display:none"></div></div>
+    <div class="suave peq" style="margin-top:8px">Extrato analítico do Mercado Pago (relatório de liberações): cada entrada e saída, ligada à venda pelo número do pedido, do pagamento, do pacote ou do envio. Se a atualização pela API não for liberada, baixe no Mercado Pago o <b>Relatório de liberações</b> do período (CSV ou Excel) e use <b>Enviar arquivo</b>.</div>
+    <div id="x-res" style="margin-top:12px" class="suave">Carregando...</div></div>
+    <div class="card"><h2>Atividades</h2><div id="jobs" class="suave">Carregando...</div></div>`;
+  let r = null;
+  const carregar = async () => {
+    try { localStorage.setItem("ib_extrato", JSON.stringify({ de: $("#x-de").value, ate: $("#x-ate").value })); } catch (_) { /* */ }
+    r = await api(`/api/empresas/${e.id}/mlivre/extrato?de=${$("#x-de").value}&ate=${$("#x-ate").value}`); desenhar();
+  };
+  const desenhar = () => {
+    const f = $("#x-f").value, q = $("#x-q").value.toLowerCase();
+    const ls = r.linhas.filter((x) => (!f || (f === "ent" && x.credito) || (f === "sai" && x.debito) || (f === "ni" && !x.order_id && !["payout", "withdrawal"].includes(String(x.tipo).toLowerCase())))
+      && (!q || String(x.order_id || "").includes(q) || x.origem_id.includes(q) || x.referencia.toLowerCase().includes(q) || x.descricao.toLowerCase().includes(q)));
+    $("#x-res").innerHTML = !r.linhas.length ? `<div class="vazio">Nenhum movimento no período. ${r.inicio_lido ? `Extrato lido de ${dataHora(r.inicio_lido)} a ${dataHora(r.fim_lido)}.` : "O extrato ainda não foi lido."}</div>` : `
+      <div class="kpi"><div>Entradas<b>R$ ${brl(r.creditos)}</b></div><div>Saídas<b class="neg">R$ ${brl(-r.debitos)}</b></div><div>Líquido<b>R$ ${brl(r.liquido)}</b></div>
+        <div>Saldo final<b>${r.saldo_final == null ? "—" : `R$ ${brl(r.saldo_final)}`}</b></div><div>Ligados a vendas<b>${r.identificados}</b></div><div>Sem venda identificada<b class="${r.nao_identificados ? "neg" : ""}">${r.nao_identificados}</b></div></div>
+      <details><summary><b>Resumo por tipo de movimento</b></summary><table><tr><th>Movimento</th><th class="num">Qtd</th><th class="num">Entradas</th><th class="num">Saídas</th></tr>
+        ${r.resumo.map((x) => `<tr><td>${esc(x.descricao)}</td><td class="num">${x.qtd}</td><td class="num">${brl(x.credito)}</td><td class="num neg">${brl(-x.debito)}</td></tr>`).join("")}</table></details>
+      <div class="rolagem" style="max-height:60vh;margin-top:10px"><table><tr><th>Data</th><th>Movimento</th><th>Venda</th><th class="num">Bruto</th><th class="num">Tarifa MP</th><th class="num">Parcel.</th><th class="num">Frete</th><th class="num">Entrada</th><th class="num">Saída</th><th class="num">Saldo</th></tr>
+      ${ls.map((x) => `<tr ${x.order_id ? `class="clicavel" data-o="${x.order_id}"` : ""}><td class="peq">${esc(x.data)}</td><td>${esc(x.descricao)}<div class="suave peq mono">${esc(x.origem_id)}${x.meio ? ` · ${esc(x.meio)}` : ""}</div></td>
+        <td class="peq">${x.order_id ? `<span class="mono">${x.order_id}</span><div class="suave">${esc((x.venda || {}).descricao || "")} · por ${esc(x.como)}</div>` : (["payout", "withdrawal"].includes(String(x.tipo).toLowerCase()) ? '<span class="suave">saque</span>' : '<span class="badge b-aviso">não identificado</span>')}</td>
+        <td class="num">${x.bruto ? brl(x.bruto) : "–"}</td><td class="num">${x.tarifa_mp ? brl(x.tarifa_mp) : "–"}</td><td class="num">${x.financiamento ? brl(x.financiamento) : "–"}</td><td class="num">${x.frete ? brl(x.frete) : "–"}</td>
+        <td class="num">${x.credito ? brl(x.credito) : "–"}</td><td class="num neg">${x.debito ? brl(-x.debito) : "–"}</td><td class="num suave">${x.saldo == null ? "" : brl(x.saldo)}</td></tr>`).join("")}</table></div>`;
+    $("#x-res").classList.remove("suave");
+    $$("#x-res tr[data-o]").forEach((tr) => tr.onclick = () => abrirPedidoML(e.id, tr.dataset.o));
+  };
+  $("#x-de").onchange = $("#x-ate").onchange = () => tentar(carregar);
+  $("#x-f").onchange = $("#x-q").oninput = () => r && desenhar();
+  $("#x-api").onclick = (ev) => tentar(async () => {
+    await api(`/api/empresas/${e.id}/mlivre/extrato/atualizar`, { method: "POST", body: { de: $("#x-de").value, ate: $("#x-ate").value } });
+    toast("Pedido ao Mercado Pago enviado. O relatório leva alguns minutos."); carregarJobs(e.id);
+  }, ev.target);
+  $("#x-arq").onclick = () => $("#x-file").click();
+  $("#x-file").onchange = () => {
+    const f = $("#x-file").files[0];
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => tentar(async () => {
+      const res = await api(`/api/empresas/${e.id}/mlivre/extrato/arquivo`, { method: "POST", body: { arquivo: String(rd.result).split(",")[1], nome: f.name } });
+      toast(`${res.movimentos} movimentos de ${dataBR(res.de)} a ${dataBR(res.ate)}; ${res.identificados} ligados a vendas.`);
+      $("#x-file").value = ""; carregar();
+    });
+    rd.readAsDataURL(f);
+  };
+  $("#x-xls").onclick = () => { location.href = `/api/empresas/${e.id}/mlivre/extrato.xlsx?de=${$("#x-de").value}&ate=${$("#x-ate").value}`; };
+  carregarJobs(e.id);
+  await tentar(carregar);
+}
+
+async function mlAuditoria(e) {
+  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
+    <div class="linha"><select id="a-g"><option value="">Todas as gravidades</option><option value="alta">Alta</option><option value="média">Média</option><option value="info">Informativo</option></select>
+      <select id="a-c"><option value="">Todos os achados</option>${Object.entries(ACHADO).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
+      <button class="btn" id="a-regras">Comissão acordada</button><button class="btn" id="a-xls">Baixar Excel</button></div></div>
+    <div id="a-res" style="margin-top:12px" class="suave">Carregando...</div></div><div class="card" id="a-dom" style="display:none"></div>`;
+  let r = null;
+  const carregar = async () => { const p = periodo(); r = await api(`/api/empresas/${e.id}/mlivre/auditoria?inicio=${p.inicio}&fim=${p.fim}`); desenhar(); };
+  const desenhar = () => {
+    const g = $("#a-g").value, c = $("#a-c").value;
+    const as = r.achados.filter((a) => (!g || a.gravidade === g) && (!c || a.codigo === c));
+    const faltas = [];
+    if (!r.tem_cobrancas) faltas.push("as cobranças pedido a pedido (atualize em Conexão e dados com “Cobranças detalhadas”)");
+    if (!r.tem_extrato) faltas.push("o extrato do Mercado Pago do período (aba Extrato)");
+    if (!r.dominio_lida) faltas.push("a lista de notas da Domínio (Ler da Domínio na empresa, com o Agente 360 0.15.0 ou mais novo)");
+    $("#a-res").innerHTML = `${faltas.length ? `<div class="aviso">Para a auditoria completa ainda falta ler: ${faltas.join("; ")}.</div>` : ""}
+      <div class="suave peq" style="margin-bottom:8px">${r.pedidos} venda(s) conferida(s). Comissão comparada com ${r.regras.classico_pct != null || r.regras.premium_pct != null ? "a comissão acordada cadastrada" : "o padrão do mesmo tipo de anúncio e categoria (cadastre a comissão acordada para conferir contra o contrato)"}.</div>
+      <div class="grade" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin-bottom:12px">${Object.entries(r.resumo).map(([k, v]) => `<div class="card clicavel" data-c="${k}" style="margin:0;padding:10px"><div class="peq">${esc(ACHADO[k] || k)}</div><b>${v.qtd}</b>${v.valor ? ` <span class="suave peq">R$ ${brl(v.valor)}</span>` : ""}</div>`).join("") || '<div class="vazio">Nenhuma divergência encontrada.</div>'}</div>
+      <div class="rolagem" style="max-height:60vh"><table><tr><th></th><th>Achado</th><th>Data</th><th>Pedido</th><th>Detalhe</th><th class="num">Esperado</th><th class="num">Cobrado / lançado</th><th class="num">Diferença</th></tr>
+      ${as.map((a) => `<tr ${a.order_id ? `class="clicavel" data-o="${a.order_id}"` : ""}><td><span class="badge ${GRAV[a.gravidade] || ""}">${esc(a.gravidade)}</span></td><td class="peq">${esc(ACHADO[a.codigo] || a.codigo)}</td><td class="peq">${a.data ? dataBR(a.data) : ""}</td>
+        <td class="mono peq">${a.order_id || ""}</td><td class="peq">${esc(a.texto)}${a.descricao ? `<div class="suave">${esc(a.descricao)}</div>` : ""}</td>
+        <td class="num">${a.esperado == null ? "" : brl(a.esperado)}</td><td class="num">${a.cobrado == null ? "" : brl(a.cobrado)}</td><td class="num ${a.diferenca > 0 ? "neg" : ""}">${a.diferenca == null ? "" : brl(a.diferenca)}</td></tr>`).join("")}</table></div>`;
+    $("#a-res").classList.remove("suave");
+    $$("#a-res tr[data-o]").forEach((tr) => tr.onclick = () => abrirPedidoML(e.id, tr.dataset.o));
+    $$("#a-res [data-c]").forEach((d) => d.onclick = () => { $("#a-c").value = d.dataset.c; desenhar(); });
+    const dm = $("#a-dom");
+    if (r.dominio_sem_ml.length) {
+      dm.style.display = "";
+      dm.innerHTML = `<details><summary><b>Notas de venda na Domínio sem venda no Mercado Livre (${r.dominio_sem_ml.length})</b> <span class="suave peq">— informativo: podem ser de outros canais</span></summary>
+        <div class="rolagem" style="max-height:40vh"><table><tr><th>Data</th><th>Número</th><th>Chave</th><th>CFOP</th><th class="num">Valor</th></tr>
+        ${r.dominio_sem_ml.map((n) => `<tr><td>${dataBR(n.data)}</td><td>${esc(n.numero)}${n.serie ? `/${esc(n.serie)}` : ""}</td><td class="mono peq">${esc(n.chave)}</td><td>${n.cfop}</td><td class="num">${brl(n.valor)}</td></tr>`).join("")}</table></div></details>`;
+    } else dm.style.display = "none";
+  };
+  $("#a-g").onchange = $("#a-c").onchange = () => r && desenhar();
+  $("#a-xls").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/mlivre/auditoria.xlsx?inicio=${p.inicio}&fim=${p.fim}`; };
+  $("#a-regras").onclick = () => {
+    const rg = e.ml_regras || {};
+    const v = (k) => (rg[k] == null ? "" : brl4(rg[k]).replace(/,?0+$/, ""));
+    const m = modal(`<h2>Comissão acordada com o Mercado Livre</h2>
+      <div class="suave peq">Usada pela auditoria para apontar tarifas acima do combinado. Deixe em branco para comparar com o padrão do mesmo tipo de anúncio e categoria.</div>
+      <div class="form" style="margin-top:10px"><label>Clássico (% do preço) <input id="r-c" value="${v("classico_pct")}"></label><label>Premium (% do preço) <input id="r-p" value="${v("premium_pct")}"></label>
+        <label>Tarifa fixa por unidade (R$) <input id="r-f" value="${v("fixa_valor")}"></label><label>Aplicada abaixo de (R$) <input id="r-l" value="${v("fixa_limite")}"></label>
+        <label>Tolerância (R$) <input id="r-t" value="${v("tolerancia")}"></label><label>Desvio do padrão (pontos %) <input id="r-d" value="${v("desvio_pp")}"></label></div>
+      <div class="linha" style="margin-top:14px"><button class="btn pri" id="r-ok">Salvar</button><button class="btn" data-fechar>Cancelar</button></div>`, true);
+    $("#r-ok", m).onclick = (ev) => tentar(async () => {
+      const regras = { classico_pct: $("#r-c", m).value, premium_pct: $("#r-p", m).value, fixa_valor: $("#r-f", m).value, fixa_limite: $("#r-l", m).value, tolerancia: $("#r-t", m).value, desvio_pp: $("#r-d", m).value };
+      const x = await api(`/api/empresas/${e.id}/mlivre/config`, { method: "PUT", body: { regras } });
+      e.ml_regras = x.ml_regras; m.remove(); toast("Salvo."); carregar();
+    }, ev.target);
+  };
+  await tentar(carregar);
+}
+
 // ------------------------------------------------------------------ rotas
 async function rota() {
   if (pendenteModelo) { const p = pendenteModelo(); pendenteModelo = null; if (p) await p; }
@@ -1181,7 +1345,7 @@ async function rota() {
     if (p[0] === "modelos") return await telaModelos();
     if (p[0] === "modelo" && p[1]) return await telaModelo(Number(p[1]));
     if (p[0] === "config") return await telaConfig();
-    if (p[0] === "ml" && p[1]) return await telaML(Number(p[1]), p[2] || "dre", params);
+    if (p[0] === "ml" && p[1]) return await telaML(Number(p[1]), p[2] || "vendas", params);
     if (p[0] === "ml") return await telaMLEmpresas();
     return await telaEmpresas();
   } catch (e) {

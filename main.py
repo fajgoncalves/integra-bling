@@ -22,10 +22,11 @@ import dre
 import fluxo
 import mlivre
 import mlanalise
+import mlauditoria
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.10.1"
+VERSAO = "1.11.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -376,7 +377,7 @@ def _emp_json(s, e: Empresa):
             "dominio_sync_em": dt2s(e.dominio_sync_em), "dominio_sync_periodo": e.dominio_sync_periodo,
             "ml_conectado": bool(e.ml_refresh), "ml_conectado_em": dt2s(e.ml_conectado_em), "ml_apelido": e.ml_apelido,
             "ml_sync_em": dt2s(e.ml_sync_em), "ml_sync_periodo": e.ml_sync_periodo,
-            "ml_imposto_aliq": float(e.ml_imposto_aliq or 0),
+            "ml_imposto_aliq": float(e.ml_imposto_aliq or 0), "ml_regras": mlauditoria.regras(e),
             "contas": {o: {"total": t, "associadas": a} for o, t, a in contas},
             "ultimo_job": _job_json(job) if job else None}
 
@@ -608,8 +609,9 @@ async def ml_sincronizar(eid: int, request: Request, u=Depends(usuario), s=Depen
         raise HTTPException(400, "O início é depois do fim.")
     if len(dre.meses_entre(ini, fim)) > 24:
         raise HTTPException(400, "Período máximo de 24 meses por vez.")
-    return _iniciar_job(s, e, "ml_sync", {"inicio": ini, "fim": fim, "frete": b.get("frete", True) is not False}, u,
-                        mlivre.sincronizar)
+    return _iniciar_job(s, e, "ml_sync", {"inicio": ini, "fim": fim, "frete": b.get("frete", True) is not False,
+                                          "notas": b.get("notas", True) is not False,
+                                          "cobrancas": b.get("cobrancas", True) is not False}, u, mlivre.sincronizar)
 
 
 def _ml_emp(s, eid):
@@ -631,7 +633,7 @@ def ml_empresas(_u=Depends(usuario), s=Depends(get_db)):
     for e in s.scalars(select(Empresa).where(Empresa.ativo == True).order_by(Empresa.nome)).all():  # noqa: E712
         out.append({"id": e.id, "nome": e.nome, "cnpj": e.cnpj, "ml_conectado": bool(e.ml_refresh), "ml_apelido": e.ml_apelido,
                     "ml_sync_em": dt2s(e.ml_sync_em), "ml_sync_periodo": e.ml_sync_periodo,
-            "ml_imposto_aliq": float(e.ml_imposto_aliq or 0),
+                    "ml_imposto_aliq": float(e.ml_imposto_aliq or 0),
                     "pedidos": s.scalar(select(func.count(MLVenda.id)).where(MLVenda.empresa_id == e.id)) or 0})
     return out
 
@@ -640,6 +642,17 @@ def ml_empresas(_u=Depends(usuario), s=Depends(get_db)):
 async def ml_config(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
     e = _ml_emp(s, eid)
     b = await request.json()
+    if isinstance(b.get("regras"), dict):
+        r = {}
+        for k in mlauditoria.REGRAS_PADRAO:
+            v = b["regras"].get(k)
+            if v in (None, ""):
+                continue
+            n = _num_br(v)
+            if n is None or n < 0:
+                raise HTTPException(400, f"Valor inválido em {k}.")
+            r[k] = n
+        e.ml_regras = json.dumps(r)
     if "imposto" in b:
         v = _num_br(b["imposto"])
         if v is None or v < 0 or v > 60:
@@ -723,6 +736,175 @@ def ml_vendas(eid: int, inicio: str, fim: str, q: str = "", _u=Depends(usuario),
                     **{k: round(r[k], 2) for k in ("vendas", "devolvido", "imposto", "tarifa", "frete", "cmv", "margem")},
                     "frete_lido": r["frete_lido"], "sem_custo": bool(r["sem_custo"]), "estimado": r["estimado"]})
     return {"total_pedidos": len(out), "nao_pagos": nao_pagos, "vendas": out[-3000:]}
+
+
+# ---- rastreabilidade e auditoria
+def _tabela_xlsx(nome_arq, titulo, cab, linhas, formatos=None):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    wb = Workbook()
+    ws = wb.active
+    ws.title = titulo[:31]
+    ws.append(cab)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="0F3D5E")
+    for ln in linhas:
+        ws.append(ln)
+    for i, f in (formatos or {}).items():
+        for c in ws.iter_cols(min_col=i + 1, max_col=i + 1, min_row=2):
+            for x in c:
+                x.number_format = f
+    for i, _ in enumerate(cab):
+        ws.column_dimensions[ws.cell(1, i + 1).column_letter].width = 16
+    ws.freeze_panes = "A2"
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="{nome_arq}"'})
+
+
+MOEDA = "#,##0.00;[Red]-#,##0.00"
+
+
+@app.get("/api/empresas/{eid}/mlivre/painel")
+def ml_painel(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    _periodo_ml(inicio, fim)
+    ps = mlauditoria.painel(s, e, inicio, fim)
+    return {"pedidos": ps[-5000:], "total": len(ps), "grupos": mlauditoria.GRUPOS_COBRANCA}
+
+
+@app.get("/api/empresas/{eid}/mlivre/painel.xlsx")
+def ml_painel_xlsx(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    _periodo_ml(inicio, fim)
+    ps = mlauditoria.painel(s, e, inicio, fim)
+    gs = mlauditoria.GRUPOS_COBRANCA
+    cab = (["Data", "Pedido", "Pacote", "Situação", "Produto", "SKU", "Anúncio", "Comprador", "NF número", "NF série", "NF chave",
+            "NF origem", "Domínio", "Venda", "Reembolso", "Impostos"] + [n for _k, n in gs]
+           + ["Cobranças (líquido)", "Fonte das cobranças", "Custo dos produtos", "Resultado", "Custo da devolução",
+              "Extrato créditos", "Extrato débitos", "Extrato líquido", "Esperado no extrato"])
+    linhas = [[p["data"], str(p["order_id"]), str(p["pack_id"] or ""), p["status"], p["descricao"], p["sku"], p["tipo_anuncio"],
+               p["comprador"], (p["nota"] or {}).get("numero", ""), (p["nota"] or {}).get("serie", ""),
+               (p["nota"] or {}).get("chave", ""), (p["nota"] or {}).get("origem", ""), p["dominio"], p["vendas"], -p["devolvido"],
+               -p["imposto"]] + [p["cobrancas"][k] for k, _n in gs]
+              + [p["cobrancas_liq"], p["fonte_custos"], -p["cmv"], p["resultado"], p["custo_devolucao"], p["extrato_credito"],
+                 -p["extrato_debito"], p["extrato_liquido"], p["esperado_extrato"]] for p in ps]
+    fm = {i: MOEDA for i in range(13, len(cab)) if cab[i] != "Fonte das cobranças"}
+    return _tabela_xlsx(f"Vendas_ML_{inicio}_{fim}.xlsx", "Vendas por pedido", cab, linhas, fm)
+
+
+@app.get("/api/empresas/{eid}/mlivre/pedido/{oid}")
+def ml_pedido(eid: int, oid: int, _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    d = mlauditoria.detalhe(s, e, oid)
+    if not d:
+        _404()
+    return d
+
+
+def _datas_extrato(de, ate):
+    try:
+        d1 = dt.date.fromisoformat(de or "2026-09-01")
+        d2 = dt.date.fromisoformat(ate) if ate else agora().date()
+    except ValueError:
+        raise HTTPException(400, "Datas inválidas (use AAAA-MM-DD).") from None
+    if d1 > d2:
+        raise HTTPException(400, "A data inicial é depois da final.")
+    if (d2 - d1).days > 400:
+        raise HTTPException(400, "Período máximo de 400 dias.")
+    return d1, d2
+
+
+@app.get("/api/empresas/{eid}/mlivre/extrato")
+def ml_extrato(eid: int, de: str = "", ate: str = "", _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    d1, d2 = _datas_extrato(de, ate)
+    r = mlauditoria.extrato(s, e, d1, d2)
+    r["inicio_lido"], r["fim_lido"] = dt2s(r["inicio_lido"]), dt2s(r["fim_lido"])
+    return r
+
+
+@app.get("/api/empresas/{eid}/mlivre/extrato.xlsx")
+def ml_extrato_xlsx(eid: int, de: str = "", ate: str = "", _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    d1, d2 = _datas_extrato(de, ate)
+    r = mlauditoria.extrato(s, e, d1, d2)
+    cab = ["Data", "Movimento", "Tipo (MP)", "Operação MP", "Referência", "Pedido", "Identificado por", "Produto", "Crédito",
+           "Débito", "Saldo", "Bruto", "Tarifa MP", "Parcelamento", "Frete", "Cupom", "Meio de pagamento"]
+    linhas = [[x["data"], x["descricao"], x["tipo"], x["origem_id"], x["referencia"], str(x["order_id"] or ""), x["como"],
+               (x["venda"] or {}).get("descricao", ""), x["credito"], -x["debito"], x["saldo"], x["bruto"], x["tarifa_mp"],
+               x["financiamento"], x["frete"], x["cupom"], x["meio"]] for x in r["linhas"]]
+    return _tabela_xlsx(f"Extrato_MP_{d1}_{d2}.xlsx", "Extrato Mercado Pago", cab, linhas, {i: MOEDA for i in range(8, 16)})
+
+
+@app.post("/api/empresas/{eid}/mlivre/extrato/atualizar")
+async def ml_extrato_atualizar(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    if not e.ml_refresh:
+        raise HTTPException(400, "Conecte a empresa ao Mercado Livre primeiro.")
+    b = await request.json()
+    d1, d2 = _datas_extrato(b.get("de"), b.get("ate"))
+    return _iniciar_job(s, e, "ml_extrato", {"de": d1.isoformat(), "ate": d2.isoformat()}, u, mlivre.sincronizar_extrato)
+
+
+@app.post("/api/empresas/{eid}/mlivre/extrato/arquivo")
+async def ml_extrato_arquivo(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    """Relatório de liberações baixado do Mercado Pago (CSV ou XLSX, em base64)."""
+    import base64
+    e = _ml_emp(s, eid)
+    b = await request.json()
+    try:
+        bruto = base64.b64decode(b.get("arquivo") or "")
+    except ValueError:
+        raise HTTPException(400, "Arquivo inválido.") from None
+    nome = str(b.get("nome") or "").lower()
+    try:
+        if nome.endswith((".xlsx", ".xlsm")) or bruto[:2] == b"PK":
+            from openpyxl import load_workbook
+            wb = load_workbook(io.BytesIO(bruto), data_only=True, read_only=True)
+            tabela = [list(r) for r in wb.active.iter_rows(values_only=True)]
+            while tabela and not any(tabela[0]):
+                tabela.pop(0)
+        else:
+            try:
+                texto = bruto.decode("utf-8")
+            except UnicodeDecodeError:
+                texto = bruto.decode("latin-1")
+            tabela = mlivre.ler_csv(texto)
+        linhas, faltam = mlivre.linhas_extrato(tabela, e.id, "ARQUIVO")
+    except mlivre.MLErro as ex:
+        raise HTTPException(400, str(ex)) from None
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "Não consegui ler o arquivo. Envie o Relatório de liberações do Mercado Pago em CSV ou Excel.") from None
+    if not linhas:
+        raise HTTPException(400, "Nenhum movimento encontrado no arquivo.")
+    d1, d2 = min(x.data for x in linhas).date(), max(x.data for x in linhas).date()
+    n = mlivre.gravar_extrato(s, e.id, linhas, d1, d2)
+    ident = sum(1 for x in linhas if x.order_id)
+    audit(s, u.email, "ML_EXTRATO_ARQUIVO", f"{e.id} {d1} a {d2}: {n}")
+    s.commit()
+    return {"ok": True, "movimentos": n, "identificados": ident, "de": d1.isoformat(), "ate": d2.isoformat(), "faltam": faltam}
+
+
+@app.get("/api/empresas/{eid}/mlivre/auditoria")
+def ml_auditoria(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    _periodo_ml(inicio, fim)
+    return mlauditoria.auditoria(s, e, inicio, fim)
+
+
+@app.get("/api/empresas/{eid}/mlivre/auditoria.xlsx")
+def ml_auditoria_xlsx(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    _periodo_ml(inicio, fim)
+    a = mlauditoria.auditoria(s, e, inicio, fim)
+    cab = ["Gravidade", "Achado", "Data", "Pedido", "Produto / movimento", "Detalhe", "Esperado", "Cobrado / lançado", "Diferença"]
+    linhas = [[x["gravidade"], x["codigo"], x["data"], str(x["order_id"] or ""), x["descricao"], x["texto"], x["esperado"],
+               x["cobrado"], x["diferenca"]] for x in a["achados"]]
+    return _tabela_xlsx(f"Auditoria_ML_{inicio}_{fim}.xlsx", "Auditoria", cab, linhas, {6: MOEDA, 7: MOEDA, 8: MOEDA})
 
 
 @app.get("/api/empresas/{eid}/mlivre/tarifas")

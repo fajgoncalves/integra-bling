@@ -105,3 +105,4 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:now
 .fx .clicavel{cursor:pointer}
 .fx .fx-cat:hover{text-decoration:underline}
 .fx select.fx-sec{padding:3px 6px;font-size:12px}
+tr.clicavel{cursor:pointer}tr.clicavel:hover td{background:#F3F7FA}.card.clicavel{cursor:pointer}.card.clicavel:hover{border-color:#0F3D5E}
