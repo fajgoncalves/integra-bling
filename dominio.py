@@ -252,7 +252,11 @@ def importar(job_id: int, http=None, espera=5, limite_s=1800):
             j = s.get(Job, job_id)
             avisos = res.get("avisos") or []
             j.status, j.fim = "OK", agora()
-            j.mensagem = (res.get("mensagem") or "Domínio lida.") + (" Avisos: " + " ".join(avisos) if avisos else "")
+            cc = res.get("canceladas") or {}
+            ncanc = sum(int(cc.get(k) or 0) for k in ("saidas", "entradas", "servicos"))
+            j.mensagem = ((res.get("mensagem") or "Domínio lida.")
+                          + (f" {ncanc} nota(s) cancelada(s) ignorada(s)." if ncanc else "")
+                          + (" Avisos: " + " ".join(avisos) if avisos else ""))
             s.commit()
     except Exception as e:  # noqa: BLE001
         with SessionLocal() as s:
