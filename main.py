@@ -24,7 +24,7 @@ import mlivre
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.9.0"
+VERSAO = "1.9.1"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -576,6 +576,13 @@ def ml_callback(request: Request, code: str = "", state: str = "", error: str = 
     except Exception as ex:  # noqa: BLE001
         return RedirectResponse(f"/#/empresa/{e.id}?ml=erro&msg=" + str(ex)[:200])
     return RedirectResponse(f"/#/empresa/{e.id}?ml=ok")
+
+
+@app.post("/mlivre/notificacoes")
+async def ml_notificacoes():
+    """O Mercado Livre exige uma URL de notificações que responda 200 rápido. Por ora não usamos os avisos:
+    os dados são lidos quando o usuário clica em Atualizar do Mercado Livre."""
+    return {"ok": True}
 
 
 @app.post("/api/empresas/{eid}/mlivre/desconectar")
