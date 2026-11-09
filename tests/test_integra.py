@@ -109,11 +109,12 @@ def _cob(did, tipo, desc, valor, oid, deb="YES", nat="CHARGE"):
     return {"charge_info": {"detail_id": did, "detail_amount": valor, "detail_type": nat, "detail_sub_type": tipo,
                             "transaction_detail": desc, "creation_date_time": "2026-01-15T10:00:00",
                             "debited_from_operation": deb},
-            "sales_info": [{"order_id": oid}] if oid else [], "shipping_info": {}}
+            "sales_info": [{"order_id": oid}] if oid else [], "shipping_info": {"shipping_id": "null"}}
 
 
 DETALHES = {("2026-01", "ML", "BILL"): [_cob(1, "CV", "Tarifa de venda", 13.0, 2000001), _cob(2, "CXD", "Mercado Envios", 20.0, 2000001),
-                                        _cob(3, "CV", "Tarifa de venda", 3.0, 2000002), _cob(4, "CV", "Tarifa de venda", 99.0, 7777)]}
+                                        _cob(3, "CV", "Tarifa de venda", 3.0, 2000002), _cob(4, "CV", "Tarifa de venda", 99.0, 7777)],
+            ("2026-01", "MP", "BILL"): [_cob("null", "CCMP", "Sem id", 1.0, "null"), _cob(6, "CCMP", "Cargo de Mercado Pago", 1.0, "null")]}
 EXTRATO_CSV = ("DATE;SOURCE_ID;EXTERNAL_REFERENCE;RECORD_TYPE;DESCRIPTION;NET_CREDIT_AMOUNT;NET_DEBIT_AMOUNT;GROSS_AMOUNT;"
                "MP_FEE_AMOUNT;FINANCING_FEE_AMOUNT;SHIPPING_FEE_AMOUNT;TAXES_AMOUNT;COUPON_AMOUNT;INSTALLMENTS;PAYMENT_METHOD;"
                "BALANCE_AMOUNT;ORDER_ID;SHIPPING_ID;PACK_ID\n"
@@ -163,10 +164,10 @@ def ml_falso(req: httpx.Request):
         rs = DETALHES.get((mes, grupo, q["document_type"][0]), [])
         assert "offset" not in q and q["limit"] == ["1000"]
         fid = int(q["from_id"][0])
-        rs = [x for x in rs if x["charge_info"]["detail_id"] > fid]
+        rs = [x for x in rs if str(x["charge_info"]["detail_id"]).isdigit() and x["charge_info"]["detail_id"] > fid or (fid == 0 and x["charge_info"]["detail_id"] == "null")]
         if mes == "2026-02" and grupo == "MP":
             return httpx.Response(500, json={"message": "internal"})
-        return httpx.Response(200, json={"limit": 1000, "last_id": rs[-1]["charge_info"]["detail_id"] if rs else None, "results": rs})
+        return httpx.Response(200, json={"limit": 1000, "last_id": rs[-1]["charge_info"]["detail_id"] if rs else "null", "results": rs})
     if url.netloc == "api.mercadopago.com":
         if url.path == "/v1/account/release_report/config":
             if req.method == "GET":
@@ -224,7 +225,7 @@ def verifica_mercado_livre(c, eid):
         j = c.get(f"/api/jobs/{r['id']}").json()
         assert j["status"] == "OK", j["mensagem"]
         assert "3 pedidos (2 pagos)" in j["mensagem"] and "5 tarifas" in j["mensagem"], j["mensagem"]
-        assert "2 notas fiscais" in j["mensagem"] and "4 cobranças detalhadas" in j["mensagem"]
+        assert "2 notas fiscais" in j["mensagem"] and "5 cobranças detalhadas" in j["mensagem"]
         assert "não devolveu parte das cobranças" in j["mensagem"] and "02/2026 MP" in j["mensagem"]
         # extrato do Mercado Pago pela API (relatório de liberações)
         rx = c.post(f"/api/empresas/{eid}/mlivre/extrato/atualizar", json={"de": "2026-01-01", "ate": "2026-02-28"}).json()

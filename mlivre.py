@@ -188,7 +188,7 @@ def venda(o: dict, empresa_id: int):
                           titulo=str(item.get("title") or "")[:300], tipo_anuncio=str(it.get("listing_type_id") or "")[:30],
                           qtd=_num(it.get("quantity") or 1), preco=round(_num(it.get("unit_price")), 2),
                           tarifa=round(_num(it.get("sale_fee")), 2), categoria=str(item.get("category_id") or "")[:30]))
-    return MLVenda(empresa_id=empresa_id, order_id=int(o["id"]), pack_id=int(o["pack_id"]) if o.get("pack_id") else None,
+    return MLVenda(empresa_id=empresa_id, order_id=int(o["id"]), pack_id=_int(o.get("pack_id")),
                    data=d, status=str(o.get("status") or "")[:30], total=round(_num(o.get("total_amount")), 2),
                    pago=round(pago, 2), devolvido=round(devolvido, 2),
                    comissao=round(sum(_num(it.get("sale_fee")) * _num(it.get("quantity") or 1) for it in itens), 2),
@@ -196,7 +196,7 @@ def venda(o: dict, empresa_id: int):
                    descricao=(" + ".join(t for t in titulos if t))[:300],
                    comprador=str((o.get("buyer") or {}).get("nickname") or "")[:120],
                    pagamentos=",".join(str(p_["id"]) for p_ in o.get("payments") or [] if p_.get("id"))[:300],
-                   shipping_id=int((o.get("shipping") or {}).get("id")) if (o.get("shipping") or {}).get("id") else None), lin
+                   shipping_id=_int((o.get("shipping") or {}).get("id"))), lin
 
 
 def meses_entre(ini, fim):
@@ -261,7 +261,7 @@ def frete_vendedor(cli: Cliente, shipping_id: int, seller: int):
         return None
     total = 0.0
     for x in r.get("senders") or []:
-        if not x.get("user_id") or int(x["user_id"]) == int(seller):
+        if not _int(x.get("user_id")) or _int(x.get("user_id")) == int(seller):
             total += _num(x.get("cost"))
     return round(total, 2)
 
@@ -342,10 +342,10 @@ def cobrancas(cli: Cliente, mes: str, empresa_id: int, andamento=None, avisos=No
                     res = r.get("results") or []
                     for x in res:
                         ci = x.get("charge_info") or {}
-                        did = ci.get("detail_id")
-                        if not did or (grupo, int(did)) in vistos:
+                        did = _int(ci.get("detail_id"))
+                        if not did or (grupo, did) in vistos:
                             continue
-                        vistos.add((grupo, int(did)))
+                        vistos.add((grupo, did))
                         nat = "BONUS" if "BONUS" in str(ci.get("detail_type") or "").upper() else "CHARGE"
                         v = abs(_num(ci.get("detail_amount")))
                         if doc == "CREDIT_NOTE":
@@ -355,18 +355,18 @@ def cobrancas(cli: Cliente, mes: str, empresa_id: int, andamento=None, avisos=No
                         vendas_ = x.get("sales_info") or []
                         oid = (vendas_[0] or {}).get("order_id") if vendas_ else None
                         sid = (x.get("shipping_info") or {}).get("shipping_id")
-                        out.append(MLCobranca(empresa_id=empresa_id, periodo=mes, grupo=grupo, documento=doc, detail_id=int(did),
+                        out.append(MLCobranca(empresa_id=empresa_id, periodo=mes, grupo=grupo, documento=doc, detail_id=did,
                                               natureza=nat, tipo=str(ci.get("detail_sub_type") or "")[:20],
                                               descricao=str(ci.get("transaction_detail") or "")[:200], valor=round(v, 2),
                                               data=_data_br(ci.get("creation_date_time")),
-                                              order_id=int(oid) if oid else None, shipping_id=int(sid) if sid else None,
+                                              order_id=_int(oid), shipping_id=_int(sid),
                                               debitada=(str(ci.get("debited_from_operation") or "").upper() in ("YES", "SI", "SIM", "TRUE"))
                                               if ci.get("debited_from_operation") is not None else None))
                     lidos += len(res)
-                    prox = r.get("last_id") or (max(int((x.get("charge_info") or {}).get("detail_id") or 0) for x in res) if res else None)
-                    if not res or len(res) < 1000 or not prox or int(prox) == from_id:
+                    prox = _int(r.get("last_id")) or (max(_int((x.get("charge_info") or {}).get("detail_id")) or 0 for x in res) if res else None)
+                    if not res or len(res) < 1000 or not prox or prox == from_id:
                         break
-                    from_id = int(prox)
+                    from_id = prox
                     if andamento:
                         andamento(f"Lendo as cobranças de {mes[5:]}/{mes[:4]} ({grupo}, {lidos} até agora)...")
             except MLErro as e:
