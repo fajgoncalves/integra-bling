@@ -14,7 +14,8 @@ MODELO_PADRAO = [
         ("RB_VENDAS", "Venda de mercadorias e produtos"), ("RB_SERV", "Prestação de serviços"),
         ("RB_OUTRAS", "Outras receitas operacionais")]),
     ("DED", "(-) Deduções da receita", "GRUPO", "", False, [
-        ("DED_DEV", "Devoluções de vendas"), ("PIS_COFINS", "PIS/COFINS"), ("DED_IMP", "Impostos sobre vendas")]),
+        ("DED_DEV", "Devoluções de vendas"), ("PIS_COFINS", "PIS/COFINS"), ("ICMS_TTD", "ICMS TTD"),
+        ("DED_IMP", "Impostos sobre vendas")]),
     ("RL", "(=) Receita líquida", "TOTAL", "RB + DED", True, []),
     ("CUSTOS", "(-) Custos", "GRUPO", "", False, [
         ("CMV", "Custo das mercadorias e produtos vendidos"), ("CMV_DEVC", "Devoluções de compra")]),
@@ -231,7 +232,7 @@ def periodo_datas(ini: str, fim: str):
 
 
 # sinal natural das contas da Domínio (receitas +, devolução de venda −)
-SINAL_DOMINIO = {"DEV_VENDA": -1}
+SINAL_DOMINIO = {"DEV_VENDA": -1, "ICMS_TTD": -1}
 
 
 def valores_origem(s, empresa_id: int, ini: str, fim: str):

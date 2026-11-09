@@ -100,6 +100,7 @@ def central_falsa(req: httpx.Request):
                         {"mes": "2026-01", "cfop": 5102, "produto": "200", "qtd": 4, "valor": 2000},
                         {"mes": "2026-01", "cfop": 5202, "produto": "300", "qtd": 1, "valor": 200}],  # devolução de compra: não é CMV
         "itens_entrada": [{"mes": "2026-02", "cfop": 1202, "produto": "100", "qtd": 1, "valor": 300}],
+        "apuracao_icms": [{"mes": "2026-02", "debito": 1000, "credito_presumido": 800, "recolhimento_efetivo": 200, "saldo_recolher": 150}],
         "produtos": [{"produto": "100", "codigo": "CAM-001", "descricao": "Camiseta", "unidade": "UN"},
                      {"produto": "200", "codigo": "BON-9", "descricao": "Boné", "unidade": "UN"}]}})
 
@@ -116,7 +117,7 @@ def test_fluxo_completo():
         modelos = c.get("/api/modelos").json()
         assert len(modelos) == 1 and any(ln["codigo"] == "LL" for ln in modelos[0]["linhas"])
         e = c.post("/api/empresas", json={"nome": "Alfa", "cnpj": "12.345.678/0001-90", "codigo_dominio": "77"}).json()
-        assert e["modelo_id"] == modelos[0]["id"] and e["contas"]["DOMINIO"]["associadas"] == 6  # sugestões da Domínio (com CMV e PIS/COFINS)
+        assert e["modelo_id"] == modelos[0]["id"] and e["contas"]["DOMINIO"]["associadas"] == 7  # sugestões da Domínio (com CMV, PIS/COFINS e ICMS TTD)
         assert c.post("/api/empresas", json={"nome": "Dup", "cnpj": "12345678000190"}).status_code == 400
 
         # OAuth
@@ -237,11 +238,14 @@ def test_fluxo_completo():
         assert L["DF"]["total"] == -45
         assert L["CMV"]["valores"] == [-450, 30, 0]
         assert L["PIS_COFINS"]["valores"] == [-740, -64.75, 0]  # 9,25% de (8.000) e de (1.000 − 300)
-        assert L["DED"]["total"] == -300 - 804.75 and L["RL"]["total"] == 9000 - 300 - 804.75
-        assert L["LL"]["total"] == round(8700 - 804.75 + 200 - 420 - 400.5 - 45, 2)
+        assert L["ICMS_TTD"]["valores"] == [0, -150, 0]
+        assert L["DED"]["total"] == -300 - 804.75 - 150 and L["RL"]["total"] == 9000 - 300 - 804.75 - 150
+        assert L["LL"]["total"] == round(8700 - 804.75 - 150 + 200 - 420 - 400.5 - 45, 2)
         assert L["DOP"]["tipo"] == "GRUPO" and L["DOP"]["total"] == -400.5  # soma automática das contas do grupo
         assert L["CUSTOS"]["total"] == -420 + 200 and L["RFIN"]["total"] == -45
         ct2 = {x["descricao"]: x for x in c.get(f"/api/empresas/{e['id']}/contas").json()["contas"]}
+        ttd = c.get(f"/api/contas/{ct2['ICMS TTD / regime especial (saldo a recolher da apuração na Domínio)']['id']}/detalhe?inicio=2026-01&fim=2026-03").json()
+        assert ttd["tipo"] == "icms" and ttd["itens"][0]["credito_presumido"] == 800 and ttd["total"] == -150
         dv = c.get(f"/api/contas/{ct2['Vendas de mercadorias e produtos (NF de saída)']['id']}/detalhe?inicio=2026-01&fim=2026-03").json()
         assert [p["codigo"] for p in dv["produtos"]] == ["CAM-001", "BON-9"]
         dc = c.get(f"/api/contas/{ct2['CMV calculado (vendas − devoluções de venda, × custo do produto)']['id']}/detalhe?inicio=2026-01&fim=2026-03").json()

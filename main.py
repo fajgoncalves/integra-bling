@@ -23,7 +23,7 @@ import fluxo
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.6.0"
+VERSAO = "1.7.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -69,6 +69,22 @@ def iniciar():
             for e in s.scalars(select(Empresa)).all():
                 dominio.aplicar_sugestoes(s, e)
             set_config(s, "migracao_pis_cofins", "1")
+        if get_config(s, "migracao_icms_ttd") != "1":  # 1.7.0: linha ICMS TTD (apuração do regime especial)
+            for m in s.scalars(select(ModeloDRE)).all():
+                lns = s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == m.id).order_by(LinhaDRE.ordem)).all()
+                ded = next((x for x in lns if x.tipo == "GRUPO" and x.codigo == "DED"), None)
+                if ded and not any(x.codigo == "ICMS_TTD" for x in lns):
+                    ant = next((x for x in lns if x.codigo == "PIS_COFINS" and x.pai_id == ded.id), None) or \
+                        next((x for x in lns if x.codigo == "DED_DEV" and x.pai_id == ded.id), None) or ded
+                    for x in lns:
+                        if x.ordem > ant.ordem:
+                            x.ordem += 10
+                    s.add(LinhaDRE(modelo_id=m.id, pai_id=ded.id, ordem=ant.ordem + 5, codigo="ICMS_TTD", nome="ICMS TTD",
+                                   tipo="CONTA", sinal=0))
+            s.flush()
+            for e in s.scalars(select(Empresa)).all():
+                dominio.aplicar_sugestoes(s, e)
+            set_config(s, "migracao_icms_ttd", "1")
         if get_config(s, "migracao_custo_vigencia") != "1":  # 1.3.0: custo por vigência mensal
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
@@ -651,6 +667,15 @@ def conta_detalhe(cid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depend
                                     .order_by(Movimento.data, Movimento.id)).all()]
         return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "caixa", "itens": itens,
                 "total": round(sum(i["valor"] for i in itens), 2)}
+    if c.codigo == "ICMS_TTD":
+        por = {}
+        for v in s.scalars(select(DominioValor).where(DominioValor.empresa_id == c.empresa_id, DominioValor.mes >= inicio,
+                                                      DominioValor.mes <= fim, DominioValor.grupo.in_(("ICMS_REG", "ICMS_DEB", "ICMS_CP")))).all():
+            x = por.setdefault(v.mes, {"mes": v.mes, "debito": 0.0, "credito_presumido": 0.0, "saldo_recolher": 0.0})
+            x[{"ICMS_REG": "saldo_recolher", "ICMS_DEB": "debito", "ICMS_CP": "credito_presumido"}[v.grupo]] += float(v.valor)
+        itens = [por[m] for m in sorted(por)]
+        return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "icms", "itens": itens,
+                "total": round(-sum(x["saldo_recolher"] for x in itens), 2)}
     if c.codigo == "PIS_COFINS":
         e = s.get(Empresa, c.empresa_id)
         itens = dominio.pis_cofins(s, c.empresa_id, inicio, fim, float(e.pis_cofins_aliq or 0))

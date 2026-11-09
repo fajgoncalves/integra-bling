@@ -22,10 +22,11 @@ GRUPOS = [
     ("OUTRAS_SAIDAS", "Outras saídas (remessas, transferências, ativo etc.)", "R"),
     ("CMV", "CMV calculado (vendas − devoluções de venda, × custo do produto)", "D"),
     ("PIS_COFINS", "PIS/COFINS calculado (alíquota × faturamento − devoluções de venda)", "D"),
+    ("ICMS_TTD", "ICMS TTD / regime especial (saldo a recolher da apuração na Domínio)", "D"),
 ]
 # sugestão de associação das contas da Domínio no modelo padrão
 SUGESTAO = {"VENDAS": "RB_VENDAS", "SERVICOS": "RB_SERV", "DEV_VENDA": "DED_DEV", "DEV_COMPRA": "CMV_DEVC", "CMV": "CMV",
-            "PIS_COFINS": "PIS_COFINS"}
+            "PIS_COFINS": "PIS_COFINS", "ICMS_TTD": "ICMS_TTD"}
 NOMES = {g[0]: g[1] for g in GRUPOS}
 
 DEVOLUCAO_VENDA = {1201, 1202, 1203, 1204, 1410, 1411, 2201, 2202, 2203, 2204, 2410, 2411, 3201, 3202}
@@ -51,6 +52,8 @@ def grupo(dv_grupo: str, cfop: int) -> str | None:
     """Conta de origem da Domínio para um total (None = não entra na DRE)."""
     if dv_grupo == "SERVICO":
         return "SERVICOS"
+    if dv_grupo == "ICMS_REG":
+        return "ICMS_TTD"
     if dv_grupo == "SAIDA":
         return grupo_saida(cfop)
     if dv_grupo == "ENTRADA" and cfop in DEVOLUCAO_VENDA:
@@ -194,6 +197,11 @@ def gravar_resultado(s, empresa_id: int, res: dict, ini_mes: str, fim_mes: str):
         v = soma.setdefault((x["mes"], "SERVICO", 0), [0.0, 0])
         v[0] += float(x.get("valor") or 0)
         v[1] += int(x.get("qtd") or 0)
+    # apuração do ICMS no regime especial: saldo a recolher (DRE) + débito e crédito presumido (consulta)
+    for x in res.get("apuracao_icms") or []:
+        for g, campo in (("ICMS_REG", "saldo_recolher"), ("ICMS_DEB", "debito"), ("ICMS_CP", "credito_presumido")):
+            v = soma.setdefault((x["mes"], g, 0), [0.0, 0])
+            v[0] += float(x.get(campo) or 0)
     for (mes, g, cfop), (v, q) in soma.items():
         if mes and ini_mes <= mes <= fim_mes:
             s.add(DominioValor(empresa_id=empresa_id, mes=mes, grupo=g, cfop=cfop, valor=round(v, 2), qtd=q))

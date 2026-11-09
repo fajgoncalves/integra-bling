@@ -374,6 +374,11 @@ async function consultarConta(c, e) {
       <div class="rolagem"><table><tr><th>Data</th><th>Conta</th><th>Contato</th><th>Descrição</th><th>Origem</th><th class="num">Valor</th></tr>
       ${r.itens.map((i) => `<tr><td>${dataBR(i.data)}</td><td class="peq">${esc(i.conta_financeira)}</td><td>${esc(i.contato)}</td>
         <td class="peq">${esc(i.descricao)}</td><td class="peq suave">${esc(i.origem)}</td><td class="num ${i.valor < 0 ? "neg" : ""}">${brl(i.valor)}</td></tr>`).join("")}</table></div>`;
+    } else if (r.tipo === "icms") {
+      corpo.innerHTML = `<div class="kpi"><div>ICMS TTD a recolher<b class="neg">R$ ${brl(r.total)}</b></div></div>
+      <div class="suave peq" style="margin-bottom:8px">Apuração do ICMS no regime especial, lida da Domínio (soma das sub-apurações): débito das saídas − crédito presumido − demais créditos = saldo a recolher (é o que vai para a DRE).</div>
+      <div class="rolagem"><table><tr><th>Mês</th><th class="num">Débito das saídas</th><th class="num">Crédito presumido</th><th class="num">Saldo a recolher</th></tr>
+      ${r.itens.map((i) => `<tr><td>${mesBR(i.mes)}</td><td class="num">${brl(i.debito)}</td><td class="num">${brl(i.credito_presumido)}</td><td class="num"><b>${brl(i.saldo_recolher)}</b></td></tr>`).join("") || '<tr><td colspan="4" class="vazio">Sem apuração no período (leia a Domínio com o Agente 360 0.14.3 ou superior).</td></tr>'}</table></div>`;
     } else if (r.tipo === "pis") {
       corpo.innerHTML = `<div class="kpi"><div>PIS/COFINS<b class="neg">R$ ${brl(r.total)}</b></div><div>Alíquota<b>${brl4(r.aliquota)}%</b></div></div>
       <div class="suave peq" style="margin-bottom:8px">Base = faturamento (vendas + serviços das notas da Domínio, sem canceladas) − devoluções de venda. A alíquota fica no cadastro da empresa.</div>
