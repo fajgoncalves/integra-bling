@@ -23,7 +23,7 @@ import fluxo
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.5.0"
+VERSAO = "1.6.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -53,6 +53,22 @@ def iniciar():
             for m in s.scalars(select(ModeloDRE)).all():
                 dre.converter_modelo(s, m)
             set_config(s, "migracao_grupos", "1")
+        if get_config(s, "migracao_pis_cofins") != "1":  # 1.6.0: linha PIS/COFINS automática
+            for m in s.scalars(select(ModeloDRE)).all():
+                lns = s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == m.id).order_by(LinhaDRE.ordem)).all()
+                ded = next((x for x in lns if x.tipo == "GRUPO" and x.codigo == "DED"), None)
+                if ded and not any(x.codigo == "PIS_COFINS" for x in lns):
+                    dev = next((x for x in lns if x.codigo == "DED_DEV" and x.pai_id == ded.id), None)
+                    pos = (dev or ded).ordem
+                    for x in lns:
+                        if x.ordem > pos:
+                            x.ordem += 10
+                    s.add(LinhaDRE(modelo_id=m.id, pai_id=ded.id, ordem=pos + 5, codigo="PIS_COFINS", nome="PIS/COFINS",
+                                   tipo="CONTA", sinal=0))
+            s.flush()
+            for e in s.scalars(select(Empresa)).all():
+                dominio.aplicar_sugestoes(s, e)
+            set_config(s, "migracao_pis_cofins", "1")
         if get_config(s, "migracao_custo_vigencia") != "1":  # 1.3.0: custo por vigência mensal
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
@@ -320,6 +336,7 @@ def _emp_json(s, e: Empresa):
     m = s.get(ModeloDRE, e.modelo_id) if e.modelo_id else None
     return {"id": e.id, "nome": e.nome, "cnpj": e.cnpj, "codigo_dominio": e.codigo_dominio, "ativo": e.ativo,
             "modelo_id": e.modelo_id, "modelo_nome": m.nome if m else None,
+            "pis_cofins_aliq": float(e.pis_cofins_aliq if e.pis_cofins_aliq is not None else 9.25),
             "bling_conectado": bool(e.bling_refresh), "bling_conectado_em": dt2s(e.bling_conectado_em),
             "bling_app_proprio": bool(e.bling_client_id), "bling_client_id": e.bling_client_id,
             "bling_sync_em": dt2s(e.bling_sync_em), "bling_sync_periodo": e.bling_sync_periodo,
@@ -344,6 +361,11 @@ def _ler_empresa(b, e: Empresa, s):
         e.codigo_dominio = str(b["codigo_dominio"] or "").strip()[:20]
     if "ativo" in b:
         e.ativo = bool(b["ativo"])
+    if "pis_cofins_aliq" in b:
+        a = _num_br(b["pis_cofins_aliq"])
+        if a is None or a < 0 or a > 100:
+            raise HTTPException(400, "Alíquota de PIS/COFINS inválida.")
+        e.pis_cofins_aliq = a
     if "bling_client_id" in b:
         e.bling_client_id = str(b["bling_client_id"] or "").strip()[:200]
         if not e.bling_client_id:
@@ -629,6 +651,11 @@ def conta_detalhe(cid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depend
                                     .order_by(Movimento.data, Movimento.id)).all()]
         return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "caixa", "itens": itens,
                 "total": round(sum(i["valor"] for i in itens), 2)}
+    if c.codigo == "PIS_COFINS":
+        e = s.get(Empresa, c.empresa_id)
+        itens = dominio.pis_cofins(s, c.empresa_id, inicio, fim, float(e.pis_cofins_aliq or 0))
+        return {"conta": {"id": c.id, "origem": c.origem, "descricao": c.descricao}, "tipo": "pis", "itens": itens,
+                "total": round(-sum(x["valor"] for x in itens), 2), "aliquota": float(e.pis_cofins_aliq or 0)}
     if c.codigo == "CMV":
         _pm, por_prod, sem = dominio.cmv(s, c.empresa_id, inicio, fim)
         itens = sorted(({k: v for k, v in x.items() if k != "id"} for x in por_prod.values()), key=lambda x: -x["valor_vendido"])

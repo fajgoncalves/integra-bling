@@ -21,9 +21,11 @@ GRUPOS = [
     ("DEV_COMPRA", "Devoluções de compra (NF de saída)", "R"),
     ("OUTRAS_SAIDAS", "Outras saídas (remessas, transferências, ativo etc.)", "R"),
     ("CMV", "CMV calculado (vendas − devoluções de venda, × custo do produto)", "D"),
+    ("PIS_COFINS", "PIS/COFINS calculado (alíquota × faturamento − devoluções de venda)", "D"),
 ]
 # sugestão de associação das contas da Domínio no modelo padrão
-SUGESTAO = {"VENDAS": "RB_VENDAS", "SERVICOS": "RB_SERV", "DEV_VENDA": "DED_DEV", "DEV_COMPRA": "CMV_DEVC", "CMV": "CMV"}
+SUGESTAO = {"VENDAS": "RB_VENDAS", "SERVICOS": "RB_SERV", "DEV_VENDA": "DED_DEV", "DEV_COMPRA": "CMV_DEVC", "CMV": "CMV",
+            "PIS_COFINS": "PIS_COFINS"}
 NOMES = {g[0]: g[1] for g in GRUPOS}
 
 DEVOLUCAO_VENDA = {1201, 1202, 1203, 1204, 1410, 1411, 2201, 2202, 2203, 2204, 2410, 2411, 3201, 3202}
@@ -150,6 +152,24 @@ def cmv(s, empresa_id: int, ini: str, fim: str, mes_ref: str | None = None):
             sem_custo["faturamento"] += x["faturamento_sem_custo"]
     sem_custo["faturamento"] = round(sem_custo["faturamento"], 2)
     return {m: round(v, 2) for m, v in por_mes.items()}, por_prod, sem_custo
+
+
+def pis_cofins(s, empresa_id: int, ini: str, fim: str, aliquota: float):
+    """Por mês: faturamento (vendas + serviços), devoluções de venda, base e PIS/COFINS = base × alíquota."""
+    meses = {}
+    for v in s.scalars(select(DominioValor).where(DominioValor.empresa_id == empresa_id, DominioValor.mes >= ini,
+                                                  DominioValor.mes <= fim)).all():
+        g = grupo(v.grupo, v.cfop)
+        if g not in ("VENDAS", "SERVICOS", "DEV_VENDA"):
+            continue
+        x = meses.setdefault(v.mes, {"mes": v.mes, "faturamento": 0.0, "devolucoes": 0.0})
+        x["devolucoes" if g == "DEV_VENDA" else "faturamento"] += float(v.valor or 0)
+    out = []
+    for m, x in sorted(meses.items()):
+        base = x["faturamento"] - x["devolucoes"]
+        out.append({**x, "faturamento": round(x["faturamento"], 2), "devolucoes": round(x["devolucoes"], 2),
+                    "base": round(base, 2), "aliquota": aliquota, "valor": round(base * aliquota / 100, 2)})
+    return out
 
 
 def central(s):

@@ -14,7 +14,7 @@ MODELO_PADRAO = [
         ("RB_VENDAS", "Venda de mercadorias e produtos"), ("RB_SERV", "Prestação de serviços"),
         ("RB_OUTRAS", "Outras receitas operacionais")]),
     ("DED", "(-) Deduções da receita", "GRUPO", "", False, [
-        ("DED_DEV", "Devoluções de vendas"), ("DED_IMP", "Impostos sobre vendas")]),
+        ("DED_DEV", "Devoluções de vendas"), ("PIS_COFINS", "PIS/COFINS"), ("DED_IMP", "Impostos sobre vendas")]),
     ("RL", "(=) Receita líquida", "TOTAL", "RB + DED", True, []),
     ("CUSTOS", "(-) Custos", "GRUPO", "", False, [
         ("CMV", "Custo das mercadorias e produtos vendidos"), ("CMV_DEVC", "Devoluções de compra")]),
@@ -259,6 +259,12 @@ def valores_origem(s, empresa_id: int, ini: str, fim: str):
         c = por_cod.get(("DOMINIO", g)) if g else None
         if c:
             vals[c.id][v.mes] += SINAL_DOMINIO.get(g, 1) * float(v.valor or 0)
+    c = por_cod.get(("DOMINIO", "PIS_COFINS"))
+    if c and c.linha_id:
+        from db import Empresa
+        e = s.get(Empresa, empresa_id)
+        for x in dominio.pis_cofins(s, empresa_id, ini, fim, float(e.pis_cofins_aliq or 0)):
+            vals[c.id][x["mes"]] -= x["valor"]
     c = por_cod.get(("DOMINIO", "CMV"))
     sem_custo = {"produtos": 0, "faturamento": 0.0}
     if c:
@@ -334,13 +340,16 @@ def calcular(s, empresa, ini: str, fim: str):
         if abs(t) >= 0.005:
             nao.append({"conta_id": c.id, "origem": c.origem, "descricao": c.descricao, "total": round(t, 2),
                         "natureza": "R" if t >= 0 else "D"})
-    cmv_dom = next((c for c in contas if c.origem == "DOMINIO" and c.codigo == "CMV" and c.linha_id), None)
-    if cmv_dom:
-        juntos = [c.descricao for c in contas if c.origem == "BLING" and c.linha_id == cmv_dom.linha_id and vals.get(c.id)]
+    for cod, txt in (("CMV", "Compra de mercadoria paga não é CMV"),
+                     ("PIS_COFINS", "O PIS/COFINS já é calculado sobre o faturamento")):
+        calc = next((c for c in contas if c.origem == "DOMINIO" and c.codigo == cod and c.linha_id), None)
+        if not calc:
+            continue
+        juntos = [c.descricao for c in contas if c.origem == "BLING" and c.linha_id == calc.linha_id and vals.get(c.id)]
         if juntos:
-            avisos.append("A linha do CMV soma o CMV calculado pela Domínio e também pagamentos do Bling ("
-                          + ", ".join(juntos[:4]) + "). Compra de mercadoria paga não é CMV: deixe essas categorias fora "
-                          "da DRE ou leve-as para outra linha, senão o custo é contado duas vezes.")
+            avisos.append(f"A linha que recebe o {cod.replace('_', '/')} calculado também soma pagamentos do Bling ("
+                          + ", ".join(juntos[:4]) + f"). {txt}: deixe essas categorias fora da DRE ou leve-as para outra "
+                          "linha, senão o valor é contado duas vezes.")
     sc = sem_cat.get("sem_custo") or {}
     if sc.get("produtos") and any(c.origem == "DOMINIO" and c.codigo == "CMV" and c.linha_id for c in contas):
         avisos.append(f"CMV incompleto: {sc['produtos']} produto(s) vendido(s) no período sem custo informado "

@@ -168,6 +168,7 @@ async function formEmpresa(e) {
       <label>Nome <input id="e-nome" value="${esc(e?.nome)}"></label>
       <label>CNPJ <input id="e-cnpj" value="${esc(cnpjFmt(e?.cnpj))}"></label>
       <label>Código na Domínio <input id="e-cod" value="${esc(e?.codigo_dominio)}"></label>
+      <label>PIS/COFINS (% sobre faturamento − devoluções) <input id="e-pis" inputmode="decimal" value="${e ? brl4(e.pis_cofins_aliq).replace(/,?0+$/, "") : "9,25"}"></label>
       <label>Modelo de DRE <select id="e-mod">${modelos.map((x) => `<option value="${x.id}" ${e?.modelo_id === x.id ? "selected" : ""}>${esc(x.nome)}</option>`).join("")}</select></label>
     </div>
     <details style="margin-top:14px" ${e?.bling_app_proprio ? "open" : ""}><summary><b>Aplicativo do Bling próprio desta empresa</b> <span class="suave">(opcional)</span></summary>
@@ -193,7 +194,7 @@ async function formEmpresa(e) {
   }
   $("#e-ok", m).onclick = (ev) => tentar(async () => {
     const body = { nome: $("#e-nome", m).value, cnpj: $("#e-cnpj", m).value, codigo_dominio: $("#e-cod", m).value,
-      modelo_id: Number($("#e-mod", m).value), bling_client_id: $("#e-cid", m).value };
+      modelo_id: Number($("#e-mod", m).value), bling_client_id: $("#e-cid", m).value, pis_cofins_aliq: $("#e-pis", m).value };
     if ($("#e-sec", m).value) body.bling_client_secret = $("#e-sec", m).value;
     if (e) body.ativo = $("#e-ativo", m).checked;
     if (e && e.modelo_id && body.modelo_id !== e.modelo_id && !confirm("Trocar o modelo apaga as associações desta empresa. Continuar?")) return;
@@ -373,6 +374,11 @@ async function consultarConta(c, e) {
       <div class="rolagem"><table><tr><th>Data</th><th>Conta</th><th>Contato</th><th>Descrição</th><th>Origem</th><th class="num">Valor</th></tr>
       ${r.itens.map((i) => `<tr><td>${dataBR(i.data)}</td><td class="peq">${esc(i.conta_financeira)}</td><td>${esc(i.contato)}</td>
         <td class="peq">${esc(i.descricao)}</td><td class="peq suave">${esc(i.origem)}</td><td class="num ${i.valor < 0 ? "neg" : ""}">${brl(i.valor)}</td></tr>`).join("")}</table></div>`;
+    } else if (r.tipo === "pis") {
+      corpo.innerHTML = `<div class="kpi"><div>PIS/COFINS<b class="neg">R$ ${brl(r.total)}</b></div><div>Alíquota<b>${brl4(r.aliquota)}%</b></div></div>
+      <div class="suave peq" style="margin-bottom:8px">Base = faturamento (vendas + serviços das notas da Domínio, sem canceladas) − devoluções de venda. A alíquota fica no cadastro da empresa.</div>
+      <div class="rolagem"><table><tr><th>Mês</th><th class="num">Faturamento</th><th class="num">Devoluções</th><th class="num">Base</th><th class="num">PIS/COFINS</th></tr>
+      ${r.itens.map((i) => `<tr><td>${mesBR(i.mes)}</td><td class="num">${brl(i.faturamento)}</td><td class="num">${brl(i.devolucoes)}</td><td class="num">${brl(i.base)}</td><td class="num">${brl(i.valor)}</td></tr>`).join("")}</table></div>`;
     } else if (r.tipo === "cmv") {
       corpo.innerHTML = `<div class="kpi"><div>CMV<b class="neg">R$ ${brl(r.total)}</b></div><div>Produtos<b>${r.itens.length}</b></div>
         ${r.sem_custo.produtos ? `<div style="border-color:#F1D9A6;background:var(--amarelo-cl)">Sem custo<b>${r.sem_custo.produtos}</b></div>` : ""}</div>

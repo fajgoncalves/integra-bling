@@ -112,6 +112,7 @@ class Empresa(Base):
     bling_conta: Mapped[str] = mapped_column(String(200), default="")
     bling_sync_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     bling_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
+    pis_cofins_aliq: Mapped[float] = mapped_column(Numeric(7, 4), default=9.25)  # % sobre faturamento − devoluções
     dominio_sync_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     dominio_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
     criado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
@@ -262,7 +263,8 @@ def criar_tabelas():
     from sqlalchemy import inspect, text
     novas = {"linhas_dre": [("pai_id", "INTEGER")],
              "movimentos_caixa": [("conta_id", "BIGINT"), ("categorizado", "BOOLEAN DEFAULT TRUE")],
-             "contas_origem": [("fluxo_secao", "VARCHAR(10)"), ("fluxo_ordem", "INTEGER DEFAULT 0")]}
+             "contas_origem": [("fluxo_secao", "VARCHAR(10)"), ("fluxo_ordem", "INTEGER DEFAULT 0")],
+             "empresas": [("pis_cofins_aliq", "NUMERIC(7,4) DEFAULT 9.25")]}
     insp = inspect(engine)
     for tab, cols in novas.items():
         tem = {c["name"] for c in insp.get_columns(tab)}

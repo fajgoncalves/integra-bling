@@ -116,7 +116,7 @@ def test_fluxo_completo():
         modelos = c.get("/api/modelos").json()
         assert len(modelos) == 1 and any(ln["codigo"] == "LL" for ln in modelos[0]["linhas"])
         e = c.post("/api/empresas", json={"nome": "Alfa", "cnpj": "12.345.678/0001-90", "codigo_dominio": "77"}).json()
-        assert e["modelo_id"] == modelos[0]["id"] and e["contas"]["DOMINIO"]["associadas"] == 5  # sugestões da Domínio (com o CMV)
+        assert e["modelo_id"] == modelos[0]["id"] and e["contas"]["DOMINIO"]["associadas"] == 6  # sugestões da Domínio (com CMV e PIS/COFINS)
         assert c.post("/api/empresas", json={"nome": "Dup", "cnpj": "12345678000190"}).status_code == 400
 
         # OAuth
@@ -230,13 +230,15 @@ def test_fluxo_completo():
         assert L["RB_SERV"]["total"] == 1000
         assert L["RB"]["total"] == 9000
         assert L["DED_DEV"]["total"] == -300
-        assert L["RL"]["total"] == 8700 and L["RL"]["av_total"] == 100
+        assert L["RL"]["av_total"] == 100
         assert L["CMV_DEVC"]["total"] == 200
         assert L["DV_COM"]["valores"] == [-420.5, 20, 0]
         assert len(L["DV_COM"]["composicao"]) == 2
         assert L["DF"]["total"] == -45
         assert L["CMV"]["valores"] == [-450, 30, 0]
-        assert L["LL"]["total"] == round(8700 + 200 - 420 - 400.5 - 45, 2)
+        assert L["PIS_COFINS"]["valores"] == [-740, -64.75, 0]  # 9,25% de (8.000) e de (1.000 − 300)
+        assert L["DED"]["total"] == -300 - 804.75 and L["RL"]["total"] == 9000 - 300 - 804.75
+        assert L["LL"]["total"] == round(8700 - 804.75 + 200 - 420 - 400.5 - 45, 2)
         assert L["DOP"]["tipo"] == "GRUPO" and L["DOP"]["total"] == -400.5  # soma automática das contas do grupo
         assert L["CUSTOS"]["total"] == -420 + 200 and L["RFIN"]["total"] == -45
         ct2 = {x["descricao"]: x for x in c.get(f"/api/empresas/{e['id']}/contas").json()["contas"]}
