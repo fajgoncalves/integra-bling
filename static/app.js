@@ -14,6 +14,7 @@ const cnpjFmt = (c) => !c ? "" : c.length === 14 ? c.replace(/^(\d{2})(\d{3})(\d
 const ORIGEM = { BLING: '<span class="badge b-bling">Bling</span>', DOMINIO: '<span class="badge b-dom">Domínio</span>', MLIVRE: '<span class="badge b-ml">Mercado Livre</span>' };
 const TIPO = { R: "Receita", D: "Despesa", RD: "Receita e despesa" };
 let EU = null;
+let VERSAO_TELA = null;
 let pendenteModelo = null;  // grava o modelo em edição antes de trocar de tela
 
 async function api(caminho, opt = {}) {
@@ -91,7 +92,7 @@ function casca(ativo, corpo) {
       <div class="marca"><svg width="30" height="30" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#fff" fill-opacity=".14"/><text x="16" y="21" text-anchor="middle" font-size="13" font-weight="700" fill="#fff" font-family="Segoe UI,Arial">IB</text><path d="M7 26h18" stroke="#34C3A0" stroke-width="2.2"/></svg>
         <div>Integra Bling<small>Alta Visão Contabilidade</small></div></div>
       ${it.map(([h, t]) => `<a href="#/${h}" class="${ativo === h ? "ativo" : ""}">${t}</a>`).join("")}
-      <div class="rodape">${esc(EU ? EU.nome : "")}<br><a href="#" id="trocar-senha">Trocar senha</a> · <a href="#" id="sair">Sair</a></div>
+      <div class="rodape">${esc(EU ? EU.nome : "")}${EU ? ` · ${EU.perfil === "ADMIN" ? "Administrador" : "Operador"}` : ""}<br><span class="peq" style="opacity:.6">versão ${esc(VERSAO_TELA || "")}</span><br><a href="#" id="trocar-senha">Trocar senha</a> · <a href="#" id="sair">Sair</a></div>
     </nav>
     <main class="conteudo" id="conteudo">${corpo}</main></div>`;
   $("#sair").onclick = async (e) => { e.preventDefault(); await api("/api/logout", { method: "POST" }); EU = null; location.hash = "#/login"; };
@@ -1018,11 +1019,12 @@ async function rota() {
   const params = new URLSearchParams(qs || "");
   const p = caminho.split("/").filter(Boolean);
   try {
-    if (!EU) {
-      const est = await api("/api/estado");
-      EU = est.usuario;
-      if (!EU) return telaLogin(est.precisa_setup);
-    }
+    // a cada tela: perfil atualizado (quem virou administrador vê Configurações sem sair) e versão nova recarrega a página
+    const est = await api("/api/estado");
+    if (VERSAO_TELA && est.versao !== VERSAO_TELA) { location.reload(); return; }
+    VERSAO_TELA = est.versao;
+    EU = est.usuario;
+    if (!EU) return telaLogin(est.precisa_setup);
     if (p[0] === "login") { location.hash = "#/empresas"; return; }
     if (p[0] === "empresa" && p[1]) return await telaEmpresa(Number(p[1]), p[2] || "conexoes", params);
     if (p[0] === "modelos") return await telaModelos();
