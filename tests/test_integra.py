@@ -161,8 +161,12 @@ def ml_falso(req: httpx.Request):
     if "/group/" in url.path and "/billing/integration/periods/key/" in url.path:
         mes, grupo = url.path.split("/key/")[1][:7], url.path.split("/group/")[1].split("/")[0]
         rs = DETALHES.get((mes, grupo, q["document_type"][0]), [])
-        off, lim = int(q["offset"][0]), int(q["limit"][0])
-        return httpx.Response(200, json={"offset": off, "limit": lim, "total": len(rs), "results": rs[off:off + lim]})
+        assert "offset" not in q and q["limit"] == ["1000"]
+        fid = int(q["from_id"][0])
+        rs = [x for x in rs if x["charge_info"]["detail_id"] > fid]
+        if mes == "2026-02" and grupo == "MP":
+            return httpx.Response(500, json={"message": "internal"})
+        return httpx.Response(200, json={"limit": 1000, "last_id": rs[-1]["charge_info"]["detail_id"] if rs else None, "results": rs})
     if url.netloc == "api.mercadopago.com":
         if url.path == "/v1/account/release_report/config":
             if req.method == "GET":
@@ -195,6 +199,7 @@ def ml_falso(req: httpx.Request):
 def verifica_mercado_livre(c, eid):
     import mlivre
     mlivre.INTERVALO = 0
+    mlivre.dormir = lambda _x: None
     assert c.post(f"/api/empresas/{eid}/mlivre/conectar").status_code == 400  # sem aplicativo
     cfg = c.put("/api/config", json={"ml_client_id": "mlcid", "ml_client_secret": "mlsec"}).json()
     assert cfg["ml_secret_definido"] and cfg["ml_redirect_uri"].endswith("/mlivre/callback")
@@ -220,6 +225,7 @@ def verifica_mercado_livre(c, eid):
         assert j["status"] == "OK", j["mensagem"]
         assert "3 pedidos (2 pagos)" in j["mensagem"] and "5 tarifas" in j["mensagem"], j["mensagem"]
         assert "2 notas fiscais" in j["mensagem"] and "4 cobranças detalhadas" in j["mensagem"]
+        assert "não devolveu parte das cobranças" in j["mensagem"] and "02/2026 MP" in j["mensagem"]
         # extrato do Mercado Pago pela API (relatório de liberações)
         rx = c.post(f"/api/empresas/{eid}/mlivre/extrato/atualizar", json={"de": "2026-01-01", "ate": "2026-02-28"}).json()
         mlivre.sincronizar_extrato(rx["id"], cli, espera=0)

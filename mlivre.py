@@ -24,6 +24,7 @@ TOKEN = API + "/oauth/token"
 INTERVALO = 0.12
 _trava = threading.Lock()
 _ultima = [0.0]
+dormir = time.sleep  # espera entre novas tentativas (trocada nos testes)
 
 PAGO = {"approved", "refunded", "charged_back", "partially_refunded"}
 
@@ -112,7 +113,7 @@ class Cliente:
     def req(self, metodo, url, params=None, corpo=None, opcional=False, texto=False):
         """Chamada autenticada. url pode ser um caminho da API do ML ou um endereço completo (Mercado Pago)."""
         alvo = url if url.startswith("http") else API + url
-        renovou = False
+        renovou, ultimo = False, ""
         for tentativa in range(6):
             with _trava:
                 espera = INTERVALO - (time.monotonic() - _ultima[0])
@@ -126,7 +127,8 @@ class Cliente:
                 renovou = True
                 continue
             if r.status_code == 429 or r.status_code >= 500:
-                time.sleep(min(2 ** tentativa, 20))
+                ultimo = f"{r.status_code} {r.text[:200]}"
+                dormir(min(3 * 2 ** tentativa, 60) if r.status_code == 429 else min(2 ** tentativa, 20))
                 continue
             if r.status_code in (400, 403, 404) and opcional:
                 return None
@@ -142,7 +144,8 @@ class Cliente:
                 return r.json() if r.content else {}
             except ValueError:
                 return {}
-        raise MLErro(f"O Mercado Livre não respondeu em {url.split('?')[0]}. Tente de novo em alguns minutos.")
+        raise MLErro(f"O Mercado Livre não respondeu em {url.split('?')[0]} (última resposta: {ultimo}). "
+                     "Tente de novo em alguns minutos.")
 
     def get(self, caminho, params=None, opcional=False):
         return self.req("GET", caminho, params, opcional=opcional)
@@ -323,47 +326,53 @@ def notas_da_venda(cli: Cliente, seller: int, v: MLVenda):
 
 
 # ------------------------------------------------------------------ faturamento detalhado (cobrança por pedido)
-def cobrancas(cli: Cliente, mes: str, empresa_id: int, andamento=None):
+def cobrancas(cli: Cliente, mes: str, empresa_id: int, andamento=None, avisos=None):
+    """Detalhe do faturamento (cada cobrança/bonificação com o pedido). Paginação por from_id/last_id, como pede o ML.
+    Uma falha num grupo/documento vira aviso e não derruba a atualização."""
     out, vistos = [], set()
     for grupo in ("ML", "MP"):
         for doc in ("BILL", "CREDIT_NOTE"):
-            off, total = 0, None
-            while total is None or off < total:
-                r = cli.get(f"/billing/integration/periods/key/{mes}-01/group/{grupo}/details",
-                            {"document_type": doc, "offset": off, "limit": 150}, opcional=True)
-                if not r:
-                    break
-                total = int(r.get("total") or 0)
-                res = r.get("results") or []
-                for x in res:
-                    ci = x.get("charge_info") or {}
-                    did = ci.get("detail_id")
-                    if not did or (grupo, int(did)) in vistos:
-                        continue
-                    vistos.add((grupo, int(did)))
-                    nat = "BONUS" if "BONUS" in str(ci.get("detail_type") or "").upper() else "CHARGE"
-                    v = abs(_num(ci.get("detail_amount")))
-                    if doc == "CREDIT_NOTE":
-                        v = v if nat == "CHARGE" else -v  # estorno de cobrança (+) / anulação de bonificação (−)
-                    else:
-                        v = -v if nat == "CHARGE" else v
-                    vendas_ = x.get("sales_info") or []
-                    oid = (vendas_[0] or {}).get("order_id") if vendas_ else None
-                    sid = (x.get("shipping_info") or {}).get("shipping_id")
-                    out.append(MLCobranca(empresa_id=empresa_id, periodo=mes, grupo=grupo, documento=doc, detail_id=int(did),
-                                          natureza=nat, tipo=str(ci.get("detail_sub_type") or "")[:20],
-                                          descricao=str(ci.get("transaction_detail") or "")[:200], valor=round(v, 2),
-                                          data=_data_br(ci.get("creation_date_time")),
-                                          order_id=int(oid) if oid else None, shipping_id=int(sid) if sid else None,
-                                          debitada=(str(ci.get("debited_from_operation") or "").upper() in ("YES", "SI", "SIM", "TRUE"))
-                                          if ci.get("debited_from_operation") is not None else None))
-                if not res:
-                    break
-                off += len(res)
-                if andamento and off % 1500 < len(res):
-                    andamento(f"Lendo as cobranças de {mes[5:]}/{mes[:4]} ({grupo}, {off} de {total})...")
-                if off >= 9900:  # limite de paginação por offset
-                    break
+            from_id, lidos = 0, 0
+            try:
+                while True:
+                    r = cli.get(f"/billing/integration/periods/key/{mes}-01/group/{grupo}/details",
+                                {"document_type": doc, "limit": 1000, "from_id": from_id}, opcional=True)
+                    if not r:
+                        break
+                    res = r.get("results") or []
+                    for x in res:
+                        ci = x.get("charge_info") or {}
+                        did = ci.get("detail_id")
+                        if not did or (grupo, int(did)) in vistos:
+                            continue
+                        vistos.add((grupo, int(did)))
+                        nat = "BONUS" if "BONUS" in str(ci.get("detail_type") or "").upper() else "CHARGE"
+                        v = abs(_num(ci.get("detail_amount")))
+                        if doc == "CREDIT_NOTE":
+                            v = v if nat == "CHARGE" else -v  # estorno de cobrança (+) / anulação de bonificação (−)
+                        else:
+                            v = -v if nat == "CHARGE" else v
+                        vendas_ = x.get("sales_info") or []
+                        oid = (vendas_[0] or {}).get("order_id") if vendas_ else None
+                        sid = (x.get("shipping_info") or {}).get("shipping_id")
+                        out.append(MLCobranca(empresa_id=empresa_id, periodo=mes, grupo=grupo, documento=doc, detail_id=int(did),
+                                              natureza=nat, tipo=str(ci.get("detail_sub_type") or "")[:20],
+                                              descricao=str(ci.get("transaction_detail") or "")[:200], valor=round(v, 2),
+                                              data=_data_br(ci.get("creation_date_time")),
+                                              order_id=int(oid) if oid else None, shipping_id=int(sid) if sid else None,
+                                              debitada=(str(ci.get("debited_from_operation") or "").upper() in ("YES", "SI", "SIM", "TRUE"))
+                                              if ci.get("debited_from_operation") is not None else None))
+                    lidos += len(res)
+                    prox = r.get("last_id") or (max(int((x.get("charge_info") or {}).get("detail_id") or 0) for x in res) if res else None)
+                    if not res or len(res) < 1000 or not prox or int(prox) == from_id:
+                        break
+                    from_id = int(prox)
+                    if andamento:
+                        andamento(f"Lendo as cobranças de {mes[5:]}/{mes[:4]} ({grupo}, {lidos} até agora)...")
+            except MLErro as e:
+                if avisos is None:
+                    raise
+                avisos.append(f"{mes[5:]}/{mes[:4]} {grupo} {'estornos' if doc == 'CREDIT_NOTE' else 'cobranças'}: {e}")
     return out
 
 
@@ -650,11 +659,11 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
                 if n % 25 == 1:
                     andamento(f"Lendo a nota fiscal de cada venda ({n} de {len(pagos_)})...", n, len(pagos_))
                 notas += notas_da_venda(cli, seller, v)
-        cobs = []
+        cobs, avisos_cob = [], []
         if p.get("cobrancas", True):
             for n, mes in enumerate(meses, 1):
                 andamento(f"Lendo as cobranças pedido a pedido de {mes[5:]}/{mes[:4]}...", n, len(meses))
-                cobs += cobrancas(cli, mes, emp_id, andamento)
+                cobs += cobrancas(cli, mes, emp_id, andamento, avisos_cob)
         tarifas = []
         for n, mes in enumerate(meses, 1):
             andamento(f"Lendo o faturamento (tarifas) de {mes[5:]}/{mes[:4]}...", n, len(meses))
@@ -699,7 +708,9 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
             j.mensagem = (f"Mercado Livre atualizado: {len(vendas)} pedidos ({pagos} pagos) e {len(tarifas)} "
                           f"tarifas/bonificações do faturamento, de {ini[5:]}/{ini[:4]} a {fim[5:]}/{fim[:4]}."
                           + (f" {len(notas)} notas fiscais." if p.get("notas", True) else "")
-                          + (f" {len(cobs)} cobranças detalhadas." if p.get("cobrancas", True) else ""))
+                          + (f" {len(cobs)} cobranças detalhadas." if p.get("cobrancas", True) else "")
+                          + (" Atenção — o Mercado Livre não devolveu parte das cobranças detalhadas: " + "; ".join(avisos_cob)[:600]
+                             if avisos_cob else ""))
             s.commit()
     except Exception as e:  # noqa: BLE001
         with SessionLocal() as s:
