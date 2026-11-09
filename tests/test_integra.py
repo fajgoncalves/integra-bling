@@ -169,6 +169,8 @@ def ml_falso(req: httpx.Request):
                 return httpx.Response(404, json={"message": "config not found"})
             cfg = json.loads(req.content)
             assert {"key": "ORDER_ID"} in cfg["columns"]
+            if not cfg.get("frequency"):
+                return httpx.Response(400, json={"message": "Invalid frequency"})
             return httpx.Response(201, json=cfg)
         if url.path == "/v1/account/release_report" and req.method == "POST":
             ml_chamadas["relatorio"] = json.loads(req.content)

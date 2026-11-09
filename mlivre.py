@@ -496,7 +496,8 @@ def extrato_api(cli: Cliente, d1: dt.date, d2: dt.date, andamento=None, espera=1
     if not cfg:  # sem configuração: cria uma, com as colunas que a auditoria usa (não altera configuração existente)
         cli.req("POST", MP + "/v1/account/release_report/config",
                 corpo={"file_name_prefix": "integra-bling", "include_withdrawal_at_end": False, "execute_after_withdrawal": False,
-                       "display_timezone": "GMT-03", "report_translation": "en", "separator": ";",
+                       "display_timezone": "GMT-03", "report_translation": "en", "separator": ";", "scheduled": False,
+                       "frequency": {"hour": 0, "value": 1, "type": "monthly"}, "notification_email_list": [],
                        "columns": [{"key": k} for k in COLUNAS_EXTRATO]})
     ini = f"{d1.isoformat()}T03:00:00Z"
     fim = f"{(d2 + dt.timedelta(days=1)).isoformat()}T02:59:59Z"
