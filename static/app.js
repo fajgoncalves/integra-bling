@@ -14,6 +14,7 @@ const cnpjFmt = (c) => !c ? "" : c.length === 14 ? c.replace(/^(\d{2})(\d{3})(\d
 const ORIGEM = { BLING: '<span class="badge b-bling">Bling</span>', DOMINIO: '<span class="badge b-dom">Domínio</span>' };
 const TIPO = { R: "Receita", D: "Despesa", RD: "Receita e despesa" };
 let EU = null;
+let pendenteModelo = null;  // grava o modelo em edição antes de trocar de tela
 
 async function api(caminho, opt = {}) {
   const o = { method: opt.method || "GET", headers: {} };
@@ -578,16 +579,34 @@ function codigoDe(nome, existentes) {
 async function telaModelo(id) {
   const m = await api(`/api/modelos/${id}`);
   casca("modelos", `<div class="topo"><div><a href="#/modelos" class="peq">← Modelos</a><h1>Editar modelo</h1></div>
-    <div class="linha">${EU.perfil === "ADMIN" ? '<button class="btn perigo" id="m-del">Excluir</button>' : ""}<button class="btn" id="m-novo">+ Novo</button><button class="btn pri" id="m-salvar">Salvar modelo</button></div></div>
+    <div class="linha">${EU.perfil === "ADMIN" ? '<button class="btn perigo" id="m-del">Excluir</button>' : ""}<button class="btn" id="m-novo">+ Novo</button><button class="btn" id="m-salvar" title="Normalmente não é preciso: tudo grava sozinho">Salvar agora</button></div></div>
     <div class="card"><div class="form" style="grid-template-columns:1fr 2fr"><label>Nome <input id="m-nome" value="${esc(m.nome)}"></label><label>Descrição <input id="m-desc" value="${esc(m.descricao)}"></label></div></div>
     <div class="info peq">A DRE é feita de <b>grupos</b> (o total do grupo é a soma automática das contas dele), <b>contas</b> (sempre dentro de um grupo; recebem as categorias do Bling e da Domínio) e <b>resultados</b> (fórmula com os grupos e resultados de cima, ex.: <span class="mono">RB + DED</span>).
       Clique em <b>+ Novo</b> para criar; a conta nova entra no fim do grupo escolhido. As setas mudam a posição dentro do grupo. Marque <b>AV</b> na linha que vale 100% na análise vertical.
-      ${m.empresas ? `<br>Este modelo é usado por ${m.empresas} empresa(s): excluir uma conta apaga as associações dela. Nada muda até clicar em <b>Salvar modelo</b>.` : ""}</div>
+      <b>Tudo é gravado automaticamente</b> (veja o aviso "✓ Salvo" no fim da página).${m.empresas ? ` Este modelo é usado por ${m.empresas} empresa(s): excluir uma conta apaga as associações dela.` : ""}</div>
     <div class="card"><div class="rolagem" style="max-height:none"><table class="editor" id="ed"></table></div>
-    <div class="linha" style="margin-top:12px"><button class="btn" id="m-novo2">+ Novo</button><span class="suave peq" id="m-sujo"></span></div></div>`);
+    <div class="linha" style="margin-top:12px"><button class="btn" id="m-novo2">+ Novo</button><span class="peq" id="m-sujo" style="font-weight:600"></span></div></div>`);
   const L = m.linhas.map((x) => ({ ...x }));
-  let sujo = false;
-  const marcar = () => { sujo = true; $("#m-sujo").textContent = "Alterações não salvas."; };
+  let sujo = false, timer = null, salvando = null;
+  const status = (t, cor) => { const el = $("#m-sujo"); if (el) { el.textContent = t; el.style.color = cor || ""; } };
+  const salvar = async () => {
+    clearTimeout(timer);
+    if (salvando) await salvando.catch(() => {});
+    salvando = (async () => {
+      status("Salvando...");
+      const r = await api(`/api/modelos/${id}`, { method: "PUT", body: { nome: $("#m-nome").value, descricao: $("#m-desc").value, linhas: L } });
+      const porCod = new Map(r.linhas.map((x) => [x.codigo, x.id]));
+      L.forEach((x) => { if (porCod.has(x.codigo)) x.id = porCod.get(x.codigo); });
+      sujo = false; status("✓ Salvo automaticamente", "var(--verde)");
+    })();
+    try { await salvando; } catch (e) { status(`Não salvo: ${e.message}`, "var(--vermelho)"); throw e; } finally { salvando = null; }
+  };
+  const marcar = (espera = 600) => {  // toda alteração grava sozinha
+    sujo = true; status("Alterações não salvas...");
+    clearTimeout(timer);
+    timer = setTimeout(() => salvar().catch(() => {}), espera);
+  };
+  const editando = () => { sujo = true; clearTimeout(timer); status("Alterações não salvas..."); };
   const topo = () => L.filter((x) => x.tipo !== "CONTA");
   const filhos = (g) => L.filter((x) => x.tipo === "CONTA" && x.pai_codigo === g);
   const reordenar = (tops) => {  // reconstrói a lista: cada grupo seguido das suas contas
@@ -646,9 +665,10 @@ async function telaModelo(id) {
         if (!novo || (novo !== x.codigo && L.some((y) => y.codigo === novo))) { toast("Código vazio ou repetido.", true); cod.value = x.codigo; return; }
         renomear(x.codigo, novo); x.codigo = novo; marcar(); desenhar();
       };
-      $(".f-nome", tr).oninput = (ev) => { x.nome = ev.target.value; marcar(); };
+      $(".f-nome", tr).oninput = (ev) => { x.nome = ev.target.value; editando(); };
+      $(".f-nome", tr).onchange = () => marcar(0);
       if ($(".f-sinal", tr)) $(".f-sinal", tr).onchange = (ev) => { x.sinal = Number(ev.target.value); marcar(); };
-      if ($(".f-form", tr)) $(".f-form", tr).oninput = (ev) => { x.formula = ev.target.value.toUpperCase(); marcar(); };
+      if ($(".f-form", tr)) { $(".f-form", tr).oninput = (ev) => { x.formula = ev.target.value.toUpperCase(); editando(); }; $(".f-form", tr).onchange = () => marcar(0); }
       if ($(".f-av", tr)) $(".f-av", tr).onchange = () => { L.forEach((y) => { y.base_av = false; }); x.base_av = true; marcar(); };
       const moverTopo = (d) => { const ts = topo(); const k = ts.indexOf(x); const j = k + d; if (j < 0 || j >= ts.length) return; [ts[k], ts[j]] = [ts[j], ts[k]]; reordenar(ts); marcar(); desenhar(); };
       if ($(".t-sobe", tr)) { $(".t-sobe", tr).onclick = () => moverTopo(-1); $(".t-desce", tr).onclick = () => moverTopo(1); }
@@ -732,16 +752,15 @@ async function telaModelo(id) {
   };
   $("#m-novo").onclick = () => novo();
   $("#m-novo2").onclick = () => novo();
-  $("#m-salvar").onclick = (ev) => tentar(async () => {
-    const r = await api(`/api/modelos/${id}`, { method: "PUT", body: { nome: $("#m-nome").value, descricao: $("#m-desc").value, linhas: L } });
-    L.splice(0, L.length, ...r.linhas.map((x) => ({ ...x })));
-    sujo = false; $("#m-sujo").textContent = ""; desenhar(); toast("Modelo salvo.");
-  }, ev.target);
+  $("#m-salvar").onclick = (ev) => tentar(async () => { await salvar(); toast("Modelo salvo."); }, ev.target);
+  $("#m-nome").onchange = () => marcar(0);
+  $("#m-desc").onchange = () => marcar(0);
   if ($("#m-del")) $("#m-del").onclick = (ev) => tentar(async () => {
     if (!confirm("Excluir este modelo?")) return;
     await api(`/api/modelos/${id}`, { method: "DELETE" }); location.hash = "#/modelos";
   }, ev.target);
   window.onbeforeunload = () => (sujo ? true : null);
+  pendenteModelo = () => (sujo ? salvar().catch(() => {}) : null);
   desenhar();
 }
 
@@ -804,6 +823,7 @@ async function telaConfig() {
 
 // ------------------------------------------------------------------ rotas
 async function rota() {
+  if (pendenteModelo) { const p = pendenteModelo(); pendenteModelo = null; if (p) await p; }
   $$(".modal-fundo").forEach((m) => m.remove());
   window.onbeforeunload = null;
   const [caminho, qs] = (location.hash.slice(1) || "/empresas").split("?");
