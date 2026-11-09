@@ -77,6 +77,117 @@ def bling_falso(req: httpx.Request):
     return httpx.Response(404)
 
 
+PEDIDOS = [
+    {"id": 2000001, "date_created": "2026-01-10T10:00:00.000-04:00", "date_closed": "2026-01-10T10:01:00.000-04:00",
+     "status": "paid", "total_amount": 100.0, "buyer": {"nickname": "COMPRADOR1"}, "shipping": {"id": 41},
+     "order_items": [{"item": {"title": "Câmera"}, "quantity": 1, "unit_price": 100.0, "sale_fee": 12.0}],
+     "payments": [{"status": "approved", "transaction_amount": 100.0, "transaction_amount_refunded": 0}]},
+    {"id": 2000002, "date_created": "2026-01-31T23:30:00.000-04:00", "date_closed": "2026-01-31T23:30:00.000-04:00",  # 01/02 em Brasília
+     "status": "cancelled", "total_amount": 50.0, "buyer": {"nickname": "COMPRADOR2"},
+     "order_items": [{"item": {"title": "Cabo"}, "quantity": 2, "unit_price": 25.0, "sale_fee": 3.0}],
+     "payments": [{"status": "refunded", "transaction_amount": 50.0, "transaction_amount_refunded": 50.0}]},
+    {"id": 2000003, "date_closed": "2026-02-03T09:00:00.000-03:00", "status": "payment_required", "total_amount": 70.0,
+     "order_items": [{"item": {"title": "Tripé"}, "quantity": 1, "sale_fee": 8.0}], "payments": []},
+]
+FATURAMENTO = {
+    ("2026-01", "ML"): {"period": {"date_from": "2026-01-01T00:00:00", "date_to": "2026-01-31T23:59:59"},
+                        "bill_includes": {"total_amount": 60.0,
+                                          "charges": [{"label": "Tarifa de venda", "amount": 15.0, "type": "CV"},
+                                                      {"label": "Mercado Envios", "amount": 40.0, "type": "CXD"},
+                                                      {"label": "Product Ads", "amount": 10.0, "type": "PADS"}],
+                                          "bonuses": [{"label": "Bônus por envio", "amount": 5.0, "type": "BXD"}]}},
+    ("2026-02", "MP"): {"bill_includes": {"charges": [{"label": "Tarifa de parcelamento", "amount": 2.5, "type": "FIN"}]}},
+}
+ml_chamadas = {"token": 0, "refresh": set()}
+
+
+def ml_falso(req: httpx.Request):
+    url = urlparse(str(req.url))
+    q = parse_qs(url.query)
+    if url.path == "/oauth/token":
+        f = parse_qs(req.content.decode())
+        assert f["client_id"] == ["mlcid"] and f["client_secret"] == ["mlsec"]
+        if f["grant_type"] == ["authorization_code"]:
+            assert f["redirect_uri"][0].endswith("/mlivre/callback")
+        else:
+            assert f["refresh_token"][0] not in ml_chamadas["refresh"]  # refresh token de uso único
+            ml_chamadas["refresh"].add(f["refresh_token"][0])
+        ml_chamadas["token"] += 1
+        return httpx.Response(200, json={"access_token": f"mlacc{ml_chamadas['token']}", "expires_in": 10800,
+                                         "refresh_token": f"mlref{ml_chamadas['token']}", "user_id": 555})
+    assert req.headers["authorization"].startswith("Bearer mlacc")
+    if url.path == "/users/me":
+        return httpx.Response(200, json={"id": 555, "nickname": "LOJA_ALFA"})
+    if url.path == "/orders/search":
+        assert q["seller"] == ["555"]
+        de, ate = q["order.date_closed.from"][0][:10], q["order.date_closed.to"][0][:10]
+        rs = [o for o in PEDIDOS if de <= (o.get("date_closed") or o["date_created"])[:10] <= ate]
+        off, lim = int(q["offset"][0]), int(q["limit"][0])
+        return httpx.Response(200, json={"results": rs[off:off + lim], "paging": {"total": len(rs), "offset": off, "limit": lim}})
+    if "/billing/integration/periods/key/" in url.path:
+        mes = url.path.split("/key/")[1][:7]
+        r = FATURAMENTO.get((mes, q["group"][0]))
+        return httpx.Response(200, json=r) if r else httpx.Response(404, json={"message": "not found"})
+    return httpx.Response(404)
+
+
+def verifica_mercado_livre(c, eid, modelo_ml):
+    import mlivre
+    mlivre.INTERVALO = 0
+    assert c.post(f"/api/empresas/{eid}/mlivre/conectar").status_code == 400  # sem aplicativo
+    cfg = c.put("/api/config", json={"ml_client_id": "mlcid", "ml_client_secret": "mlsec"}).json()
+    assert cfg["ml_secret_definido"] and cfg["ml_redirect_uri"].endswith("/mlivre/callback")
+    u = c.post(f"/api/empresas/{eid}/mlivre/conectar").json()["url"]
+    q = parse_qs(urlparse(u).query)
+    assert u.startswith("https://auth.mercadolivre.com.br/authorization") and q["client_id"] == ["mlcid"]
+    orig = httpx.Client
+    ml_http = orig(transport=httpx.MockTransport(ml_falso))
+    mlivre.httpx.Client = lambda **kw: ml_http
+    try:
+        r = c.get(f"/mlivre/callback?code=xyz&state={q['state'][0]}", follow_redirects=False)
+        assert "ml=ok" in r.headers["location"], r.headers["location"]
+        e = c.get(f"/api/empresas/{eid}").json()
+        assert e["ml_conectado"] and e["ml_apelido"] == "LOJA_ALFA"
+        r = c.post(f"/api/empresas/{eid}/mlivre/sincronizar", json={"inicio": "2026-01", "fim": "2026-02"}).json()
+        cli = mlivre.Cliente(eid, ml_http)
+        with SessionLocal() as s:  # força a renovação do token (refresh de uso único)
+            from db import Empresa
+            s.get(Empresa, eid).ml_expira = None
+            s.commit()
+        mlivre.sincronizar(r["id"], cli)
+        j = c.get(f"/api/jobs/{r['id']}").json()
+        assert j["status"] == "OK", j["mensagem"]
+        assert "3 pedidos (2 pagos)" in j["mensagem"] and "5 tarifas" in j["mensagem"]
+        mlivre.sincronizar(r["id"], cli)  # de novo: substitui
+    finally:
+        mlivre.httpx.Client = orig
+    v = c.get(f"/api/empresas/{eid}/mlivre/vendas?inicio=2026-01&fim=2026-02").json()
+    assert v["total_pedidos"] == 3
+    M = {m["mes"]: m for m in v["meses"]}
+    assert M["2026-01"]["vendas"] == 100 and M["2026-01"]["encargos"] == 65 and M["2026-01"]["bonus"] == 5
+    assert M["2026-02"]["vendas"] == 50 and M["2026-02"]["devolvido"] == 50 and M["2026-02"]["encargos"] == 2.5
+    assert M["2026-01"]["liquido"] == 40
+    assert c.get(f"/api/empresas/{eid}/mlivre/vendas?inicio=2026-01&fim=2026-02&q=cabo").json()["total_pedidos"] == 1
+    # troca para o modelo Mercado Livre: as contas do ML são sugeridas
+    c.put(f"/api/empresas/{eid}", json={"modelo_id": modelo_ml["id"]})
+    ct = c.get(f"/api/empresas/{eid}/contas?inicio=2026-01&fim=2026-02").json()["contas"]
+    ML = {x["codigo"]: x for x in ct if x["origem"] == "MLIVRE"}
+    assert set(ML) == {"VENDAS", "DEVOL", "ML:CH:CV", "ML:CH:CXD", "ML:CH:PADS", "ML:BO:BXD", "MP:CH:FIN"}
+    nomes = {x["codigo"]: x["linha_nome"] for x in ML.values()}
+    assert nomes["ML:CH:CV"] == "Tarifas de venda (comissão)" and nomes["ML:CH:CXD"] == "Mercado Envios (frete)"
+    assert nomes["MP:CH:FIN"].startswith("Outras tarifas") and nomes["ML:BO:BXD"].startswith("(+) Bonif")
+    assert nomes["VENDAS"] == "Vendas no Mercado Livre (pedidos)" and ML["VENDAS"]["total"] == 150
+    d = c.get(f"/api/empresas/{eid}/dre?inicio=2026-01&fim=2026-02").json()
+    L = {x["codigo"]: x for x in d["linhas"]}
+    assert L["MLC"]["valores"] == [-60.0, -2.5] and L["ML_DEVOL"]["valores"] == [0, -50.0]
+    assert any("contada duas vezes" in a for a in d["avisos"])  # vendas ML + notas da Domínio
+    det = c.get(f"/api/contas/{ML['ML:CH:CV']['id']}/detalhe?inicio=2026-01&fim=2026-02").json()
+    assert det["tipo"] == "ml_tarifa" and det["total"] == -15 and len(det["pedidos"]) == 2
+    det = c.get(f"/api/contas/{ML['VENDAS']['id']}/detalhe?inicio=2026-01&fim=2026-02").json()
+    assert det["tipo"] == "ml_pedidos" and det["qtd"] == 2 and det["total"] == 150
+    assert c.post(f"/api/empresas/{eid}/mlivre/desconectar").json()["ml_conectado"] is False
+
+
 def test_classificar_ambiguo():
     todos = {1: {}, 2: {}, 3: {}}
     final, amb = bling.classificar(todos, {"A": {1, 2}, "B": {2}, "C": {3}, "D": {3}}, {"B": "A"})
@@ -116,7 +227,10 @@ def test_fluxo_completo():
                                          "central_url": "https://central.exemplo", "central_chave": "f360_chave_de_teste_integra"}).json()
         assert cfg["bling_secret_definido"] and cfg["redirect_uri"].endswith("/bling/callback")
         modelos = c.get("/api/modelos").json()
-        assert len(modelos) == 1 and any(ln["codigo"] == "LL" for ln in modelos[0]["linhas"])
+        assert sorted(m["nome"] for m in modelos) == ["DRE Mercado Livre", "DRE Padrão"]
+        modelos.sort(key=lambda m: m["nome"] != "DRE Padrão")
+        assert any(ln["codigo"] == "LL" for ln in modelos[0]["linhas"])
+        assert any(ln["codigo"] == "MC" and ln["formula"] == "LB + MLC" for ln in modelos[1]["linhas"])
         e = c.post("/api/empresas", json={"nome": "Alfa", "cnpj": "12.345.678/0001-90", "codigo_dominio": "77"}).json()
         assert e["modelo_id"] == modelos[0]["id"] and e["contas"]["DOMINIO"]["associadas"] == 7  # sugestões da Domínio (com CMV, PIS/COFINS e ICMS TTD)
         assert c.post("/api/empresas", json={"nome": "Dup", "cnpj": "12345678000190"}).status_code == 400
@@ -330,6 +444,9 @@ def test_fluxo_completo():
             assert ls["TA"].tipo == "GRUPO" and ls["A"].pai_id == ls["TA"].id and "T1" not in ls
             assert ls["C"].id == id_c and ls[next(k for k in ls if ls[k].tipo == "GRUPO" and k != "TA")].id == ls["C"].pai_id
             assert ls["R"].tipo == "TOTAL" and not D.converter_modelo(s, mv)
+
+        # Mercado Livre
+        verifica_mercado_livre(c, e["id"], modelos[1])
 
         # usuários
         assert c.post("/api/usuarios", json={"nome": "Op", "email": "op@x.com", "senha": "senha-forte-2"}).status_code == 200

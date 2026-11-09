@@ -11,7 +11,7 @@ const mesBR = (m) => m ? `${m.slice(5, 7)}/${m.slice(0, 4)}` : "";
 const dataBR = (d) => d ? `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}` : "";
 const dataHora = (d) => d ? `${dataBR(d)} ${d.slice(11, 16)}` : "—";
 const cnpjFmt = (c) => !c ? "" : c.length === 14 ? c.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5") : c.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, "$1.$2.$3-$4");
-const ORIGEM = { BLING: '<span class="badge b-bling">Bling</span>', DOMINIO: '<span class="badge b-dom">Domínio</span>' };
+const ORIGEM = { BLING: '<span class="badge b-bling">Bling</span>', DOMINIO: '<span class="badge b-dom">Domínio</span>', MLIVRE: '<span class="badge b-ml">Mercado Livre</span>' };
 const TIPO = { R: "Receita", D: "Despesa", RD: "Receita e despesa" };
 let EU = null;
 let pendenteModelo = null;  // grava o modelo em edição antes de trocar de tela
@@ -143,6 +143,7 @@ async function telaEmpresas() {
       <div class="linha" style="margin-top:10px">
         ${e.bling_conectado ? '<span class="badge b-ok">Bling conectado</span>' : '<span class="badge b-aviso">Bling não conectado</span>'}
         ${e.dominio_sync_em ? '<span class="badge b-dom">Domínio lida</span>' : ""}
+        ${e.ml_conectado ? '<span class="badge b-ml">Mercado Livre</span>' : ""}
         <span class="badge">${b.associadas}/${b.total} categorias associadas</span>
       </div>
       ${e.ultimo_job ? `<div class="suave peq" style="margin-top:8px">${statusJob(e.ultimo_job)} ${esc(e.ultimo_job.mensagem).slice(0, 120)}</div>` : ""}
@@ -153,7 +154,7 @@ async function telaEmpresas() {
 
 function statusJob(j) {
   const cls = { OK: "b-ok", ERRO: "b-erro", EXECUTANDO: "b-aviso", PENDENTE: "b-aviso" }[j.status] || "";
-  const nome = { bling_sync: "Bling", dominio_importar: "Domínio" }[j.tipo] || j.tipo;
+  const nome = { bling_sync: "Bling", dominio_importar: "Domínio", ml_sync: "Mercado Livre" }[j.tipo] || j.tipo;
   const st = { OK: "concluído", ERRO: "erro", EXECUTANDO: "em andamento", PENDENTE: "na fila" }[j.status] || j.status;
   return `<span class="badge ${cls}">${nome}: ${st}</span>`;
 }
@@ -215,7 +216,7 @@ let pollJobs = null;
 async function telaEmpresa(id, aba, params) {
   clearInterval(pollJobs);
   const e = await api(`/api/empresas/${id}`);
-  const abas = [["conexoes", "Conexões e dados"], ["associacao", "Associação de contas"], ["custos", "Custo dos produtos"], ["dre", "DRE"], ["fluxo", "Fluxo de caixa"]];
+  const abas = [["conexoes", "Conexões e dados"], ["associacao", "Associação de contas"], ["custos", "Custo dos produtos"], ["mlivre", "Mercado Livre"], ["dre", "DRE"], ["fluxo", "Fluxo de caixa"]];
   casca("empresas", `<div class="topo"><div><a href="#/empresas" class="peq">← Empresas</a><h1>${esc(e.nome)}</h1>
       <div class="suave">${cnpjFmt(e.cnpj) || "sem CNPJ"} · Domínio ${esc(e.codigo_dominio || "—")} · Modelo: ${esc(e.modelo_nome || "—")}</div></div>
       <button class="btn" id="editar">Editar empresa</button></div>
@@ -224,6 +225,9 @@ async function telaEmpresa(id, aba, params) {
   $("#editar").onclick = () => formEmpresa(e);
   if (params.get("bling") === "ok") toast("Bling conectado. Agora atualize os dados do período.");
   if (params.get("bling") === "erro") toast(`Bling: ${params.get("msg") || "não foi possível conectar"}`, true);
+  if (params.get("ml") === "ok") toast("Mercado Livre conectado. Agora atualize os dados do período.");
+  if (params.get("ml") === "erro") toast(`Mercado Livre: ${params.get("msg") || "não foi possível conectar"}`, true);
+  if (aba === "mlivre") return abaMLivre(e);
   if (aba === "associacao") return abaAssociacao(e);
   if (aba === "dre") return abaDre(e);
   if (aba === "custos") return abaCustos(e);
@@ -251,6 +255,17 @@ function abaConexoes(e) {
       <div class="linha"><label>De <input type="month" id="d-ini" value="${p.inicio}"></label><label>Até <input type="month" id="d-fim" value="${p.fim}"></label></div>
       <div class="linha" style="margin-top:12px"><button class="btn pri" id="d-imp">Ler da Domínio</button></div>
       ${!e.cnpj && !e.codigo_dominio ? '<div class="aviso peq" style="margin-top:10px">Informe o CNPJ ou o código da Domínio no cadastro.</div>' : ""}
+    </div>
+    <div class="card"><h2>Mercado Livre</h2>
+      ${e.ml_conectado ? `<div class="linha"><span class="badge b-ok">Conectado</span><span class="suave peq">${esc(e.ml_apelido || "")} · desde ${dataHora(e.ml_conectado_em)}</span></div>`
+        : `<div class="aviso">Ainda não conectada. Clique em <b>Conectar Mercado Livre</b> e entre com a conta de vendedor desta empresa para autorizar a leitura.</div>`}
+      <div class="suave peq" style="margin:10px 0">Última atualização: ${e.ml_sync_em ? `${dataHora(e.ml_sync_em)} (${esc(e.ml_sync_periodo)})` : "nunca"}</div>
+      <div class="linha"><label>De <input type="month" id="m-ini" value="${p.inicio}"></label><label>Até <input type="month" id="m-fim" value="${p.fim}"></label></div>
+      <div class="linha" style="margin-top:12px">
+        <button class="btn ${e.ml_conectado ? "" : "pri"}" id="m-con">${e.ml_conectado ? "Reconectar" : "Conectar Mercado Livre"}</button>
+        <button class="btn pri" id="m-sync" ${e.ml_conectado ? "" : "disabled"}>Atualizar do Mercado Livre</button>
+        ${e.ml_conectado ? '<button class="btn perigo peq" id="m-des">Desconectar</button>' : ""}</div>
+      <div class="suave peq" style="margin-top:10px">Lê os <b>pedidos</b> (valor pago, reembolsos e a tarifa de venda de cada um) e o <b>faturamento</b> do Mercado Livre e do Mercado Pago de cada mês (comissões, Mercado Envios, Product Ads, bonificações). Somente leitura.</div>
     </div></div>
     <div class="card"><h2>Atividades</h2><div id="jobs" class="suave">Carregando...</div></div>`;
   $("#b-con").onclick = (ev) => tentar(async () => { const r = await api(`/api/empresas/${e.id}/bling/conectar`, { method: "POST" }); location.href = r.url; }, ev.target);
@@ -267,7 +282,64 @@ function abaConexoes(e) {
     await api(`/api/empresas/${e.id}/dominio/importar`, { method: "POST", body: { inicio: $("#d-ini").value, fim: $("#d-fim").value } });
     toast("Pedido enviado à Central 360."); carregarJobs(e.id);
   }, ev.target);
+  $("#m-con").onclick = (ev) => tentar(async () => { const r = await api(`/api/empresas/${e.id}/mlivre/conectar`, { method: "POST" }); location.href = r.url; }, ev.target);
+  if ($("#m-des")) $("#m-des").onclick = (ev) => tentar(async () => {
+    if (!confirm("Desconectar esta empresa do Mercado Livre? Os dados já copiados continuam.")) return;
+    await api(`/api/empresas/${e.id}/mlivre/desconectar`, { method: "POST" }); rota();
+  }, ev.target);
+  $("#m-sync").onclick = (ev) => tentar(async () => {
+    await api(`/api/empresas/${e.id}/mlivre/sincronizar`, { method: "POST", body: { inicio: $("#m-ini").value, fim: $("#m-fim").value } });
+    toast("Atualização do Mercado Livre iniciada."); carregarJobs(e.id);
+  }, ev.target);
   carregarJobs(e.id);
+}
+
+// ------------------------------------------------------------------ Mercado Livre (pedidos e tarifas)
+async function abaMLivre(e) {
+  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
+    <input id="ml-q" placeholder="Pedido, produto ou comprador..." style="min-width:240px"></div>
+    <div id="ml-corpo" style="margin-top:12px" class="suave">Carregando...</div></div>`;
+  let r = null;
+  const ST = { paid: "pago", cancelled: "cancelado", confirmed: "confirmado", payment_required: "aguardando pagamento", payment_in_process: "pagamento em análise", partially_refunded: "reembolso parcial" };
+  const carregar = async () => {
+    const p = periodo();
+    r = await api(`/api/empresas/${e.id}/mlivre/vendas?inicio=${p.inicio}&fim=${p.fim}&q=${encodeURIComponent($("#ml-q").value)}`);
+    desenhar();
+  };
+  const desenhar = () => {
+    const c = $("#ml-corpo");
+    if (!r.meses.length) {
+      c.innerHTML = `<div class="vazio">${e.ml_conectado ? "Nada lido no período. Atualize na aba Conexões e dados." : "Conecte a empresa ao Mercado Livre na aba Conexões e dados."}</div>`;
+      return;
+    }
+    const tot = r.meses.reduce((a, m) => { for (const k of ["pedidos", "pagos", "vendas", "devolvido", "comissao_pedidos", "encargos", "bonus", "liquido"]) a[k] = (a[k] || 0) + m[k]; return a; }, {});
+    c.innerHTML = `<div class="kpi"><div>Vendas pagas<b>R$ ${brl(tot.vendas)}</b></div><div>Reembolsos<b class="neg">R$ ${brl(-tot.devolvido)}</b></div>
+      <div>Encargos do faturamento<b class="neg">R$ ${brl(-tot.encargos)}</b></div><div>Bonificações<b>R$ ${brl(tot.bonus)}</b></div>
+      <div>Líquido<b>R$ ${brl(tot.liquido)}</b></div><div>Custo ML / vendas<b>${tot.vendas ? pct((tot.encargos - tot.bonus) / tot.vendas * 100) : "—"}</b></div></div>
+    <h3>Por mês</h3><div class="rolagem"><table><tr><th>Mês</th><th class="num">Pedidos</th><th class="num">Pagos</th><th class="num">Vendas pagas</th><th class="num">Reembolsos</th>
+      <th class="num">Tarifa nos pedidos</th><th class="num">Encargos (faturamento)</th><th class="num">Bonificações</th><th class="num">Líquido</th></tr>
+      ${r.meses.map((m) => `<tr><td>${mesBR(m.mes)}</td><td class="num">${m.pedidos}</td><td class="num">${m.pagos}</td><td class="num">${brl(m.vendas)}</td>
+        <td class="num neg">${brl(-m.devolvido)}</td><td class="num suave">${brl(-m.comissao_pedidos)}</td><td class="num neg">${brl(-m.encargos)}</td>
+        <td class="num">${brl(m.bonus)}</td><td class="num"><b>${brl(m.liquido)}</b></td></tr>`).join("")}</table></div>
+    <div class="suave peq" style="margin:6px 0 14px">“Tarifa nos pedidos” é a comissão informada em cada pedido (conferência); a DRE usa os encargos do faturamento oficial do mês. O período de faturamento do Mercado Livre pode não fechar exatamente no último dia do mês.</div>
+    <details><summary><b>Encargos e bonificações do faturamento</b> (${r.tarifas.length})</summary>
+      <div class="rolagem" style="max-height:40vh"><table><tr><th>Mês</th><th>Origem</th><th>Tipo</th><th>Descrição</th><th class="num">Valor</th></tr>
+      ${r.tarifas.map((t) => `<tr><td>${mesBR(t.periodo)}</td><td>${t.grupo === "ML" ? "Mercado Livre" : "Mercado Pago"}</td><td class="mono peq">${esc(t.tipo)}</td>
+        <td>${esc(t.rotulo)}</td><td class="num ${t.natureza === "CHARGE" ? "neg" : ""}">${brl(t.natureza === "CHARGE" ? -Math.abs(t.valor) : Math.abs(t.valor))}</td></tr>`).join("")}</table></div></details>
+    <h3 style="margin-top:16px">Pedidos (${r.total_pedidos})</h3>${tabelaPedidos(r.vendas, ST)}`;
+  };
+  let t = null;
+  $("#ml-q").oninput = () => { clearTimeout(t); t = setTimeout(() => tentar(carregar), 400); };
+  await tentar(carregar);
+}
+
+function tabelaPedidos(vs, ST = {}) {
+  return `<div class="rolagem" style="max-height:55vh"><table><tr><th>Data</th><th>Pedido</th><th>Produto</th><th>Comprador</th><th>Situação</th>
+    <th class="num">Pago</th><th class="num">Reembolso</th><th class="num">Tarifa de venda</th><th class="num">Líquido</th></tr>
+    ${vs.map((v) => `<tr><td>${dataBR(v.data)}</td><td class="mono peq">${v.order_id}${v.pack_id ? `<div class="suave">pacote ${v.pack_id}</div>` : ""}</td>
+      <td class="peq">${esc(v.descricao)}${v.itens > 1 ? ` <span class="suave">(${v.itens} un)</span>` : ""}</td><td class="peq">${esc(v.comprador)}</td>
+      <td class="peq">${esc(ST[v.status] || v.status)}</td><td class="num">${brl(v.pago)}</td><td class="num ${v.devolvido ? "neg" : "suave"}">${v.devolvido ? brl(-v.devolvido) : "—"}</td>
+      <td class="num neg">${brl(-v.comissao)}</td><td class="num"><b>${brl(v.liquido)}</b></td></tr>`).join("") || '<tr><td colspan="9" class="vazio">Nenhum pedido.</td></tr>'}</table></div>`;
 }
 
 async function carregarJobs(eid) {
@@ -295,7 +367,7 @@ async function abaAssociacao(e) {
       <div class="linha"><button class="btn" id="copiar">Copiar associações de outra empresa</button></div></div>
     <div class="linha" style="margin-top:12px">
       <input id="f-q" placeholder="Buscar conta..." style="flex:1;min-width:180px">
-      <select id="f-o"><option value="">Bling e Domínio</option><option value="BLING">Só Bling</option><option value="DOMINIO">Só Domínio</option></select>
+      <select id="f-o"><option value="">Todas as origens</option><option value="BLING">Só Bling</option><option value="DOMINIO">Só Domínio</option><option value="MLIVRE">Só Mercado Livre</option></select>
       <label class="chk"><input type="checkbox" id="f-p"> Só sem associação</label></div>
     <div id="resumo" class="suave peq" style="margin:10px 0"></div>
     <div class="rolagem"><table id="tab"></table></div></div>`;
@@ -364,7 +436,7 @@ async function abaAssociacao(e) {
 
 async function consultarConta(c, e) {
   const p = periodo();
-  const m = modal(`<div class="linha entre"><div><h2 style="margin:0">${esc(c.nome)}</h2><div class="suave peq">${ORIGEM[c.origem]} ${mesBR(p.inicio)} a ${mesBR(p.fim)} · ${c.origem === "BLING" ? "caixa e bancos (pagos e recebidos)" : "notas fiscais"}</div></div>
+  const m = modal(`<div class="linha entre"><div><h2 style="margin:0">${esc(c.nome)}</h2><div class="suave peq">${ORIGEM[c.origem]} ${mesBR(p.inicio)} a ${mesBR(p.fim)} · ${{ BLING: "caixa e bancos (pagos e recebidos)", MLIVRE: "pedidos e faturamento do Mercado Livre" }[c.origem] || "notas fiscais"}</div></div>
     <div class="linha">${c.origem === "BLING" && e ? '<button class="btn" id="cs-sync">Atualizar do Bling</button>' : ""}<button class="btn" data-fechar>Fechar</button></div></div>
     <div id="cs-corpo" style="margin-top:12px" class="suave">Carregando...</div>`);
   const carregar = async () => {
@@ -376,6 +448,13 @@ async function consultarConta(c, e) {
       <div class="rolagem"><table><tr><th>Data</th><th>Conta</th><th>Contato</th><th>Descrição</th><th>Origem</th><th class="num">Valor</th></tr>
       ${r.itens.map((i) => `<tr><td>${dataBR(i.data)}</td><td class="peq">${esc(i.conta_financeira)}</td><td>${esc(i.contato)}</td>
         <td class="peq">${esc(i.descricao)}</td><td class="peq suave">${esc(i.origem)}</td><td class="num ${i.valor < 0 ? "neg" : ""}">${brl(i.valor)}</td></tr>`).join("")}</table></div>`;
+    } else if (r.tipo === "ml_pedidos") {
+      corpo.innerHTML = `<div class="kpi"><div>Total<b class="${r.total < 0 ? "neg" : ""}">R$ ${brl(r.total)}</b></div><div>Pedidos<b>${r.qtd}</b></div></div>${tabelaPedidos(r.itens)}`;
+    } else if (r.tipo === "ml_tarifa") {
+      corpo.innerHTML = `<div class="kpi"><div>Total<b class="${r.total < 0 ? "neg" : ""}">R$ ${brl(r.total)}</b></div></div>
+      <div class="rolagem" style="max-height:30vh"><table><tr><th>Mês</th><th>Descrição</th><th>Período de faturamento</th><th class="num">Valor</th></tr>
+      ${r.itens.map((i) => `<tr><td>${mesBR(i.periodo)}</td><td>${esc(i.rotulo)} <span class="mono suave peq">${esc(i.tipo)}</span></td><td class="peq">${i.de ? `${dataBR(i.de)} a ${dataBR(i.ate)}` : "—"}</td><td class="num ${i.valor < 0 ? "neg" : ""}">${brl(i.valor)}</td></tr>`).join("")}</table></div>
+      ${r.pedidos.length ? `<h3 style="margin-top:16px">Tarifa de venda em cada pedido (${r.pedidos.length})</h3>${tabelaPedidos(r.pedidos)}` : ""}`;
     } else if (r.tipo === "icms") {
       corpo.innerHTML = `<div class="kpi"><div>ICMS TTD a recolher<b class="neg">R$ ${brl(r.total)}</b></div></div>
       <div class="suave peq" style="margin-bottom:8px">Apuração do ICMS no regime especial, lida da Domínio (soma das sub-apurações): débito das saídas − crédito presumido − demais créditos = saldo a recolher (é o que vai para a DRE).</div>
@@ -648,18 +727,19 @@ async function historicoCusto(i, aoMudar) {
 // ------------------------------------------------------------------ modelos de DRE
 async function telaModelos() {
   casca("modelos", `<div class="topo"><div><h1>Modelos de DRE</h1><div class="suave">A estrutura da DRE: linhas que recebem contas, totais e títulos. Cada empresa usa um modelo.</div></div>
-    <button class="btn pri" id="novo">+ Novo modelo</button></div><div id="lista"></div>`);
+    <div class="linha"><button class="btn" id="novo-ml">+ Modelo Mercado Livre</button><button class="btn pri" id="novo">+ Novo modelo</button></div></div><div id="lista"></div>`);
   const ms = await api("/api/modelos");
   $("#lista").innerHTML = `<div class="card"><table><tr><th>Modelo</th><th>Linhas</th><th>Empresas usando</th><th></th></tr>${ms.map((m) => `<tr>
     <td><a href="#/modelo/${m.id}"><b>${esc(m.nome)}</b></a><div class="suave peq">${esc(m.descricao)}</div></td><td>${m.linhas.length}</td><td>${m.empresas}</td>
     <td style="text-align:right"><a class="btn peq" href="#/modelo/${m.id}">Editar</a> <button class="btn peq dup" data-id="${m.id}" data-nome="${esc(m.nome)}">Duplicar</button></td></tr>`).join("")}</table></div>`;
-  const novo = (copiar, nome) => tentar(async () => {
-    const n = prompt("Nome do novo modelo:", copiar ? `${nome} (cópia)` : "Meu modelo de DRE");
+  const novo = (copiar, nome, mlivre = false) => tentar(async () => {
+    const n = prompt("Nome do novo modelo:", copiar ? `${nome} (cópia)` : mlivre ? "DRE Mercado Livre" : "Meu modelo de DRE");
     if (!n) return;
-    const m = await api("/api/modelos", { method: "POST", body: { nome: n, copiar_de: copiar || null } });
+    const m = await api("/api/modelos", { method: "POST", body: { nome: n, copiar_de: copiar || null, mlivre } });
     location.hash = `#/modelo/${m.id}`;
   });
   $("#novo").onclick = () => novo(null);
+  $("#novo-ml").onclick = () => novo(null, "", true);
   $$(".dup").forEach((b) => b.onclick = () => novo(Number(b.dataset.id), b.dataset.nome));
 }
 
@@ -872,6 +952,12 @@ async function telaConfig() {
       <div class="form" style="margin-top:12px"><label>Client ID <input id="cf-cid" value="${esc(c.bling_client_id)}"></label>
       <label>Client Secret <input id="cf-sec" type="password" placeholder="${c.bling_secret_definido ? "(guardado — preencha para trocar)" : ""}"></label></div>
       <div class="linha" style="margin-top:12px"><button class="btn pri" id="cf-bling">Salvar</button></div></div>
+    <div class="card"><h2>Aplicativo do Mercado Livre</h2>
+      <div class="info peq">Em <b>developers.mercadolivre.com.br → Minhas aplicações → Criar nova aplicação</b> (logado na conta de vendedor). Em <b>URI de redirect</b> coloque o endereço abaixo; permissões só de <b>leitura</b> (vendas, faturamento, pagamentos) e acesso offline. Depois copie o Client ID e a Secret Key para cá. Um aplicativo serve para todas as empresas: cada uma autoriza com a própria conta.</div>
+      <label>URI de redirect (cole no Mercado Livre)<div class="linha"><input readonly value="${esc(c.ml_redirect_uri)}" style="flex:1"><button class="btn" id="cf-ml-copiar">Copiar</button></div></label>
+      <div class="form" style="margin-top:12px"><label>Client ID <input id="cf-ml-cid" value="${esc(c.ml_client_id)}"></label>
+      <label>Secret Key <input id="cf-ml-sec" type="password" placeholder="${c.ml_secret_definido ? "(guardada — preencha para trocar)" : ""}"></label></div>
+      <div class="linha" style="margin-top:12px"><button class="btn pri" id="cf-ml">Salvar</button></div></div>
     <div class="card"><h2>Central de Inteligência 360 (Domínio)</h2>
       <div class="info peq">Na Central: <b>Administração → Gerar chave</b>, tipo <b>Integra Bling</b>. A chave só lê: lista de clientes e faturamento/devoluções da Domínio pelo Agente 360.</div>
       <div class="form"><label>Endereço da Central <input id="cf-url" value="${esc(c.central_url)}" placeholder="https://..."></label>
@@ -887,6 +973,12 @@ async function telaConfig() {
     const b = { bling_client_id: $("#cf-cid").value };
     if ($("#cf-sec").value) b.bling_client_secret = $("#cf-sec").value;
     await api("/api/config", { method: "PUT", body: b }); toast("Aplicativo do Bling salvo."); telaConfig();
+  }, ev.target);
+  $("#cf-ml-copiar").onclick = () => { navigator.clipboard.writeText(c.ml_redirect_uri).then(() => toast("Copiado.")); };
+  $("#cf-ml").onclick = (ev) => tentar(async () => {
+    const b = { ml_client_id: $("#cf-ml-cid").value };
+    if ($("#cf-ml-sec").value) b.ml_client_secret = $("#cf-ml-sec").value;
+    await api("/api/config", { method: "PUT", body: b }); toast("Aplicativo do Mercado Livre salvo."); telaConfig();
   }, ev.target);
   $("#cf-central").onclick = (ev) => tentar(async () => {
     const b = { central_url: $("#cf-url").value };

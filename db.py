@@ -44,7 +44,7 @@ class Base(DeclarativeBase):
 
 
 PERFIS = ("ADMIN", "OPERADOR")
-ORIGENS = ("BLING", "DOMINIO")
+ORIGENS = ("BLING", "DOMINIO", "MLIVRE")
 TIPOS_LINHA = ("GRUPO", "CONTA", "TOTAL")
 
 
@@ -114,6 +114,15 @@ class Empresa(Base):
     bling_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
     pis_cofins_aliq: Mapped[float] = mapped_column(Numeric(7, 4), default=9.25)  # % sobre faturamento − devoluções
     pis_cofins_fonte: Mapped[str] = mapped_column(String(10), default="APURACAO")  # APURACAO (Domínio) ou ALIQUOTA
+    # Mercado Livre (OAuth por empresa; o aplicativo fica nas Configurações)
+    ml_access: Mapped[str] = mapped_column(Text, default="")  # cifrado
+    ml_refresh: Mapped[str] = mapped_column(Text, default="")  # cifrado
+    ml_expira: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    ml_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    ml_apelido: Mapped[str] = mapped_column(String(120), default="")
+    ml_conectado_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    ml_sync_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    ml_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
     dominio_sync_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     dominio_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
     criado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
@@ -233,6 +242,42 @@ class ProdutoCusto(Base):
     criado_por: Mapped[str] = mapped_column(String(200), default="")
 
 
+class MLVenda(Base):
+    """Pedido do Mercado Livre (venda)."""
+    __tablename__ = "ml_vendas"
+    __table_args__ = (UniqueConstraint("empresa_id", "order_id"), Index("ix_mlv_emp_data", "empresa_id", "data"))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    order_id: Mapped[int] = mapped_column(BigInteger)
+    pack_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    data: Mapped[dt.date] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(30), default="")
+    total: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    pago: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    devolvido: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    comissao: Mapped[float] = mapped_column(Numeric(15, 2), default=0)  # soma de sale_fee × quantidade
+    itens: Mapped[int] = mapped_column(Integer, default=0)
+    descricao: Mapped[str] = mapped_column(String(300), default="")
+    comprador: Mapped[str] = mapped_column(String(120), default="")
+    shipping_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class MLTarifa(Base):
+    """Encargo (charge) ou bonificação (bonus) do relatório de faturamento do Mercado Livre / Mercado Pago."""
+    __tablename__ = "ml_tarifas"
+    __table_args__ = (UniqueConstraint("empresa_id", "periodo", "grupo", "natureza", "tipo", "rotulo"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    periodo: Mapped[str] = mapped_column(String(7))  # AAAA-MM (key do período de faturamento)
+    grupo: Mapped[str] = mapped_column(String(4))  # ML ou MP
+    natureza: Mapped[str] = mapped_column(String(6))  # CHARGE ou BONUS
+    tipo: Mapped[str] = mapped_column(String(20))  # CV, CXD, PADS, BXD...
+    rotulo: Mapped[str] = mapped_column(String(200), default="")
+    valor: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    de: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    ate: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+
+
 class Job(Base):
     """Atividade em segundo plano (sincronização com o Bling, leitura da Domínio)."""
     __tablename__ = "jobs"
@@ -266,7 +311,11 @@ def criar_tabelas():
              "movimentos_caixa": [("conta_id", "BIGINT"), ("categorizado", "BOOLEAN DEFAULT TRUE")],
              "contas_origem": [("fluxo_secao", "VARCHAR(10)"), ("fluxo_ordem", "INTEGER DEFAULT 0")],
              "empresas": [("pis_cofins_aliq", "NUMERIC(7,4) DEFAULT 9.25"),
-                          ("pis_cofins_fonte", "VARCHAR(10) DEFAULT 'APURACAO'")]}
+                          ("pis_cofins_fonte", "VARCHAR(10) DEFAULT 'APURACAO'"),
+                          ("ml_access", "TEXT DEFAULT ''"), ("ml_refresh", "TEXT DEFAULT ''"), ("ml_expira", "TIMESTAMP"),
+                          ("ml_user_id", "BIGINT"), ("ml_apelido", "VARCHAR(120) DEFAULT ''"),
+                          ("ml_conectado_em", "TIMESTAMP"), ("ml_sync_em", "TIMESTAMP"),
+                          ("ml_sync_periodo", "VARCHAR(30) DEFAULT ''")]}
     insp = inspect(engine)
     for tab, cols in novas.items():
         tem = {c["name"] for c in insp.get_columns(tab)}
