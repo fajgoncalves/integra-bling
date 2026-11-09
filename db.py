@@ -123,6 +123,7 @@ class Empresa(Base):
     ml_conectado_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     ml_sync_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     ml_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
+    ml_imposto_aliq: Mapped[float] = mapped_column(Numeric(7, 4), default=0)  # % de impostos sobre vendas (DRE do ML)
     dominio_sync_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     dominio_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
     criado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
@@ -260,6 +261,36 @@ class MLVenda(Base):
     descricao: Mapped[str] = mapped_column(String(300), default="")
     comprador: Mapped[str] = mapped_column(String(120), default="")
     shipping_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    frete: Mapped[float | None] = mapped_column(Numeric(15, 2), nullable=True)  # custo do envio para o vendedor (None = não lido)
+
+
+class MLItem(Base):
+    """Item de um pedido do Mercado Livre (base da análise por produto)."""
+    __tablename__ = "ml_itens"
+    __table_args__ = (Index("ix_mli_emp_order", "empresa_id", "order_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    order_id: Mapped[int] = mapped_column(BigInteger)
+    anuncio: Mapped[str] = mapped_column(String(30), default="")  # MLB...
+    sku: Mapped[str] = mapped_column(String(80), default="")
+    titulo: Mapped[str] = mapped_column(String(300), default="")
+    tipo_anuncio: Mapped[str] = mapped_column(String(30), default="")  # gold_special (clássico), gold_pro (premium)
+    qtd: Mapped[float] = mapped_column(Numeric(15, 4), default=0)
+    preco: Mapped[float] = mapped_column(Numeric(15, 2), default=0)  # unitário
+    tarifa: Mapped[float] = mapped_column(Numeric(15, 2), default=0)  # tarifa de venda unitária
+
+
+class MLCusto(Base):
+    """Custo unitário de um produto do Mercado Livre (por SKU, ou pelo anúncio quando não há SKU), com vigência mensal."""
+    __tablename__ = "ml_custos"
+    __table_args__ = (UniqueConstraint("empresa_id", "chave", "mes_inicio"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    chave: Mapped[str] = mapped_column(String(80))
+    mes_inicio: Mapped[str] = mapped_column(String(7))
+    custo: Mapped[float] = mapped_column(Numeric(15, 4))
+    criado_por: Mapped[str] = mapped_column(String(120), default="")
+    criado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=lambda: agora())
 
 
 class MLTarifa(Base):
@@ -315,7 +346,9 @@ def criar_tabelas():
                           ("ml_access", "TEXT DEFAULT ''"), ("ml_refresh", "TEXT DEFAULT ''"), ("ml_expira", "TIMESTAMP"),
                           ("ml_user_id", "BIGINT"), ("ml_apelido", "VARCHAR(120) DEFAULT ''"),
                           ("ml_conectado_em", "TIMESTAMP"), ("ml_sync_em", "TIMESTAMP"),
-                          ("ml_sync_periodo", "VARCHAR(30) DEFAULT ''")]}
+                          ("ml_sync_periodo", "VARCHAR(30) DEFAULT ''"),
+                          ("ml_imposto_aliq", "NUMERIC(7,4) DEFAULT 0")],
+             "ml_vendas": [("frete", "NUMERIC(15,2)")]}
     insp = inspect(engine)
     for tab, cols in novas.items():
         tem = {c["name"] for c in insp.get_columns(tab)}

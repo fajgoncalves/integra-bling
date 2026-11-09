@@ -80,11 +80,14 @@ def bling_falso(req: httpx.Request):
 PEDIDOS = [
     {"id": 2000001, "date_created": "2026-01-10T10:00:00.000-04:00", "date_closed": "2026-01-10T10:01:00.000-04:00",
      "status": "paid", "total_amount": 100.0, "buyer": {"nickname": "COMPRADOR1"}, "shipping": {"id": 41},
-     "order_items": [{"item": {"title": "Câmera"}, "quantity": 1, "unit_price": 100.0, "sale_fee": 12.0}],
+     "order_items": [{"item": {"id": "MLB1", "title": "Câmera", "seller_sku": "CAM-001"}, "quantity": 1, "unit_price": 100.0,
+                      "sale_fee": 12.0, "listing_type_id": "gold_pro"}],
      "payments": [{"status": "approved", "transaction_amount": 100.0, "transaction_amount_refunded": 0}]},
     {"id": 2000002, "date_created": "2026-01-31T23:30:00.000-04:00", "date_closed": "2026-01-31T23:30:00.000-04:00",  # 01/02 em Brasília
      "status": "cancelled", "total_amount": 50.0, "buyer": {"nickname": "COMPRADOR2"},
-     "order_items": [{"item": {"title": "Cabo"}, "quantity": 2, "unit_price": 25.0, "sale_fee": 3.0}],
+     "shipping": {"id": 42},
+     "order_items": [{"item": {"id": "MLB2", "title": "Cabo"}, "quantity": 2, "unit_price": 25.0, "sale_fee": 3.0,
+                      "listing_type_id": "gold_special"}],
      "payments": [{"status": "refunded", "transaction_amount": 50.0, "transaction_amount_refunded": 50.0}]},
     {"id": 2000003, "date_closed": "2026-02-03T09:00:00.000-03:00", "status": "payment_required", "total_amount": 70.0,
      "order_items": [{"item": {"title": "Tripé"}, "quantity": 1, "sale_fee": 8.0}], "payments": []},
@@ -124,6 +127,9 @@ def ml_falso(req: httpx.Request):
         rs = [o for o in PEDIDOS if de <= (o.get("date_closed") or o["date_created"])[:10] <= ate]
         off, lim = int(q["offset"][0]), int(q["limit"][0])
         return httpx.Response(200, json={"results": rs[off:off + lim], "paging": {"total": len(rs), "offset": off, "limit": lim}})
+    if url.path.startswith("/shipments/"):
+        sid = url.path.split("/")[2]
+        return httpx.Response(200, json={"senders": [{"user_id": 555, "cost": {"41": 20.0, "42": 9.0}[sid]}]})
     if "/billing/integration/periods/key/" in url.path:
         mes = url.path.split("/key/")[1][:7]
         r = FATURAMENTO.get((mes, q["group"][0]))
@@ -131,7 +137,7 @@ def ml_falso(req: httpx.Request):
     return httpx.Response(404)
 
 
-def verifica_mercado_livre(c, eid, modelo_ml):
+def verifica_mercado_livre(c, eid):
     import mlivre
     mlivre.INTERVALO = 0
     assert c.post(f"/api/empresas/{eid}/mlivre/conectar").status_code == 400  # sem aplicativo
@@ -145,7 +151,7 @@ def verifica_mercado_livre(c, eid, modelo_ml):
     mlivre.httpx.Client = lambda **kw: ml_http
     try:
         r = c.get(f"/mlivre/callback?code=xyz&state={q['state'][0]}", follow_redirects=False)
-        assert "ml=ok" in r.headers["location"], r.headers["location"]
+        assert "#/ml/" in r.headers["location"] and "ml=ok" in r.headers["location"], r.headers["location"]
         e = c.get(f"/api/empresas/{eid}").json()
         assert e["ml_conectado"] and e["ml_apelido"] == "LOJA_ALFA"
         r = c.post(f"/api/empresas/{eid}/mlivre/sincronizar", json={"inicio": "2026-01", "fim": "2026-02"}).json()
@@ -161,30 +167,41 @@ def verifica_mercado_livre(c, eid, modelo_ml):
         mlivre.sincronizar(r["id"], cli)  # de novo: substitui
     finally:
         mlivre.httpx.Client = orig
-    v = c.get(f"/api/empresas/{eid}/mlivre/vendas?inicio=2026-01&fim=2026-02").json()
-    assert v["total_pedidos"] == 3
-    M = {m["mes"]: m for m in v["meses"]}
-    assert M["2026-01"]["vendas"] == 100 and M["2026-01"]["encargos"] == 65 and M["2026-01"]["bonus"] == 5
-    assert M["2026-02"]["vendas"] == 50 and M["2026-02"]["devolvido"] == 50 and M["2026-02"]["encargos"] == 2.5
-    assert M["2026-01"]["liquido"] == 40
-    assert c.get(f"/api/empresas/{eid}/mlivre/vendas?inicio=2026-01&fim=2026-02&q=cabo").json()["total_pedidos"] == 1
-    # troca para o modelo Mercado Livre: as contas do ML são sugeridas
-    c.put(f"/api/empresas/{eid}", json={"modelo_id": modelo_ml["id"]})
+    # módulo separado: nada do ML entra na DRE principal nem na associação de contas
     ct = c.get(f"/api/empresas/{eid}/contas?inicio=2026-01&fim=2026-02").json()["contas"]
-    ML = {x["codigo"]: x for x in ct if x["origem"] == "MLIVRE"}
-    assert set(ML) == {"VENDAS", "DEVOL", "ML:CH:CV", "ML:CH:CXD", "ML:CH:PADS", "ML:BO:BXD", "MP:CH:FIN"}
-    nomes = {x["codigo"]: x["linha_nome"] for x in ML.values()}
-    assert nomes["ML:CH:CV"] == "Tarifas de venda (comissão)" and nomes["ML:CH:CXD"] == "Mercado Envios (frete)"
-    assert nomes["MP:CH:FIN"].startswith("Outras tarifas") and nomes["ML:BO:BXD"].startswith("(+) Bonif")
-    assert nomes["VENDAS"] == "Vendas no Mercado Livre (pedidos)" and ML["VENDAS"]["total"] == 150
-    d = c.get(f"/api/empresas/{eid}/dre?inicio=2026-01&fim=2026-02").json()
+    assert not any(x["origem"] == "MLIVRE" for x in ct)
+    assert c.get("/api/ml/empresas").json()[0]["pedidos"] == 3
+    v = c.get(f"/api/empresas/{eid}/mlivre/vendas?inicio=2026-01&fim=2026-02").json()
+    assert v["total_pedidos"] == 2 and v["nao_pagos"] == 1
+    P = {x["order_id"]: x for x in v["vendas"]}
+    assert P[2000001]["frete"] == 20 and P[2000001]["sem_custo"] and P[2000001]["sku"] == "CAM-001"
+    assert P[2000002]["devolvido"] == 50 and P[2000002]["tarifa"] == 0  # devolvido inteiro: tarifa estornada
+    # impostos e custo
+    assert c.put(f"/api/empresas/{eid}/mlivre/config", json={"imposto": "10"}).json()["ml_imposto_aliq"] == 10
+    cs = c.get(f"/api/empresas/{eid}/mlivre/custos?vigencia=2026-01").json()
+    assert {x["chave"] for x in cs["itens"]} == {"CAM-001", "MLB2"}
+    # copia o custo da aba Custo dos produtos (CAM-001 = 25,00 desde 01/2026, gravado antes no teste)
+    assert c.post(f"/api/empresas/{eid}/mlivre/custos/copiar", json={"vigencia": "2026-01"}).json()["copiados"] == 1
+    assert c.put(f"/api/empresas/{eid}/mlivre/custos", json={"chave": "MLB2", "custo": "4,00", "vigencia": "2026-01"}).json()["custo"] == 4
+    assert c.put(f"/api/empresas/{eid}/mlivre/custos", json={"chave": "MLB2", "custo": "x", "vigencia": "2026-01"}).status_code == 400
+    v = c.get(f"/api/empresas/{eid}/mlivre/vendas?inicio=2026-01&fim=2026-02").json()
+    P = {x["order_id"]: x for x in v["vendas"]}
+    assert P[2000001]["margem"] == 100 - 10 - 12 - 20 - 25  # 33
+    assert P[2000002]["cmv"] == 0 and P[2000002]["margem"] == -9  # devolvido: só o frete fica
+    d = c.get(f"/api/empresas/{eid}/mlivre/dre?inicio=2026-01&fim=2026-02").json()
     L = {x["codigo"]: x for x in d["linhas"]}
-    assert L["MLC"]["valores"] == [-60.0, -2.5] and L["ML_DEVOL"]["valores"] == [0, -50.0]
-    assert any("contada duas vezes" in a for a in d["avisos"])  # vendas ML + notas da Domínio
-    det = c.get(f"/api/contas/{ML['ML:CH:CV']['id']}/detalhe?inicio=2026-01&fim=2026-02").json()
-    assert det["tipo"] == "ml_tarifa" and det["total"] == -15 and len(det["pedidos"]) == 2
-    det = c.get(f"/api/contas/{ML['VENDAS']['id']}/detalhe?inicio=2026-01&fim=2026-02").json()
-    assert det["tipo"] == "ml_pedidos" and det["qtd"] == 2 and det["total"] == 150
+    assert L["RB"]["valores"] == [100, 50] and L["DEV"]["valores"] == [0, -50] and L["IMP"]["valores"] == [-10, 0]
+    assert L["CMV"]["valores"] == [-25, 0] and L["LB"]["total"] == 65
+    assert L["COM"]["valores"] == [-15, 0] and L["FRETE"]["valores"] == [-40, 0] and L["ADS"]["valores"] == [-10, 0]
+    assert L["TMP"]["valores"] == [0, -2.5] and L["BONUS"]["valores"] == [5, 0] and L["CML"]["total"] == -62.5
+    assert L["MC"]["total"] == 2.5 and L["COM"]["composicao"][0]["descricao"] == "Tarifa de venda (CV)"
+    assert d["conferencia"]["comissao_pedidos"] == 12 and d["conferencia"]["frete_pedidos"] == 29
+    assert not any("sem custo" in a for a in d["avisos"])
+    assert c.get(f"/api/empresas/{eid}/mlivre/dre.xlsx?inicio=2026-01&fim=2026-02").status_code == 200
+    pr = {x["chave"]: x for x in c.get(f"/api/empresas/{eid}/mlivre/produtos?inicio=2026-01&fim=2026-02").json()["itens"]}
+    assert pr["CAM-001"]["margem"] == 33 and pr["CAM-001"]["tipos"] == "Premium" and pr["MLB2"]["qtd"] == 0
+    ts = c.get(f"/api/empresas/{eid}/mlivre/tarifas?inicio=2026-01&fim=2026-02").json()
+    assert len(ts) == 5 and {t["linha"] for t in ts if t["tipo"] == "CXD"} == {"Mercado Envios (frete)"}
     assert c.post(f"/api/empresas/{eid}/mlivre/desconectar").json()["ml_conectado"] is False
 
 
@@ -227,10 +244,7 @@ def test_fluxo_completo():
                                          "central_url": "https://central.exemplo", "central_chave": "f360_chave_de_teste_integra"}).json()
         assert cfg["bling_secret_definido"] and cfg["redirect_uri"].endswith("/bling/callback")
         modelos = c.get("/api/modelos").json()
-        assert sorted(m["nome"] for m in modelos) == ["DRE Mercado Livre", "DRE Padrão"]
-        modelos.sort(key=lambda m: m["nome"] != "DRE Padrão")
-        assert any(ln["codigo"] == "LL" for ln in modelos[0]["linhas"])
-        assert any(ln["codigo"] == "MC" and ln["formula"] == "LB + MLC" for ln in modelos[1]["linhas"])
+        assert len(modelos) == 1 and any(ln["codigo"] == "LL" for ln in modelos[0]["linhas"])
         e = c.post("/api/empresas", json={"nome": "Alfa", "cnpj": "12.345.678/0001-90", "codigo_dominio": "77"}).json()
         assert e["modelo_id"] == modelos[0]["id"] and e["contas"]["DOMINIO"]["associadas"] == 7  # sugestões da Domínio (com CMV, PIS/COFINS e ICMS TTD)
         assert c.post("/api/empresas", json={"nome": "Dup", "cnpj": "12345678000190"}).status_code == 400
@@ -446,7 +460,7 @@ def test_fluxo_completo():
             assert ls["R"].tipo == "TOTAL" and not D.converter_modelo(s, mv)
 
         # Mercado Livre
-        verifica_mercado_livre(c, e["id"], modelos[1])
+        verifica_mercado_livre(c, e["id"])
 
         # usuários
         assert c.post("/api/usuarios", json={"nome": "Op", "email": "op@x.com", "senha": "senha-forte-2"}).status_code == 200

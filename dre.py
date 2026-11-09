@@ -35,47 +35,13 @@ MODELO_PADRAO = [
     ("LL", "(=) Lucro líquido", "TOTAL", "LAIR + IRG", False, []),
 ]
 
-# Modelo para quem vende no Mercado Livre: receita fiscal da Domínio, custos do ML (tarifas, frete, publicidade) e
-# margem de contribuição antes das despesas fixas.
-MODELO_MLIVRE = [
-    ("RB", "Receita bruta", "GRUPO", "", False, [
-        ("RB_VENDAS", "Venda de mercadorias (notas fiscais)"), ("RB_ML", "Vendas no Mercado Livre (pedidos)"),
-        ("RB_SERV", "Prestação de serviços"), ("RB_OUTRAS", "Outras receitas operacionais")]),
-    ("DED", "(-) Deduções da receita", "GRUPO", "", False, [
-        ("DED_DEV", "Devoluções de vendas"), ("ML_DEVOL", "Reembolsos no Mercado Livre"), ("PIS_COFINS", "PIS/COFINS"),
-        ("ICMS_TTD", "ICMS TTD"), ("DED_IMP", "Impostos sobre vendas")]),
-    ("RL", "(=) Receita líquida", "TOTAL", "RB + DED", True, []),
-    ("CUSTOS", "(-) Custos", "GRUPO", "", False, [
-        ("CMV", "Custo das mercadorias e produtos vendidos"), ("CMV_DEVC", "Devoluções de compra")]),
-    ("LB", "(=) Lucro bruto", "TOTAL", "RL + CUSTOS", False, []),
-    ("MLC", "(-) Custos do Mercado Livre", "GRUPO", "", False, [
-        ("ML_COMISSAO", "Tarifas de venda (comissão)"), ("ML_FRETE", "Mercado Envios (frete)"),
-        ("ML_ADS", "Publicidade (Product Ads)"), ("ML_TARIFAS", "Outras tarifas Mercado Livre / Mercado Pago"),
-        ("ML_BONUS", "(+) Bonificações do Mercado Livre")]),
-    ("MC", "(=) Margem de contribuição", "TOTAL", "LB + MLC", False, []),
-    ("DOP", "(-) Despesas operacionais", "GRUPO", "", False, [
-        ("DV_COM", "Despesas com comissões"), ("DV_VEND", "Despesas com vendas e marketing"),
-        ("DV_FRETE", "Fretes e logística (fora do ML)"), ("DA_PES", "Despesas com pessoal"),
-        ("DA_OCUP", "Ocupação (aluguel, energia, água)"), ("DA_ADM", "Despesas administrativas"),
-        ("DA_TRIB", "Despesas tributárias")]),
-    ("RO", "(=) Resultado operacional (EBITDA)", "TOTAL", "MC + DOP", False, []),
-    ("RFIN", "(+/-) Resultado financeiro", "GRUPO", "", False, [
-        ("RF", "Receitas financeiras"), ("DF", "Despesas financeiras e tarifas bancárias")]),
-    ("OUTRAS", "(+/-) Outras receitas e despesas", "GRUPO", "", False, [
-        ("ONO", "Outras receitas e despesas não operacionais")]),
-    ("LAIR", "(=) Resultado antes do IR e da CSLL", "TOTAL", "RO + RFIN + OUTRAS", False, []),
-    ("IRG", "(-) IRPJ e CSLL", "GRUPO", "", False, [("IR", "IRPJ e CSLL")]),
-    ("LL", "(=) Lucro líquido", "TOTAL", "LAIR + IRG", False, []),
-]
-NOME_MODELO_ML = "DRE Mercado Livre"
-
 TOKEN = re.compile(r"\s*([+-]?)\s*([A-Za-z0-9_]+)\s*")
 
 
-def _plano_padrao(plano=None):
+def _plano_padrao():
     """Lista achatada de dicts no formato do editor (grupo seguido das contas dele)."""
     out = []
-    for cod, nome, tipo, form, base, contas in plano or MODELO_PADRAO:
+    for cod, nome, tipo, form, base, contas in MODELO_PADRAO:
         out.append({"codigo": cod, "nome": nome, "tipo": tipo, "formula": form, "base_av": base,
                     "destaque": tipo == "TOTAL", "sinal": 0, "pai_codigo": None})
         out += [{"codigo": c, "nome": n, "tipo": "CONTA", "formula": "", "base_av": False, "destaque": False,
@@ -88,15 +54,6 @@ def criar_modelo_padrao(s, nome="DRE Padrão"):
     s.add(m)
     s.flush()
     gravar_linhas(s, m.id, _plano_padrao(), {})
-    return m
-
-
-def criar_modelo_mlivre(s, nome=NOME_MODELO_ML):
-    m = ModeloDRE(nome=nome, descricao="Receita fiscal da Domínio, custos do Mercado Livre (comissão, frete, "
-                                       "publicidade) e margem de contribuição.")
-    s.add(m)
-    s.flush()
-    gravar_linhas(s, m.id, _plano_padrao(MODELO_MLIVRE), {})
     return m
 
 
@@ -318,12 +275,6 @@ def valores_origem(s, empresa_id: int, ini: str, fim: str):
         for m, v in por_mes.items():
             vals[c.id][m] -= v  # custo: saída
     sem_categoria["sem_custo"] = sem_custo
-    import mlivre
-    for cod, por_mes in mlivre.valores(s, empresa_id, ini, fim).items():
-        c = por_cod.get(("MLIVRE", cod))
-        if c:
-            for m, v in por_mes.items():
-                vals[c.id][m] += v
     return contas, vals, sem_categoria
 
 
@@ -402,16 +353,6 @@ def calcular(s, empresa, ini: str, fim: str):
             avisos.append(f"A linha que recebe o {cod.replace('_', '/')} calculado também soma pagamentos do Bling ("
                           + ", ".join(juntos[:4]) + f"). {txt}: deixe essas categorias fora da DRE ou leve-as para outra "
                           "linha, senão o valor é contado duas vezes.")
-    ml_v = next((c for c in contas if c.origem == "MLIVRE" and c.codigo == "VENDAS" and c.linha_id and vals.get(c.id)), None)
-    nf_v = next((c for c in contas if c.origem == "DOMINIO" and c.codigo == "VENDAS" and c.linha_id and vals.get(c.id)), None)
-    if ml_v and nf_v:
-        avisos.append("As vendas do Mercado Livre (pedidos) e o faturamento das notas da Domínio estão os dois na DRE: as vendas "
-                      "do ML já têm nota fiscal, então a receita pode estar contada duas vezes. Use um dos dois como receita.")
-    linhas_ml = {c.linha_id for c in contas if c.origem == "MLIVRE" and c.linha_id and vals.get(c.id)}
-    juntos = sorted({c.descricao for c in contas if c.origem == "BLING" and c.linha_id in linhas_ml and vals.get(c.id)})
-    if juntos:
-        avisos.append("Linhas que recebem valores do Mercado Livre também somam categorias do Bling (" + ", ".join(juntos[:4])
-                      + "). Se essas categorias são as tarifas/repasses do próprio ML, deixe-as fora da DRE para não contar duas vezes.")
     if sem_cat.get("pis_sem_apuracao"):
         avisos.append("PIS/COFINS sem apuração na Domínio em " + ", ".join(f"{m[5:]}/{m[:4]}" for m in sem_cat["pis_sem_apuracao"])
                       + " (ficou zero nesses meses). Apure na Domínio e leia de novo, ou troque para alíquota no cadastro da empresa.")

@@ -1,14 +1,8 @@
-"""Mercado Livre — OAuth 2.0 por empresa, leitura de pedidos (vendas) e do faturamento (tarifas e bonificações).
+"""Mercado Livre — OAuth 2.0 por empresa, leitura de pedidos (com itens e frete) e do faturamento (tarifas e bonificações).
 
-Somente leitura. Um único aplicativo (Client ID / Secret Key nas Configurações) serve a todas as empresas;
-cada empresa autoriza com a própria conta de vendedor.
-
-O que vai para a DRE (contas de origem "MLIVRE"):
-  - VENDAS   pedidos pagos no mês (valor dos produtos, sem o frete pago pelo comprador)
-  - DEVOL    valores devolvidos ao comprador (reembolsos) dos pedidos do mês
-  - ML:CH:<tipo> / MP:CH:<tipo>  encargos do faturamento do mês (comissão CV, Mercado Envios CXD, Product Ads PADS...)
-  - ML:BO:<tipo> / MP:BO:<tipo>  bonificações do faturamento
-"""
+Módulo separado: os dados do Mercado Livre têm DRE e análises próprias (mlanalise.py) e não entram na DRE principal
+nem na associação de contas. Somente leitura. Um aplicativo (Configurações) serve a todas as empresas; cada empresa
+autoriza com a própria conta de vendedor."""
 import time
 import json
 import datetime as dt
@@ -17,7 +11,7 @@ import threading
 import httpx
 from sqlalchemy import select, delete
 
-from db import SessionLocal, Empresa, ContaOrigem, LinhaDRE, MLVenda, MLTarifa, Job, agora, FUSO
+from db import SessionLocal, Empresa, MLVenda, MLItem, MLTarifa, Job, agora, FUSO
 from seguranca import cifrar, decifrar, get_config
 
 AUTORIZAR = "https://auth.mercadolivre.com.br/authorization"
@@ -27,10 +21,6 @@ INTERVALO = 0.12
 _trava = threading.Lock()
 _ultima = [0.0]
 
-FIXAS = [("VENDAS", "Mercado Livre · Vendas (pedidos pagos)", "R"),
-         ("DEVOL", "Mercado Livre · Reembolsos ao comprador", "D")]
-# sugestão de linha do modelo "DRE Mercado Livre" por tipo de encargo
-SUGESTAO_TIPO = {"CV": "ML_COMISSAO", "CXD": "ML_FRETE", "PADS": "ML_ADS"}
 PAGO = {"approved", "refunded", "charged_back", "partially_refunded"}
 
 
@@ -163,15 +153,24 @@ def _num(v):
         return 0.0
 
 
-def venda(o: dict, empresa_id: int) -> MLVenda | None:
+def venda(o: dict, empresa_id: int):
+    """(MLVenda, [MLItem]) ou (None, [])."""
     d = _data_br(o.get("date_closed") or o.get("date_created"))
     if not d or not o.get("id"):
-        return None
+        return None, []
     itens = o.get("order_items") or []
     pagos = [p for p in o.get("payments") or [] if p.get("status") in PAGO]
     pago = sum(_num(p.get("transaction_amount")) for p in pagos)
     devolvido = sum(_num(p.get("transaction_amount_refunded")) for p in pagos)
     titulos = [str((it.get("item") or {}).get("title") or "") for it in itens]
+    lin = []
+    for it in itens:
+        item = it.get("item") or {}
+        lin.append(MLItem(empresa_id=empresa_id, order_id=int(o["id"]), anuncio=str(item.get("id") or "")[:30],
+                          sku=str(item.get("seller_sku") or item.get("seller_custom_field") or "").strip()[:80],
+                          titulo=str(item.get("title") or "")[:300], tipo_anuncio=str(it.get("listing_type_id") or "")[:30],
+                          qtd=_num(it.get("quantity") or 1), preco=round(_num(it.get("unit_price")), 2),
+                          tarifa=round(_num(it.get("sale_fee")), 2)))
     return MLVenda(empresa_id=empresa_id, order_id=int(o["id"]), pack_id=int(o["pack_id"]) if o.get("pack_id") else None,
                    data=d, status=str(o.get("status") or "")[:30], total=round(_num(o.get("total_amount")), 2),
                    pago=round(pago, 2), devolvido=round(devolvido, 2),
@@ -179,7 +178,7 @@ def venda(o: dict, empresa_id: int) -> MLVenda | None:
                    itens=int(sum(_num(it.get("quantity")) for it in itens)),
                    descricao=(" + ".join(t for t in titulos if t))[:300],
                    comprador=str((o.get("buyer") or {}).get("nickname") or "")[:120],
-                   shipping_id=int((o.get("shipping") or {}).get("id")) if (o.get("shipping") or {}).get("id") else None)
+                   shipping_id=int((o.get("shipping") or {}).get("id")) if (o.get("shipping") or {}).get("id") else None), lin
 
 
 def meses_entre(ini, fim):
@@ -237,66 +236,16 @@ def faturamento(cli: Cliente, mes: str):
     return out
 
 
-def codigo_tarifa(grupo, natureza, tipo):
-    return f"{grupo}:{'CH' if natureza == 'CHARGE' else 'BO'}:{tipo}"
-
-
-def garantir_contas(s, empresa_id: int):
-    tem = {c.codigo: c for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == empresa_id,
-                                                                    ContaOrigem.origem == "MLIVRE")).all()}
-    for cod, desc, tipo in FIXAS:
-        if cod not in tem:
-            s.add(ContaOrigem(empresa_id=empresa_id, origem="MLIVRE", codigo=cod, descricao=desc, tipo=tipo))
-    for g, nat, tipo, rot in s.execute(select(MLTarifa.grupo, MLTarifa.natureza, MLTarifa.tipo, MLTarifa.rotulo)
-                                       .where(MLTarifa.empresa_id == empresa_id).distinct()).all():
-        cod = codigo_tarifa(g, nat, tipo)
-        if cod in tem:
-            continue
-        nome = "Mercado Livre" if g == "ML" else "Mercado Pago"
-        c = ContaOrigem(empresa_id=empresa_id, origem="MLIVRE", codigo=cod, descricao=f"{nome} · {rot or tipo}",
-                        tipo="D" if nat == "CHARGE" else "R")
-        s.add(c)
-        tem[cod] = c
-
-
-def sugestao(codigo: str):
-    if codigo == "VENDAS":
-        return "RB_ML"
-    if codigo == "DEVOL":
-        return "ML_DEVOL"
-    partes = codigo.split(":")
-    if len(partes) == 3:
-        return "ML_BONUS" if partes[1] == "BO" else SUGESTAO_TIPO.get(partes[2], "ML_TARIFAS")
-    return None
-
-
-def aplicar_sugestoes(s, e: Empresa):
-    garantir_contas(s, e.id)
-    s.flush()
-    if not e.modelo_id:
-        return
-    linhas = {ln.codigo: ln.id for ln in s.scalars(select(LinhaDRE).where(LinhaDRE.modelo_id == e.modelo_id,
-                                                                          LinhaDRE.tipo == "CONTA")).all()}
-    for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == e.id, ContaOrigem.origem == "MLIVRE")).all():
-        sug = sugestao(c.codigo)
-        if not c.linha_id and sug in linhas:
-            c.linha_id = linhas[sug]
-
-
-def valores(s, empresa_id: int, ini: str, fim: str):
-    """{codigo: {mes: valor com sinal}} — vendas e bonificações +, reembolsos e encargos −."""
-    from collections import defaultdict
-    out = defaultdict(lambda: defaultdict(float))
-    d1, d2 = dt.date.fromisoformat(ini + "-01"), _fim_mes(fim)
-    for v in s.scalars(select(MLVenda).where(MLVenda.empresa_id == empresa_id, MLVenda.data >= d1, MLVenda.data <= d2)).all():
-        m = v.data.strftime("%Y-%m")
-        out["VENDAS"][m] += float(v.pago or 0)
-        out["DEVOL"][m] -= float(v.devolvido or 0)
-    for t in s.scalars(select(MLTarifa).where(MLTarifa.empresa_id == empresa_id, MLTarifa.periodo >= ini,
-                                              MLTarifa.periodo <= fim)).all():
-        sinal = -1 if t.natureza == "CHARGE" else 1
-        out[codigo_tarifa(t.grupo, t.natureza, t.tipo)][t.periodo] += sinal * abs(float(t.valor or 0))
-    return out
+def frete_vendedor(cli: Cliente, shipping_id: int, seller: int):
+    """Quanto o vendedor pagou pelo envio (custo do Mercado Envios para ele); None se não der para ler."""
+    r = cli.get(f"/shipments/{shipping_id}/costs", opcional=True)
+    if not r:
+        return None
+    total = 0.0
+    for x in r.get("senders") or []:
+        if not x.get("user_id") or int(x["user_id"]) == int(seller):
+            total += _num(x.get("cost"))
+    return round(total, 2)
 
 
 # ------------------------------------------------------------------ job
@@ -326,13 +275,27 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
             seller = int(cli.get("/users/me").get("id"))
         meses = meses_entre(ini, fim)
         d1, d2 = dt.date.fromisoformat(ini + "-01"), _fim_mes(fim)
-        vendas = {}
+        vendas, itens = {}, {}
         for n, mes in enumerate(meses, 1):
             andamento(f"Lendo pedidos de {mes[5:]}/{mes[:4]} ({len(vendas)} até agora)...", n, len(meses))
             for o in pedidos(cli, seller, dt.date.fromisoformat(mes + "-01"), _fim_mes(mes)):
-                v = venda(o, emp_id)
+                v, lin = venda(o, emp_id)
                 if v and d1 <= v.data <= d2:
                     vendas[v.order_id] = v
+                    itens[v.order_id] = lin
+        if p.get("frete", True):
+            por_envio = {}
+            for v in vendas.values():
+                if v.shipping_id and v.pago:
+                    por_envio.setdefault(v.shipping_id, []).append(v)
+            for n, (sid, vs) in enumerate(por_envio.items(), 1):
+                if n % 25 == 1:
+                    andamento(f"Lendo o frete de cada envio ({n} de {len(por_envio)})...", n, len(por_envio))
+                f = frete_vendedor(cli, sid, seller)
+                if f is not None:  # envio de um pacote com vários pedidos: rateia pelo valor
+                    base = sum(float(x.pago or 0) for x in vs) or len(vs)
+                    for x in vs:
+                        x.frete = round(f * (float(x.pago or 0) or 1) / base, 2)
         tarifas = []
         for n, mes in enumerate(meses, 1):
             andamento(f"Lendo o faturamento (tarifas) de {mes[5:]}/{mes[:4]}...", n, len(meses))
@@ -344,15 +307,23 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
             tarifas += [MLTarifa(empresa_id=emp_id, periodo=mes, grupo=g, natureza=nat, tipo=tipo, rotulo=rot,
                                  valor=round(v, 2), de=de, ate=ate) for (g, nat, tipo, rot), (v, de, ate) in agg.items()]
         with SessionLocal() as s:
+            antigos = select(MLVenda.order_id).where(MLVenda.empresa_id == emp_id, MLVenda.data >= d1, MLVenda.data <= d2)
+            s.execute(delete(MLItem).where(MLItem.empresa_id == emp_id, MLItem.order_id.in_(antigos)))
+            ids = list(vendas)
+            for k in range(0, len(ids), 5000):  # pedidos que mudaram de mês (data de fechamento) também são substituídos
+                lote = ids[k:k + 5000]
+                s.execute(delete(MLItem).where(MLItem.empresa_id == emp_id, MLItem.order_id.in_(lote)))
+                s.execute(delete(MLVenda).where(MLVenda.empresa_id == emp_id, MLVenda.order_id.in_(lote)))
             s.execute(delete(MLVenda).where(MLVenda.empresa_id == emp_id, MLVenda.data >= d1, MLVenda.data <= d2))
             s.execute(delete(MLTarifa).where(MLTarifa.empresa_id == emp_id, MLTarifa.periodo >= ini, MLTarifa.periodo <= fim))
             s.flush()
             s.add_all(vendas.values())
+            for lin in itens.values():
+                s.add_all(lin)
             s.add_all(tarifas)
             s.flush()
             emp = s.get(Empresa, emp_id)
             emp.ml_user_id = seller
-            aplicar_sugestoes(s, emp)
             emp.ml_sync_em = agora()
             emp.ml_sync_periodo = f"{ini} a {fim}"
             j = s.get(Job, job_id)

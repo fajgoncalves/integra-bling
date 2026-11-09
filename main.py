@@ -15,16 +15,17 @@ from sqlalchemy import select, func
 
 import db
 from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Movimento, DominioValor, DominioItem, Produto, ProdutoCusto, Job,
-                MLVenda, MLTarifa, Auditoria, agora, PERFIS, TIPOS_LINHA)
+                MLVenda, MLItem, MLTarifa, MLCusto, Auditoria, agora, PERFIS, TIPOS_LINHA)
 import bling
 import dominio
 import dre
 import fluxo
 import mlivre
+import mlanalise
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.9.2"
+VERSAO = "1.10.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -90,10 +91,13 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
-        if get_config(s, "migracao_modelo_ml") != "1":  # 1.9.0: modelo de DRE para o Mercado Livre
-            if not s.scalar(select(ModeloDRE).where(ModeloDRE.nome == dre.NOME_MODELO_ML)):
-                dre.criar_modelo_mlivre(s)
-            set_config(s, "migracao_modelo_ml", "1")
+        if get_config(s, "migracao_ml_separado") != "1":  # 1.10.0: Mercado Livre vira módulo separado da DRE principal
+            for c in s.scalars(select(ContaOrigem).where(ContaOrigem.origem == "MLIVRE")).all():
+                s.delete(c)
+            m = s.scalar(select(ModeloDRE).where(ModeloDRE.nome == "DRE Mercado Livre"))
+            if m and not s.scalar(select(func.count(Empresa.id)).where(Empresa.modelo_id == m.id)):
+                s.delete(m)
+            set_config(s, "migracao_ml_separado", "1")
         for j in s.scalars(select(Job).where(Job.status.in_(("PENDENTE", "EXECUTANDO")))).all():
             j.status, j.fim, j.mensagem = "ERRO", agora(), "Interrompido: o sistema foi reiniciado. Peça de novo."
         s.commit()
@@ -372,14 +376,13 @@ def _emp_json(s, e: Empresa):
             "dominio_sync_em": dt2s(e.dominio_sync_em), "dominio_sync_periodo": e.dominio_sync_periodo,
             "ml_conectado": bool(e.ml_refresh), "ml_conectado_em": dt2s(e.ml_conectado_em), "ml_apelido": e.ml_apelido,
             "ml_sync_em": dt2s(e.ml_sync_em), "ml_sync_periodo": e.ml_sync_periodo,
+            "ml_imposto_aliq": float(e.ml_imposto_aliq or 0),
             "contas": {o: {"total": t, "associadas": a} for o, t, a in contas},
             "ultimo_job": _job_json(job) if job else None}
 
 
 def _aplicar_sugestoes(s, e: Empresa):
     dominio.aplicar_sugestoes(s, e)
-    if e.ml_refresh or s.scalar(select(ContaOrigem.id).where(ContaOrigem.empresa_id == e.id, ContaOrigem.origem == "MLIVRE").limit(1)):
-        mlivre.aplicar_sugestoes(s, e)
 
 
 def _ler_empresa(b, e: Empresa, s):
@@ -561,21 +564,20 @@ def ml_callback(request: Request, code: str = "", state: str = "", error: str = 
                 s=Depends(get_db)):
     d = verificar(state)
     if not d:
-        return RedirectResponse("/#/empresas?ml=erro&msg=Autorização expirada. Tente de novo.")
+        return RedirectResponse("/#/ml?ml=erro&msg=Autorização expirada. Tente de novo.")
     e = s.get(Empresa, d["eid"])
     if not e:
-        return RedirectResponse("/#/empresas?ml=erro&msg=Empresa não encontrada")
+        return RedirectResponse("/#/ml?ml=erro&msg=Empresa não encontrada")
     if error or not code:
-        return RedirectResponse(f"/#/empresa/{e.id}?ml=erro&msg=" + (error_description or error or "Autorização negada"))
+        return RedirectResponse(f"/#/ml/{e.id}/conexao?ml=erro&msg=" + (error_description or error or "Autorização negada"))
     try:
         mlivre.trocar_codigo(s, e, code, base_url(request) + "/mlivre/callback")
-        mlivre.aplicar_sugestoes(s, e)
         u = s.get(Usuario, d.get("uid"))
         audit(s, u.email if u else "", "ML_CONECTA", f"{e.id} {e.nome} {e.ml_apelido}")
         s.commit()
     except Exception as ex:  # noqa: BLE001
-        return RedirectResponse(f"/#/empresa/{e.id}?ml=erro&msg=" + str(ex)[:200])
-    return RedirectResponse(f"/#/empresa/{e.id}?ml=ok")
+        return RedirectResponse(f"/#/ml/{e.id}/conexao?ml=erro&msg=" + str(ex)[:200])
+    return RedirectResponse(f"/#/ml/{e.id}/conexao?ml=ok")
 
 
 @app.post("/mlivre/notificacoes")
@@ -606,51 +608,222 @@ async def ml_sincronizar(eid: int, request: Request, u=Depends(usuario), s=Depen
         raise HTTPException(400, "O início é depois do fim.")
     if len(dre.meses_entre(ini, fim)) > 24:
         raise HTTPException(400, "Período máximo de 24 meses por vez.")
-    return _iniciar_job(s, e, "ml_sync", {"inicio": ini, "fim": fim}, u, mlivre.sincronizar)
+    return _iniciar_job(s, e, "ml_sync", {"inicio": ini, "fim": fim, "frete": b.get("frete", True) is not False}, u,
+                        mlivre.sincronizar)
 
 
-def _ml_venda_json(v: MLVenda):
-    return {"order_id": v.order_id, "pack_id": v.pack_id, "data": v.data.isoformat(), "status": v.status,
-            "descricao": v.descricao, "comprador": v.comprador, "itens": v.itens, "total": float(v.total or 0),
-            "pago": float(v.pago or 0), "devolvido": float(v.devolvido or 0), "comissao": float(v.comissao or 0),
-            "liquido": round(float(v.pago or 0) - float(v.devolvido or 0) - float(v.comissao or 0), 2)}
+def _ml_emp(s, eid):
+    return s.get(Empresa, eid) or _404()
+
+
+def _periodo_ml(inicio, fim):
+    _mes_ok(inicio, "Início")
+    _mes_ok(fim, "Fim")
+    if inicio > fim:
+        raise HTTPException(400, "O início é depois do fim.")
+    if len(dre.meses_entre(inicio, fim)) > 36:
+        raise HTTPException(400, "Período máximo de 36 meses.")
+
+
+@app.get("/api/ml/empresas")
+def ml_empresas(_u=Depends(usuario), s=Depends(get_db)):
+    out = []
+    for e in s.scalars(select(Empresa).where(Empresa.ativo == True).order_by(Empresa.nome)).all():  # noqa: E712
+        out.append({"id": e.id, "nome": e.nome, "cnpj": e.cnpj, "ml_conectado": bool(e.ml_refresh), "ml_apelido": e.ml_apelido,
+                    "ml_sync_em": dt2s(e.ml_sync_em), "ml_sync_periodo": e.ml_sync_periodo,
+            "ml_imposto_aliq": float(e.ml_imposto_aliq or 0),
+                    "pedidos": s.scalar(select(func.count(MLVenda.id)).where(MLVenda.empresa_id == e.id)) or 0})
+    return out
+
+
+@app.put("/api/empresas/{eid}/mlivre/config")
+async def ml_config(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    b = await request.json()
+    if "imposto" in b:
+        v = _num_br(b["imposto"])
+        if v is None or v < 0 or v > 60:
+            raise HTTPException(400, "Alíquota de impostos inválida (0 a 60%).")
+        e.ml_imposto_aliq = v
+    audit(s, u.email, "ML_CONFIG", f"{e.id} imposto={e.ml_imposto_aliq}")
+    s.commit()
+    return _emp_json(s, e)
+
+
+@app.get("/api/empresas/{eid}/mlivre/dre")
+def ml_dre(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    _periodo_ml(inicio, fim)
+    return {"empresa": _emp_json(s, e), **mlanalise.dre(s, e, inicio, fim)}
+
+
+@app.get("/api/empresas/{eid}/mlivre/dre.xlsx")
+def ml_dre_xlsx(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    e = _ml_emp(s, eid)
+    _periodo_ml(inicio, fim)
+    d = mlanalise.dre(s, e, inicio, fim)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "DRE Mercado Livre"
+    ws.append([f"DRE Mercado Livre — {e.nome}"])
+    ws["A1"].font = Font(bold=True, size=13)
+    ws.append([f"{inicio[5:]}/{inicio[:4]} a {fim[5:]}/{fim[:4]}"])
+    ws.append([])
+    ws.append(["Linha"] + [f"{m[5:]}/{m[:4]}" for m in d["meses"]] + ["Total", "% vendas"])
+    for c in ws[4]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="0F3D5E")
+    for ln in d["linhas"]:
+        ws.append([("    " if ln["grupo"] else "") + ln["nome"]] + ln["valores"] + [ln["total"], (ln["av_total"] or 0) / 100])
+        r = ws.max_row
+        for c in ws[r][1:]:
+            c.number_format = "#,##0.00;[Red]-#,##0.00"
+        ws.cell(r, ws.max_column).number_format = "0.0%"
+        if ln["tipo"] != "CONTA":
+            for c in ws[r]:
+                c.font = Font(bold=True)
+    ws.column_dimensions["A"].width = 52
+    for a in d["avisos"]:
+        ws.append([])
+        ws.append([a])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    nome = re.sub(r"[^A-Za-z0-9_-]+", "_", e.nome)[:40]
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="DRE_ML_{nome}_{inicio}_{fim}.xlsx"'})
+
+
+@app.get("/api/empresas/{eid}/mlivre/produtos")
+def ml_produtos(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    _periodo_ml(inicio, fim)
+    return {"empresa": _emp_json(s, e), "itens": mlanalise.produtos(s, e, inicio, fim)}
 
 
 @app.get("/api/empresas/{eid}/mlivre/vendas")
 def ml_vendas(eid: int, inicio: str, fim: str, q: str = "", _u=Depends(usuario), s=Depends(get_db)):
-    """Pedidos do período com comissão e líquido, resumo por mês e as tarifas do faturamento."""
-    e = s.get(Empresa, eid) or _404()
-    _mes_ok(inicio, "Início")
-    _mes_ok(fim, "Fim")
+    """Pedidos pagos do período com o resultado de cada um (impostos, tarifa, frete, custo e margem)."""
+    e = _ml_emp(s, eid)
+    _periodo_ml(inicio, fim)
     d1, d2 = dre.periodo_datas(inicio, fim)
-    vendas = s.scalars(select(MLVenda).where(MLVenda.empresa_id == e.id, MLVenda.data >= d1, MLVenda.data <= d2)
-                       .order_by(MLVenda.data, MLVenda.order_id)).all()
-    resumo = {}
-    for v in vendas:
-        r = resumo.setdefault(v.data.strftime("%Y-%m"), {"pedidos": 0, "pagos": 0, "vendas": 0.0, "devolvido": 0.0,
-                                                          "comissao_pedidos": 0.0, "encargos": 0.0, "bonus": 0.0})
-        r["pedidos"] += 1
-        r["pagos"] += bool(v.pago)
-        r["vendas"] += float(v.pago or 0)
-        r["devolvido"] += float(v.devolvido or 0)
-        r["comissao_pedidos"] += float(v.comissao or 0) if v.pago else 0
-    tarifas = s.scalars(select(MLTarifa).where(MLTarifa.empresa_id == e.id, MLTarifa.periodo >= inicio,
-                                               MLTarifa.periodo <= fim).order_by(MLTarifa.periodo, MLTarifa.natureza,
-                                                                                  MLTarifa.valor.desc())).all()
-    for t in tarifas:
-        r = resumo.setdefault(t.periodo, {"pedidos": 0, "pagos": 0, "vendas": 0.0, "devolvido": 0.0,
-                                          "comissao_pedidos": 0.0, "encargos": 0.0, "bonus": 0.0})
-        r["encargos" if t.natureza == "CHARGE" else "bonus"] += abs(float(t.valor or 0))
-    meses = [{"mes": m, **{k: round(v, 2) if isinstance(v, float) else v for k, v in r.items()},
-              "liquido": round(r["vendas"] - r["devolvido"] - r["encargos"] + r["bonus"], 2)} for m, r in sorted(resumo.items())]
-    if q:
-        t = q.strip().lower()
-        vendas = [v for v in vendas if t in str(v.order_id) or t in (v.descricao or "").lower() or t in (v.comprador or "").lower()]
-    return {"empresa": _emp_json(s, e), "meses": meses, "total_pedidos": len(vendas),
-            "vendas": [_ml_venda_json(v) for v in vendas[-3000:]],
-            "tarifas": [{"periodo": t.periodo, "grupo": t.grupo, "natureza": t.natureza, "tipo": t.tipo, "rotulo": t.rotulo,
-                         "valor": float(t.valor or 0), "de": t.de.isoformat() if t.de else None,
-                         "ate": t.ate.isoformat() if t.ate else None} for t in tarifas]}
+    nao_pagos = s.scalar(select(func.count(MLVenda.id)).where(MLVenda.empresa_id == e.id, MLVenda.data >= d1,
+                                                              MLVenda.data <= d2, MLVenda.pago <= 0)) or 0
+    out = []
+    t = q.strip().lower()
+    for v, its, r in mlanalise.pedidos(s, e, inicio, fim):
+        if t and not (t in str(v.order_id) or t in (v.descricao or "").lower() or t in (v.comprador or "").lower()
+                      or any(t in (i.sku or "").lower() for i in its)):
+            continue
+        out.append({"order_id": v.order_id, "pack_id": v.pack_id, "data": v.data.isoformat(), "status": v.status,
+                    "descricao": v.descricao, "comprador": v.comprador, "itens": v.itens,
+                    "sku": ", ".join(sorted({i.sku for i in its if i.sku})),
+                    **{k: round(r[k], 2) for k in ("vendas", "devolvido", "imposto", "tarifa", "frete", "cmv", "margem")},
+                    "frete_lido": r["frete_lido"], "sem_custo": bool(r["sem_custo"])})
+    return {"total_pedidos": len(out), "nao_pagos": nao_pagos, "vendas": out[-3000:]}
+
+
+@app.get("/api/empresas/{eid}/mlivre/tarifas")
+def ml_tarifas(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    _periodo_ml(inicio, fim)
+    ts = s.scalars(select(MLTarifa).where(MLTarifa.empresa_id == e.id, MLTarifa.periodo >= inicio, MLTarifa.periodo <= fim)
+                   .order_by(MLTarifa.periodo, MLTarifa.natureza, MLTarifa.valor.desc())).all()
+    nomes = {c: n for c, n, *_ in mlanalise.LINHAS}
+    return [{"periodo": t.periodo, "grupo": t.grupo, "natureza": t.natureza, "tipo": t.tipo, "rotulo": t.rotulo,
+             "linha": nomes[mlanalise.linha_tarifa(t)],
+             "valor": abs(float(t.valor or 0)) * (-1 if t.natureza == "CHARGE" else 1),
+             "de": t.de.isoformat() if t.de else None, "ate": t.ate.isoformat() if t.ate else None} for t in ts]
+
+
+@app.get("/api/empresas/{eid}/mlivre/custos")
+def ml_custos(eid: int, vigencia: str = "", _u=Depends(usuario), s=Depends(get_db)):
+    """Produtos já vendidos no ML (por SKU ou anúncio) com o custo vigente no mês `vigencia` (padrão: mês atual)."""
+    e = _ml_emp(s, eid)
+    mes = _mes_ok(vigencia, "Vigência") if vigencia else agora().strftime("%Y-%m")
+    vig = mlanalise.vigencias(s, e.id)
+    prods = {}
+    pagos = select(MLVenda.order_id).where(MLVenda.empresa_id == e.id, MLVenda.pago > 0)
+    for it in s.scalars(select(MLItem).where(MLItem.empresa_id == e.id, MLItem.order_id.in_(pagos))).all():
+        k = mlanalise.chave(it)
+        x = prods.setdefault(k, {"chave": k, "sku": it.sku, "anuncio": it.anuncio, "titulo": it.titulo, "qtd": 0.0, "vendas": 0.0})
+        x["qtd"] += float(it.qtd or 0)
+        x["vendas"] += float(it.qtd or 0) * float(it.preco or 0)
+    for k in vig:
+        prods.setdefault(k, {"chave": k, "sku": k, "anuncio": "", "titulo": "", "qtd": 0.0, "vendas": 0.0})
+    out = []
+    for x in prods.values():
+        x["custo"] = mlanalise.custo_no_mes(vig, x["chave"], mes)
+        x["vigencias"] = len(vig.get(x["chave"], []))
+        x["vendas"] = round(x["vendas"], 2)
+        x["preco_medio"] = round(x["vendas"] / x["qtd"], 2) if x["qtd"] else None
+        out.append(x)
+    out.sort(key=lambda x: (x["custo"] is not None, -x["vendas"]))
+    return {"vigencia": mes, "itens": out}
+
+
+@app.put("/api/empresas/{eid}/mlivre/custos")
+async def ml_custo_salvar(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    b = await request.json()
+    k = str(b.get("chave") or "").strip()[:80]
+    mes = _mes_ok(b.get("vigencia"), "Vigência")
+    v = _num_br(b.get("custo"))
+    if not k:
+        raise HTTPException(400, "Produto não informado.")
+    if v is None or v < 0:
+        raise HTTPException(400, "Custo inválido.")
+    c = s.scalar(select(MLCusto).where(MLCusto.empresa_id == e.id, MLCusto.chave == k, MLCusto.mes_inicio == mes))
+    if not c:
+        c = MLCusto(empresa_id=e.id, chave=k, mes_inicio=mes)
+        s.add(c)
+    c.custo, c.criado_por = v, u.email
+    audit(s, u.email, "ML_CUSTO", f"{e.id} {k} {mes} {v}")
+    s.commit()
+    return {"ok": True, "chave": k, "custo": v, "vigencia": mes}
+
+
+@app.get("/api/empresas/{eid}/mlivre/custos/historico")
+def ml_custo_historico(eid: int, chave: str, _u=Depends(usuario), s=Depends(get_db)):
+    return [{"id": c.id, "vigencia": c.mes_inicio, "custo": float(c.custo), "por": c.criado_por, "em": dt2s(c.criado_em)}
+            for c in s.scalars(select(MLCusto).where(MLCusto.empresa_id == eid, MLCusto.chave == chave)
+                               .order_by(MLCusto.mes_inicio.desc())).all()]
+
+
+@app.delete("/api/empresas/{eid}/mlivre/custos/{cid}")
+def ml_custo_excluir(eid: int, cid: int, u=Depends(usuario), s=Depends(get_db)):
+    c = s.get(MLCusto, cid)
+    if not c or c.empresa_id != eid:
+        _404()
+    audit(s, u.email, "ML_CUSTO_EXCLUI", f"{eid} {c.chave} {c.mes_inicio}")
+    s.delete(c)
+    s.commit()
+    return {"ok": True}
+
+
+@app.post("/api/empresas/{eid}/mlivre/custos/copiar")
+async def ml_custo_copiar(eid: int, request: Request, u=Depends(usuario), s=Depends(get_db)):
+    """Preenche os produtos sem custo com o custo da aba Custo dos produtos (Domínio), casando o SKU com o código do produto.
+    Só copia: depois disso os custos do módulo do ML são independentes."""
+    e = _ml_emp(s, eid)
+    b = await request.json()
+    mes = _mes_ok(b.get("vigencia"), "Vigência")
+    vig_ml = mlanalise.vigencias(s, e.id)
+    cad, vig_d = {}, dominio.vigencias(s, e.id)
+    for p in s.scalars(select(Produto).where(Produto.empresa_id == e.id)).all():
+        c = dominio.custo_no_mes(vig_d.get(p.produto), mes)
+        if c is not None and p.codigo:
+            cad[str(p.codigo).strip().lower()] = c
+    n = 0
+    for k in {mlanalise.chave(it) for it in s.scalars(select(MLItem).where(MLItem.empresa_id == e.id)).all()}:
+        if mlanalise.custo_no_mes(vig_ml, k, mes) is None and k.strip().lower() in cad:
+            s.add(MLCusto(empresa_id=e.id, chave=k, mes_inicio=mes, custo=cad[k.strip().lower()], criado_por=u.email))
+            n += 1
+    audit(s, u.email, "ML_CUSTO_COPIA", f"{e.id} {mes}: {n}")
+    s.commit()
+    return {"ok": True, "copiados": n}
 
 
 @app.post("/api/empresas/{eid}/dominio/importar")
@@ -787,30 +960,6 @@ def conta_detalhe(cid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depend
     c = s.get(ContaOrigem, cid) or _404()
     _mes_ok(inicio, "Início")
     _mes_ok(fim, "Fim")
-    if c.origem == "MLIVRE":
-        info = {"id": c.id, "origem": c.origem, "descricao": c.descricao}
-        d_ini, d_fim = dre.periodo_datas(inicio, fim)
-        if c.codigo in ("VENDAS", "DEVOL"):
-            vs = s.scalars(select(MLVenda).where(MLVenda.empresa_id == c.empresa_id, MLVenda.data >= d_ini, MLVenda.data <= d_fim,
-                                                 (MLVenda.pago > 0) if c.codigo == "VENDAS" else (MLVenda.devolvido > 0))
-                           .order_by(MLVenda.data, MLVenda.order_id)).all()
-            itens = [_ml_venda_json(v) for v in vs]
-            tot = sum(v["pago"] for v in itens) if c.codigo == "VENDAS" else -sum(v["devolvido"] for v in itens)
-            return {"conta": info, "tipo": "ml_pedidos", "itens": itens[-3000:], "total": round(tot, 2), "qtd": len(itens)}
-        g, nat, tipo = c.codigo.split(":")
-        ts = s.scalars(select(MLTarifa).where(MLTarifa.empresa_id == c.empresa_id, MLTarifa.periodo >= inicio, MLTarifa.periodo <= fim,
-                                              MLTarifa.grupo == g, MLTarifa.natureza == ("CHARGE" if nat == "CH" else "BONUS"),
-                                              MLTarifa.tipo == tipo).order_by(MLTarifa.periodo)).all()
-        sinal = -1 if nat == "CH" else 1
-        itens = [{"periodo": t.periodo, "rotulo": t.rotulo, "tipo": t.tipo, "de": t.de.isoformat() if t.de else None,
-                  "ate": t.ate.isoformat() if t.ate else None, "valor": sinal * abs(float(t.valor or 0))} for t in ts]
-        pedidos_ = []
-        if tipo == "CV":  # comissão: mostra a tarifa de cada pedido pago
-            pedidos_ = [_ml_venda_json(v) for v in s.scalars(select(MLVenda).where(
-                MLVenda.empresa_id == c.empresa_id, MLVenda.data >= d_ini, MLVenda.data <= d_fim, MLVenda.pago > 0)
-                .order_by(MLVenda.data, MLVenda.order_id)).all()][-3000:]
-        return {"conta": info, "tipo": "ml_tarifa", "itens": itens, "pedidos": pedidos_,
-                "total": round(sum(x["valor"] for x in itens), 2)}
     if c.origem == "BLING":
         d_ini, d_fim = dre.periodo_datas(inicio, fim)
         itens = [{"id_bling": x.id_externo, "data": x.data.isoformat(), "tipo": "Entrada" if x.deb_cred == "C" else "Saída",
@@ -1202,8 +1351,6 @@ async def modelo_novo(request: Request, u=Depends(usuario), s=Depends(get_db)):
                                     {"codigo": "DESPESAS", "nome": "(-) Despesas", "tipo": "GRUPO"},
                                     {"codigo": "RESULTADO", "nome": "(=) Resultado", "tipo": "TOTAL",
                                      "formula": "RECEITAS + DESPESAS", "base_av": False}], {})
-    elif b.get("mlivre"):
-        m = dre.criar_modelo_mlivre(s, nome)
     else:
         m = dre.criar_modelo_padrao(s, nome)
     audit(s, u.email, "MODELO_NOVO", nome)

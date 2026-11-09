@@ -11,7 +11,7 @@ const mesBR = (m) => m ? `${m.slice(5, 7)}/${m.slice(0, 4)}` : "";
 const dataBR = (d) => d ? `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}` : "";
 const dataHora = (d) => d ? `${dataBR(d)} ${d.slice(11, 16)}` : "—";
 const cnpjFmt = (c) => !c ? "" : c.length === 14 ? c.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5") : c.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, "$1.$2.$3-$4");
-const ORIGEM = { BLING: '<span class="badge b-bling">Bling</span>', DOMINIO: '<span class="badge b-dom">Domínio</span>', MLIVRE: '<span class="badge b-ml">Mercado Livre</span>' };
+const ORIGEM = { BLING: '<span class="badge b-bling">Bling</span>', DOMINIO: '<span class="badge b-dom">Domínio</span>' };
 const TIPO = { R: "Receita", D: "Despesa", RD: "Receita e despesa" };
 let EU = null;
 let VERSAO_TELA = null;
@@ -85,7 +85,7 @@ function seletorPeriodo(aoMudar) {
 
 // ------------------------------------------------------------------ estrutura
 function casca(ativo, corpo) {
-  const it = [["empresas", "Empresas"], ["modelos", "Modelos de DRE"]];
+  const it = [["empresas", "Empresas"], ["modelos", "Modelos de DRE"], ["ml", "Mercado Livre"]];
   if (EU && EU.perfil === "ADMIN") it.push(["config", "Configurações"]);
   $("#app").innerHTML = `<div class="layout">
     <nav class="lateral">
@@ -144,7 +144,7 @@ async function telaEmpresas() {
       <div class="linha" style="margin-top:10px">
         ${e.bling_conectado ? '<span class="badge b-ok">Bling conectado</span>' : '<span class="badge b-aviso">Bling não conectado</span>'}
         ${e.dominio_sync_em ? '<span class="badge b-dom">Domínio lida</span>' : ""}
-        ${e.ml_conectado ? '<span class="badge b-ml">Mercado Livre</span>' : ""}
+        
         <span class="badge">${b.associadas}/${b.total} categorias associadas</span>
       </div>
       ${e.ultimo_job ? `<div class="suave peq" style="margin-top:8px">${statusJob(e.ultimo_job)} ${esc(e.ultimo_job.mensagem).slice(0, 120)}</div>` : ""}
@@ -217,7 +217,7 @@ let pollJobs = null;
 async function telaEmpresa(id, aba, params) {
   clearInterval(pollJobs);
   const e = await api(`/api/empresas/${id}`);
-  const abas = [["conexoes", "Conexões e dados"], ["associacao", "Associação de contas"], ["custos", "Custo dos produtos"], ["mlivre", "Mercado Livre"], ["dre", "DRE"], ["fluxo", "Fluxo de caixa"]];
+  const abas = [["conexoes", "Conexões e dados"], ["associacao", "Associação de contas"], ["custos", "Custo dos produtos"], ["dre", "DRE"], ["fluxo", "Fluxo de caixa"]];
   casca("empresas", `<div class="topo"><div><a href="#/empresas" class="peq">← Empresas</a><h1>${esc(e.nome)}</h1>
       <div class="suave">${cnpjFmt(e.cnpj) || "sem CNPJ"} · Domínio ${esc(e.codigo_dominio || "—")} · Modelo: ${esc(e.modelo_nome || "—")}</div></div>
       <button class="btn" id="editar">Editar empresa</button></div>
@@ -226,9 +226,6 @@ async function telaEmpresa(id, aba, params) {
   $("#editar").onclick = () => formEmpresa(e);
   if (params.get("bling") === "ok") toast("Bling conectado. Agora atualize os dados do período.");
   if (params.get("bling") === "erro") toast(`Bling: ${params.get("msg") || "não foi possível conectar"}`, true);
-  if (params.get("ml") === "ok") toast("Mercado Livre conectado. Agora atualize os dados do período.");
-  if (params.get("ml") === "erro") toast(`Mercado Livre: ${params.get("msg") || "não foi possível conectar"}`, true);
-  if (aba === "mlivre") return abaMLivre(e);
   if (aba === "associacao") return abaAssociacao(e);
   if (aba === "dre") return abaDre(e);
   if (aba === "custos") return abaCustos(e);
@@ -257,16 +254,6 @@ function abaConexoes(e) {
       <div class="linha" style="margin-top:12px"><button class="btn pri" id="d-imp">Ler da Domínio</button></div>
       ${!e.cnpj && !e.codigo_dominio ? '<div class="aviso peq" style="margin-top:10px">Informe o CNPJ ou o código da Domínio no cadastro.</div>' : ""}
     </div>
-    <div class="card"><h2>Mercado Livre</h2>
-      ${e.ml_conectado ? `<div class="linha"><span class="badge b-ok">Conectado</span><span class="suave peq">${esc(e.ml_apelido || "")} · desde ${dataHora(e.ml_conectado_em)}</span></div>`
-        : `<div class="aviso">Ainda não conectada. Clique em <b>Conectar Mercado Livre</b> e entre com a conta de vendedor desta empresa para autorizar a leitura.</div>`}
-      <div class="suave peq" style="margin:10px 0">Última atualização: ${e.ml_sync_em ? `${dataHora(e.ml_sync_em)} (${esc(e.ml_sync_periodo)})` : "nunca"}</div>
-      <div class="linha"><label>De <input type="month" id="m-ini" value="${p.inicio}"></label><label>Até <input type="month" id="m-fim" value="${p.fim}"></label></div>
-      <div class="linha" style="margin-top:12px">
-        <button class="btn ${e.ml_conectado ? "" : "pri"}" id="m-con">${e.ml_conectado ? "Reconectar" : "Conectar Mercado Livre"}</button>
-        <button class="btn pri" id="m-sync" ${e.ml_conectado ? "" : "disabled"}>Atualizar do Mercado Livre</button>
-        ${e.ml_conectado ? '<button class="btn perigo peq" id="m-des">Desconectar</button>' : ""}</div>
-      <div class="suave peq" style="margin-top:10px">Lê os <b>pedidos</b> (valor pago, reembolsos e a tarifa de venda de cada um) e o <b>faturamento</b> do Mercado Livre e do Mercado Pago de cada mês (comissões, Mercado Envios, Product Ads, bonificações). Somente leitura.</div>
     </div></div>
     <div class="card"><h2>Atividades</h2><div id="jobs" class="suave">Carregando...</div></div>`;
   $("#b-con").onclick = (ev) => tentar(async () => { const r = await api(`/api/empresas/${e.id}/bling/conectar`, { method: "POST" }); location.href = r.url; }, ev.target);
@@ -283,64 +270,7 @@ function abaConexoes(e) {
     await api(`/api/empresas/${e.id}/dominio/importar`, { method: "POST", body: { inicio: $("#d-ini").value, fim: $("#d-fim").value } });
     toast("Pedido enviado à Central 360."); carregarJobs(e.id);
   }, ev.target);
-  $("#m-con").onclick = (ev) => tentar(async () => { const r = await api(`/api/empresas/${e.id}/mlivre/conectar`, { method: "POST" }); location.href = r.url; }, ev.target);
-  if ($("#m-des")) $("#m-des").onclick = (ev) => tentar(async () => {
-    if (!confirm("Desconectar esta empresa do Mercado Livre? Os dados já copiados continuam.")) return;
-    await api(`/api/empresas/${e.id}/mlivre/desconectar`, { method: "POST" }); rota();
-  }, ev.target);
-  $("#m-sync").onclick = (ev) => tentar(async () => {
-    await api(`/api/empresas/${e.id}/mlivre/sincronizar`, { method: "POST", body: { inicio: $("#m-ini").value, fim: $("#m-fim").value } });
-    toast("Atualização do Mercado Livre iniciada."); carregarJobs(e.id);
-  }, ev.target);
   carregarJobs(e.id);
-}
-
-// ------------------------------------------------------------------ Mercado Livre (pedidos e tarifas)
-async function abaMLivre(e) {
-  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
-    <input id="ml-q" placeholder="Pedido, produto ou comprador..." style="min-width:240px"></div>
-    <div id="ml-corpo" style="margin-top:12px" class="suave">Carregando...</div></div>`;
-  let r = null;
-  const ST = { paid: "pago", cancelled: "cancelado", confirmed: "confirmado", payment_required: "aguardando pagamento", payment_in_process: "pagamento em análise", partially_refunded: "reembolso parcial" };
-  const carregar = async () => {
-    const p = periodo();
-    r = await api(`/api/empresas/${e.id}/mlivre/vendas?inicio=${p.inicio}&fim=${p.fim}&q=${encodeURIComponent($("#ml-q").value)}`);
-    desenhar();
-  };
-  const desenhar = () => {
-    const c = $("#ml-corpo");
-    if (!r.meses.length) {
-      c.innerHTML = `<div class="vazio">${e.ml_conectado ? "Nada lido no período. Atualize na aba Conexões e dados." : "Conecte a empresa ao Mercado Livre na aba Conexões e dados."}</div>`;
-      return;
-    }
-    const tot = r.meses.reduce((a, m) => { for (const k of ["pedidos", "pagos", "vendas", "devolvido", "comissao_pedidos", "encargos", "bonus", "liquido"]) a[k] = (a[k] || 0) + m[k]; return a; }, {});
-    c.innerHTML = `<div class="kpi"><div>Vendas pagas<b>R$ ${brl(tot.vendas)}</b></div><div>Reembolsos<b class="neg">R$ ${brl(-tot.devolvido)}</b></div>
-      <div>Encargos do faturamento<b class="neg">R$ ${brl(-tot.encargos)}</b></div><div>Bonificações<b>R$ ${brl(tot.bonus)}</b></div>
-      <div>Líquido<b>R$ ${brl(tot.liquido)}</b></div><div>Custo ML / vendas<b>${tot.vendas ? pct((tot.encargos - tot.bonus) / tot.vendas * 100) : "—"}</b></div></div>
-    <h3>Por mês</h3><div class="rolagem"><table><tr><th>Mês</th><th class="num">Pedidos</th><th class="num">Pagos</th><th class="num">Vendas pagas</th><th class="num">Reembolsos</th>
-      <th class="num">Tarifa nos pedidos</th><th class="num">Encargos (faturamento)</th><th class="num">Bonificações</th><th class="num">Líquido</th></tr>
-      ${r.meses.map((m) => `<tr><td>${mesBR(m.mes)}</td><td class="num">${m.pedidos}</td><td class="num">${m.pagos}</td><td class="num">${brl(m.vendas)}</td>
-        <td class="num neg">${brl(-m.devolvido)}</td><td class="num suave">${brl(-m.comissao_pedidos)}</td><td class="num neg">${brl(-m.encargos)}</td>
-        <td class="num">${brl(m.bonus)}</td><td class="num"><b>${brl(m.liquido)}</b></td></tr>`).join("")}</table></div>
-    <div class="suave peq" style="margin:6px 0 14px">“Tarifa nos pedidos” é a comissão informada em cada pedido (conferência); a DRE usa os encargos do faturamento oficial do mês. O período de faturamento do Mercado Livre pode não fechar exatamente no último dia do mês.</div>
-    <details><summary><b>Encargos e bonificações do faturamento</b> (${r.tarifas.length})</summary>
-      <div class="rolagem" style="max-height:40vh"><table><tr><th>Mês</th><th>Origem</th><th>Tipo</th><th>Descrição</th><th class="num">Valor</th></tr>
-      ${r.tarifas.map((t) => `<tr><td>${mesBR(t.periodo)}</td><td>${t.grupo === "ML" ? "Mercado Livre" : "Mercado Pago"}</td><td class="mono peq">${esc(t.tipo)}</td>
-        <td>${esc(t.rotulo)}</td><td class="num ${t.natureza === "CHARGE" ? "neg" : ""}">${brl(t.natureza === "CHARGE" ? -Math.abs(t.valor) : Math.abs(t.valor))}</td></tr>`).join("")}</table></div></details>
-    <h3 style="margin-top:16px">Pedidos (${r.total_pedidos})</h3>${tabelaPedidos(r.vendas, ST)}`;
-  };
-  let t = null;
-  $("#ml-q").oninput = () => { clearTimeout(t); t = setTimeout(() => tentar(carregar), 400); };
-  await tentar(carregar);
-}
-
-function tabelaPedidos(vs, ST = {}) {
-  return `<div class="rolagem" style="max-height:55vh"><table><tr><th>Data</th><th>Pedido</th><th>Produto</th><th>Comprador</th><th>Situação</th>
-    <th class="num">Pago</th><th class="num">Reembolso</th><th class="num">Tarifa de venda</th><th class="num">Líquido</th></tr>
-    ${vs.map((v) => `<tr><td>${dataBR(v.data)}</td><td class="mono peq">${v.order_id}${v.pack_id ? `<div class="suave">pacote ${v.pack_id}</div>` : ""}</td>
-      <td class="peq">${esc(v.descricao)}${v.itens > 1 ? ` <span class="suave">(${v.itens} un)</span>` : ""}</td><td class="peq">${esc(v.comprador)}</td>
-      <td class="peq">${esc(ST[v.status] || v.status)}</td><td class="num">${brl(v.pago)}</td><td class="num ${v.devolvido ? "neg" : "suave"}">${v.devolvido ? brl(-v.devolvido) : "—"}</td>
-      <td class="num neg">${brl(-v.comissao)}</td><td class="num"><b>${brl(v.liquido)}</b></td></tr>`).join("") || '<tr><td colspan="9" class="vazio">Nenhum pedido.</td></tr>'}</table></div>`;
 }
 
 async function carregarJobs(eid) {
@@ -368,7 +298,7 @@ async function abaAssociacao(e) {
       <div class="linha"><button class="btn" id="copiar">Copiar associações de outra empresa</button></div></div>
     <div class="linha" style="margin-top:12px">
       <input id="f-q" placeholder="Buscar conta..." style="flex:1;min-width:180px">
-      <select id="f-o"><option value="">Todas as origens</option><option value="BLING">Só Bling</option><option value="DOMINIO">Só Domínio</option><option value="MLIVRE">Só Mercado Livre</option></select>
+      <select id="f-o"><option value="">Todas as origens</option><option value="BLING">Só Bling</option><option value="DOMINIO">Só Domínio</option></select>
       <label class="chk"><input type="checkbox" id="f-p"> Só sem associação</label></div>
     <div id="resumo" class="suave peq" style="margin:10px 0"></div>
     <div class="rolagem"><table id="tab"></table></div></div>`;
@@ -437,7 +367,7 @@ async function abaAssociacao(e) {
 
 async function consultarConta(c, e) {
   const p = periodo();
-  const m = modal(`<div class="linha entre"><div><h2 style="margin:0">${esc(c.nome)}</h2><div class="suave peq">${ORIGEM[c.origem]} ${mesBR(p.inicio)} a ${mesBR(p.fim)} · ${{ BLING: "caixa e bancos (pagos e recebidos)", MLIVRE: "pedidos e faturamento do Mercado Livre" }[c.origem] || "notas fiscais"}</div></div>
+  const m = modal(`<div class="linha entre"><div><h2 style="margin:0">${esc(c.nome)}</h2><div class="suave peq">${ORIGEM[c.origem]} ${mesBR(p.inicio)} a ${mesBR(p.fim)} · ${c.origem === "BLING" ? "caixa e bancos (pagos e recebidos)" : "notas fiscais"}</div></div>
     <div class="linha">${c.origem === "BLING" && e ? '<button class="btn" id="cs-sync">Atualizar do Bling</button>' : ""}<button class="btn" data-fechar>Fechar</button></div></div>
     <div id="cs-corpo" style="margin-top:12px" class="suave">Carregando...</div>`);
   const carregar = async () => {
@@ -449,13 +379,6 @@ async function consultarConta(c, e) {
       <div class="rolagem"><table><tr><th>Data</th><th>Conta</th><th>Contato</th><th>Descrição</th><th>Origem</th><th class="num">Valor</th></tr>
       ${r.itens.map((i) => `<tr><td>${dataBR(i.data)}</td><td class="peq">${esc(i.conta_financeira)}</td><td>${esc(i.contato)}</td>
         <td class="peq">${esc(i.descricao)}</td><td class="peq suave">${esc(i.origem)}</td><td class="num ${i.valor < 0 ? "neg" : ""}">${brl(i.valor)}</td></tr>`).join("")}</table></div>`;
-    } else if (r.tipo === "ml_pedidos") {
-      corpo.innerHTML = `<div class="kpi"><div>Total<b class="${r.total < 0 ? "neg" : ""}">R$ ${brl(r.total)}</b></div><div>Pedidos<b>${r.qtd}</b></div></div>${tabelaPedidos(r.itens)}`;
-    } else if (r.tipo === "ml_tarifa") {
-      corpo.innerHTML = `<div class="kpi"><div>Total<b class="${r.total < 0 ? "neg" : ""}">R$ ${brl(r.total)}</b></div></div>
-      <div class="rolagem" style="max-height:30vh"><table><tr><th>Mês</th><th>Descrição</th><th>Período de faturamento</th><th class="num">Valor</th></tr>
-      ${r.itens.map((i) => `<tr><td>${mesBR(i.periodo)}</td><td>${esc(i.rotulo)} <span class="mono suave peq">${esc(i.tipo)}</span></td><td class="peq">${i.de ? `${dataBR(i.de)} a ${dataBR(i.ate)}` : "—"}</td><td class="num ${i.valor < 0 ? "neg" : ""}">${brl(i.valor)}</td></tr>`).join("")}</table></div>
-      ${r.pedidos.length ? `<h3 style="margin-top:16px">Tarifa de venda em cada pedido (${r.pedidos.length})</h3>${tabelaPedidos(r.pedidos)}` : ""}`;
     } else if (r.tipo === "icms") {
       corpo.innerHTML = `<div class="kpi"><div>ICMS TTD a recolher<b class="neg">R$ ${brl(r.total)}</b></div></div>
       <div class="suave peq" style="margin-bottom:8px">Apuração do ICMS no regime especial, lida da Domínio (soma das sub-apurações): débito das saídas − crédito presumido − demais créditos = saldo a recolher (é o que vai para a DRE).</div>
@@ -728,19 +651,18 @@ async function historicoCusto(i, aoMudar) {
 // ------------------------------------------------------------------ modelos de DRE
 async function telaModelos() {
   casca("modelos", `<div class="topo"><div><h1>Modelos de DRE</h1><div class="suave">A estrutura da DRE: linhas que recebem contas, totais e títulos. Cada empresa usa um modelo.</div></div>
-    <div class="linha"><button class="btn" id="novo-ml">+ Modelo Mercado Livre</button><button class="btn pri" id="novo">+ Novo modelo</button></div></div><div id="lista"></div>`);
+    <button class="btn pri" id="novo">+ Novo modelo</button></div><div id="lista"></div>`);
   const ms = await api("/api/modelos");
   $("#lista").innerHTML = `<div class="card"><table><tr><th>Modelo</th><th>Linhas</th><th>Empresas usando</th><th></th></tr>${ms.map((m) => `<tr>
     <td><a href="#/modelo/${m.id}"><b>${esc(m.nome)}</b></a><div class="suave peq">${esc(m.descricao)}</div></td><td>${m.linhas.length}</td><td>${m.empresas}</td>
     <td style="text-align:right"><a class="btn peq" href="#/modelo/${m.id}">Editar</a> <button class="btn peq dup" data-id="${m.id}" data-nome="${esc(m.nome)}">Duplicar</button></td></tr>`).join("")}</table></div>`;
-  const novo = (copiar, nome, mlivre = false) => tentar(async () => {
-    const n = prompt("Nome do novo modelo:", copiar ? `${nome} (cópia)` : mlivre ? "DRE Mercado Livre" : "Meu modelo de DRE");
+  const novo = (copiar, nome) => tentar(async () => {
+    const n = prompt("Nome do novo modelo:", copiar ? `${nome} (cópia)` : "Meu modelo de DRE");
     if (!n) return;
-    const m = await api("/api/modelos", { method: "POST", body: { nome: n, copiar_de: copiar || null, mlivre } });
+    const m = await api("/api/modelos", { method: "POST", body: { nome: n, copiar_de: copiar || null } });
     location.hash = `#/modelo/${m.id}`;
   });
   $("#novo").onclick = () => novo(null);
-  $("#novo-ml").onclick = () => novo(null, "", true);
   $$(".dup").forEach((b) => b.onclick = () => novo(Number(b.dataset.id), b.dataset.nome));
 }
 
@@ -1010,6 +932,234 @@ async function telaConfig() {
   $$(".u-ed").forEach((b) => b.onclick = () => formU(us.find((x) => x.id === Number(b.dataset.id))));
 }
 
+// ------------------------------------------------------------------ módulo Mercado Livre (separado da DRE principal)
+async function telaMLEmpresas() {
+  casca("ml", `<div class="topo"><div><h1>Mercado Livre</h1><div class="suave">Módulo separado: DRE e análises só com os dados do Mercado Livre. Não altera a DRE, a associação de contas nem os custos das empresas.</div></div></div>
+    <div id="lista" class="grade"><div class="vazio">Carregando...</div></div>`);
+  const ps = new URLSearchParams((location.hash.split("?")[1]) || "");
+  if (ps.get("ml") === "erro") toast(`Mercado Livre: ${ps.get("msg") || "não foi possível conectar"}`, true);
+  const lista = await api("/api/ml/empresas");
+  $("#lista").innerHTML = lista.length ? lista.map((e) => `<div class="card emp" data-id="${e.id}">
+      <h3 style="margin:0">${esc(e.nome)}</h3><div class="suave peq">${cnpjFmt(e.cnpj) || "sem CNPJ"}</div>
+      <div class="linha" style="margin-top:10px">${e.ml_conectado ? `<span class="badge b-ok">Conectada${e.ml_apelido ? ` · ${esc(e.ml_apelido)}` : ""}</span>` : '<span class="badge">não conectada</span>'}
+        ${e.pedidos ? `<span class="badge b-ml">${e.pedidos} pedidos lidos</span>` : ""}</div>
+      ${e.ml_sync_em ? `<div class="suave peq" style="margin-top:8px">Atualizado em ${dataHora(e.ml_sync_em)} (${esc(e.ml_sync_periodo)})</div>` : ""}</div>`).join("")
+    : `<div class="card vazio">Cadastre as empresas em <a href="#/empresas">Empresas</a>.</div>`;
+  $$(".emp").forEach((c) => c.onclick = () => {
+    const e = lista.find((x) => x.id === Number(c.dataset.id));
+    location.hash = `#/ml/${e.id}/${e.ml_conectado || e.pedidos ? "dre" : "conexao"}`;
+  });
+}
+
+async function telaML(id, aba, params) {
+  clearInterval(pollJobs);
+  const e = await api(`/api/empresas/${id}`);
+  const abas = [["dre", "DRE Mercado Livre"], ["produtos", "Margem por produto"], ["pedidos", "Pedidos"], ["custos", "Custos"], ["tarifas", "Tarifas"], ["conexao", "Conexão e dados"]];
+  casca("ml", `<div class="topo"><div><a href="#/ml" class="peq">← Mercado Livre</a><h1>${esc(e.nome)} <span class="badge b-ml" style="vertical-align:middle">Mercado Livre</span></h1>
+      <div class="suave">${e.ml_conectado ? `Conta ${esc(e.ml_apelido || "")}` : "Não conectada"} · impostos sobre vendas: ${brl4(e.ml_imposto_aliq).replace(/,?0+$/, "") || "0"}% · ${e.ml_sync_em ? `dados de ${esc(e.ml_sync_periodo)}` : "nada lido ainda"}</div></div>
+      <button class="btn" id="ml-cfg">Configurar</button></div>
+    <div class="abas">${abas.map(([k, t]) => `<a href="#/ml/${id}/${k}" class="${aba === k ? "ativo" : ""}">${t}</a>`).join("")}</div><div id="aba"></div>`);
+  $("#ml-cfg").onclick = () => {
+    const m = modal(`<h2>Configurar análise do Mercado Livre</h2>
+      <label>Impostos sobre vendas (%) <input id="ml-imp" inputmode="decimal" value="${brl4(e.ml_imposto_aliq).replace(/,?0+$/, "")}"></label>
+      <div class="suave peq" style="margin-top:6px">Aplicado sobre as vendas líquidas (vendas − reembolsos) na DRE, na margem por produto e por pedido. Ex.: Simples Nacional pela alíquota efetiva; Lucro Presumido ou Real pela carga sobre vendas (PIS, COFINS, ICMS).</div>
+      <div class="linha" style="margin-top:14px"><button class="btn pri" id="ml-ok">Salvar</button><button class="btn" data-fechar>Cancelar</button></div>`, true);
+    $("#ml-ok", m).onclick = (ev) => tentar(async () => {
+      await api(`/api/empresas/${id}/mlivre/config`, { method: "PUT", body: { imposto: $("#ml-imp", m).value } });
+      m.remove(); toast("Salvo."); rota();
+    }, ev.target);
+  };
+  if (params.get("ml") === "ok") toast("Mercado Livre conectado. Agora atualize os dados do período.");
+  if (params.get("ml") === "erro") toast(`Mercado Livre: ${params.get("msg") || "não foi possível conectar"}`, true);
+  if (aba === "conexao") return mlConexao(e);
+  if (aba === "produtos") return mlProdutos(e);
+  if (aba === "pedidos") return mlPedidos(e);
+  if (aba === "custos") return mlCustos(e);
+  if (aba === "tarifas") return mlTarifas(e);
+  return mlDre(e);
+}
+
+function mlConexao(e) {
+  const p = periodo();
+  $("#aba").innerHTML = `<div class="card"><h2>Conta do Mercado Livre</h2>
+      ${e.ml_conectado ? `<div class="linha"><span class="badge b-ok">Conectada</span><span class="suave peq">${esc(e.ml_apelido || "")} · desde ${dataHora(e.ml_conectado_em)}</span></div>`
+        : `<div class="aviso">Clique em <b>Conectar Mercado Livre</b> e entre com a conta de vendedor desta empresa para autorizar a leitura. O aplicativo fica em Configurações.</div>`}
+      <div class="suave peq" style="margin:10px 0">Última atualização: ${e.ml_sync_em ? `${dataHora(e.ml_sync_em)} (${esc(e.ml_sync_periodo)})` : "nunca"}</div>
+      <div class="linha"><label>De <input type="month" id="m-ini" value="${p.inicio}"></label><label>Até <input type="month" id="m-fim" value="${p.fim}"></label>
+        <label class="chk"><input type="checkbox" id="m-frete" checked> Ler o frete de cada envio (mais demorado)</label></div>
+      <div class="linha" style="margin-top:12px">
+        <button class="btn ${e.ml_conectado ? "" : "pri"}" id="m-con">${e.ml_conectado ? "Reconectar" : "Conectar Mercado Livre"}</button>
+        <button class="btn pri" id="m-sync" ${e.ml_conectado ? "" : "disabled"}>Atualizar do Mercado Livre</button>
+        ${e.ml_conectado ? '<button class="btn perigo peq" id="m-des">Desconectar</button>' : ""}</div>
+      <div class="suave peq" style="margin-top:10px">Lê os <b>pedidos</b> com os itens (SKU, anúncio, quantidade, preço e tarifa de venda), o <b>frete</b> pago pelo vendedor em cada envio e o <b>faturamento</b> do Mercado Livre e do Mercado Pago de cada mês (comissões, Mercado Envios, Product Ads, Full, bonificações). Somente leitura.</div></div>
+    <div class="card"><h2>Atividades</h2><div id="jobs" class="suave">Carregando...</div></div>`;
+  $("#m-con").onclick = (ev) => tentar(async () => { const r = await api(`/api/empresas/${e.id}/mlivre/conectar`, { method: "POST" }); location.href = r.url; }, ev.target);
+  if ($("#m-des")) $("#m-des").onclick = (ev) => tentar(async () => {
+    if (!confirm("Desconectar esta empresa do Mercado Livre? Os dados já copiados continuam.")) return;
+    await api(`/api/empresas/${e.id}/mlivre/desconectar`, { method: "POST" }); rota();
+  }, ev.target);
+  $("#m-sync").onclick = (ev) => tentar(async () => {
+    await api(`/api/empresas/${e.id}/mlivre/sincronizar`, { method: "POST", body: { inicio: $("#m-ini").value, fim: $("#m-fim").value, frete: $("#m-frete").checked } });
+    toast("Atualização do Mercado Livre iniciada."); carregarJobs(e.id);
+  }, ev.target);
+  carregarJobs(e.id);
+}
+
+const celML = (v) => `<td class="num ${v < 0 ? "neg" : ""}">${v ? brl(v) : '<span class="suave">–</span>'}</td>`;
+
+async function mlDre(e) {
+  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
+    <div class="linha"><label class="chk"><input type="checkbox" id="av" checked> % sobre vendas</label><button class="btn" id="xls">Baixar Excel</button></div></div>
+    <div id="dre-avisos" style="margin-top:12px"></div><div id="dre" style="margin-top:8px" class="suave">Carregando...</div></div>
+    <div class="card" id="conf"></div>`;
+  const abertas = new Set();
+  let r = null;
+  const carregar = async () => { const p = periodo(); r = await api(`/api/empresas/${e.id}/mlivre/dre?inicio=${p.inicio}&fim=${p.fim}`); desenhar(); };
+  const desenhar = () => {
+    const av = $("#av").checked;
+    $("#dre-avisos").innerHTML = r.avisos.map((a) => `<div class="aviso">${esc(a)}</div>`).join("")
+      + `<div class="suave peq">Vendas, reembolsos, impostos e custo pela data de fechamento dos pedidos; tarifas e bonificações pelo faturamento oficial do mês do Mercado Livre e do Mercado Pago. Clique numa tarifa para ver a composição.</div>`;
+    let html = `<div class="rolagem"><table class="dre"><tr><th>Linha</th>${r.meses.map((m) => `<th class="num">${mesBR(m)}</th>`).join("")}<th class="num">Total</th>${av ? '<th class="num">%</th>' : ""}</tr>`;
+    for (const ln of r.linhas) {
+      const temComp = ln.composicao.length > 0;
+      const cls = ln.tipo === "GRUPO" ? "grupo" : ln.tipo === "TOTAL" ? "destaque" : "conta";
+      html += `<tr class="${cls}" data-c="${ln.codigo}"><td class="${temComp ? "clicavel" : ""}" style="${ln.grupo ? "padding-left:22px" : ""}">${temComp ? (abertas.has(ln.codigo) ? "▾ " : "▸ ") : ""}${esc(ln.nome)}</td>
+        ${ln.valores.map(celML).join("")}${celML(ln.total)}${av ? `<td class="num suave">${pct(ln.av_total)}</td>` : ""}</tr>`;
+      if (abertas.has(ln.codigo)) for (const c of ln.composicao) html += `<tr class="comp"><td style="padding-left:34px">${esc(c.descricao)}</td>${c.valores.map(celML).join("")}${celML(c.total)}${av ? "<td></td>" : ""}</tr>`;
+    }
+    $("#dre").innerHTML = html + "</table></div>";
+    $("#dre").classList.remove("suave");
+    $$("#dre td.clicavel").forEach((td) => td.onclick = () => { const c = td.parentElement.dataset.c; if (abertas.has(c)) abertas.delete(c); else abertas.add(c); desenhar(); });
+    const k = r.conferencia;
+    $("#conf").innerHTML = `<h2>Conferência</h2><table><tr><th></th><th class="num">Nos pedidos</th><th class="num">No faturamento do ML</th><th class="num">Diferença</th></tr>
+      <tr><td>Tarifa de venda (comissão)</td><td class="num">${brl(k.comissao_pedidos)}</td><td class="num">${brl(k.comissao_faturamento)}</td><td class="num">${brl(k.comissao_faturamento - k.comissao_pedidos)}</td></tr>
+      <tr><td>Frete pago pelo vendedor</td><td class="num">${brl(k.frete_pedidos)}</td><td class="num">${brl(k.frete_faturamento)}</td><td class="num">${brl(k.frete_faturamento - k.frete_pedidos)}</td></tr></table>
+      <div class="suave peq" style="margin-top:8px">Diferenças pequenas são normais: o faturamento do ML fecha em datas próprias, cobra tarifas de pedidos de outros meses e estorna as de vendas canceladas.</div>`;
+  };
+  $("#av").onchange = () => r && desenhar();
+  $("#xls").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/mlivre/dre.xlsx?inicio=${p.inicio}&fim=${p.fim}`; };
+  await tentar(carregar);
+}
+
+async function mlProdutos(e) {
+  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
+    <div class="linha"><input id="q" placeholder="Buscar produto ou SKU..." style="min-width:220px">
+      <select id="ord"><option value="vendas">Ordenar por vendas</option><option value="margem">Maior margem (R$)</option><option value="pior">Menor margem (R$)</option><option value="pct">Margem %</option></select></div></div>
+    <div id="res" style="margin-top:12px" class="suave">Carregando...</div></div>`;
+  let r = null;
+  const carregar = async () => { const p = periodo(); r = await api(`/api/empresas/${e.id}/mlivre/produtos?inicio=${p.inicio}&fim=${p.fim}`); desenhar(); };
+  const desenhar = () => {
+    const q = $("#q").value.toLowerCase();
+    let its = r.itens.filter((x) => !q || x.titulo.toLowerCase().includes(q) || x.chave.toLowerCase().includes(q));
+    const o = $("#ord").value;
+    its = [...its].sort((a, b) => o === "margem" ? b.margem - a.margem : o === "pior" ? a.margem - b.margem : o === "pct" ? (b.margem_pct ?? -1e9) - (a.margem_pct ?? -1e9) : b.vendas - a.vendas);
+    const t = its.reduce((a, x) => { for (const k of ["vendas", "devolvido", "imposto", "tarifa", "frete", "cmv", "margem"]) a[k] = (a[k] || 0) + x[k]; return a; }, {});
+    const liq = (t.vendas || 0) - (t.devolvido || 0);
+    $("#res").innerHTML = !r.itens.length ? '<div class="vazio">Nenhuma venda no período. Atualize na aba Conexão e dados.</div>' : `
+      <div class="kpi"><div>Vendas<b>R$ ${brl(t.vendas)}</b></div><div>Margem (antes de publicidade)<b class="${t.margem < 0 ? "neg" : ""}">R$ ${brl(t.margem)}</b></div><div>Margem %<b>${liq ? pct(t.margem / liq * 100) : "—"}</b></div>
+        <div>Produtos com prejuízo<b>${its.filter((x) => x.margem < 0).length}</b></div></div>
+      <div class="suave peq" style="margin-bottom:8px">Por produto: vendas − reembolsos − impostos − tarifa de venda − frete do envio (rateado pelo valor dos itens do pedido) − custo. Publicidade e outras tarifas do faturamento não são por produto e ficam só na DRE.</div>
+      <div class="rolagem" style="max-height:65vh"><table><tr><th>Produto</th><th>Anúncio</th><th class="num">Qtd</th><th class="num">Vendas</th><th class="num">Reembolsos</th><th class="num">Impostos</th>
+        <th class="num">Tarifa</th><th class="num">Frete</th><th class="num">Custo</th><th class="num">Margem</th><th class="num">%</th></tr>
+      ${its.map((x) => `<tr><td>${esc(x.titulo)}<div class="suave peq mono">${esc(x.sku || x.anuncio)}</div></td><td class="peq">${esc(x.tipos)}</td><td class="num">${qtdBR(x.qtd)}</td><td class="num">${brl(x.vendas)}</td>
+        <td class="num ${x.devolvido ? "neg" : "suave"}">${x.devolvido ? brl(-x.devolvido) : "–"}</td><td class="num neg">${brl(-x.imposto)}</td><td class="num neg">${brl(-x.tarifa)}</td><td class="num neg">${brl(-x.frete)}</td>
+        <td class="num">${x.sem_custo ? '<span class="badge b-aviso">sem custo</span>' : `<span class="neg">${brl(-x.cmv)}</span>`}</td>
+        <td class="num ${x.margem < 0 ? "neg" : ""}"><b>${brl(x.margem)}</b></td><td class="num ${x.margem < 0 ? "neg" : ""}">${pct(x.margem_pct)}</td></tr>`).join("")}</table></div>`;
+    $("#res").classList.remove("suave");
+  };
+  $("#q").oninput = () => r && desenhar();
+  $("#ord").onchange = () => r && desenhar();
+  await tentar(carregar);
+}
+
+async function mlPedidos(e) {
+  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
+    <input id="q" placeholder="Pedido, produto, SKU ou comprador..." style="min-width:260px"></div>
+    <div id="res" style="margin-top:12px" class="suave">Carregando...</div></div>`;
+  const ST = { paid: "pago", cancelled: "cancelado", confirmed: "confirmado", partially_refunded: "reembolso parcial" };
+  const carregar = async () => {
+    const p = periodo();
+    const r = await api(`/api/empresas/${e.id}/mlivre/vendas?inicio=${p.inicio}&fim=${p.fim}&q=${encodeURIComponent($("#q").value)}`);
+    const vs = r.vendas;
+    $("#res").innerHTML = `<div class="suave peq" style="margin-bottom:8px">${r.total_pedidos} pedido(s) pago(s)${r.nao_pagos ? ` · ${r.nao_pagos} sem pagamento (não entram)` : ""}${r.total_pedidos > vs.length ? ` · mostrando os últimos ${vs.length}` : ""}. Resultado de cada venda: pago − reembolso − impostos − tarifa de venda − frete do envio − custo dos produtos.</div>
+      <div class="rolagem" style="max-height:65vh"><table><tr><th>Data</th><th>Pedido</th><th>Produto</th><th>Situação</th><th class="num">Pago</th><th class="num">Reembolso</th><th class="num">Impostos</th>
+        <th class="num">Tarifa</th><th class="num">Frete</th><th class="num">Custo</th><th class="num">Margem</th></tr>
+      ${vs.map((v) => `<tr><td>${dataBR(v.data)}</td><td class="mono peq">${v.order_id}${v.pack_id ? `<div class="suave">pacote ${v.pack_id}</div>` : ""}</td>
+        <td class="peq">${esc(v.descricao)}${v.itens > 1 ? ` <span class="suave">(${v.itens} un)</span>` : ""}<div class="suave">${esc(v.comprador)}${v.sku ? ` · ${esc(v.sku)}` : ""}</div></td>
+        <td class="peq">${esc(ST[v.status] || v.status)}</td><td class="num">${brl(v.vendas)}</td><td class="num ${v.devolvido ? "neg" : "suave"}">${v.devolvido ? brl(-v.devolvido) : "–"}</td>
+        <td class="num neg">${brl(-v.imposto)}</td><td class="num neg">${brl(-v.tarifa)}</td><td class="num">${v.frete_lido ? `<span class="neg">${brl(-v.frete)}</span>` : '<span class="suave">não lido</span>'}</td>
+        <td class="num">${v.sem_custo ? '<span class="badge b-aviso">sem custo</span>' : `<span class="neg">${brl(-v.cmv)}</span>`}</td>
+        <td class="num ${v.margem < 0 ? "neg" : ""}"><b>${brl(v.margem)}</b></td></tr>`).join("") || '<tr><td colspan="11" class="vazio">Nenhum pedido.</td></tr>'}</table></div>`;
+    $("#res").classList.remove("suave");
+  };
+  let t = null;
+  $("#q").oninput = () => { clearTimeout(t); t = setTimeout(() => tentar(carregar), 400); };
+  await tentar(carregar);
+}
+
+async function mlCustos(e) {
+  const p = periodo();
+  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">
+      <div class="linha"><label>Custos vigentes em <input type="month" id="vig" value="${p.fim}"></label><input id="q" placeholder="Buscar produto ou SKU..." style="min-width:220px">
+        <label class="chk"><input type="checkbox" id="sem"> Só sem custo</label></div>
+      <button class="btn" id="copiar" title="Usa o custo cadastrado na aba Custo dos produtos da empresa quando o código do produto é igual ao SKU">Copiar da aba Custo dos produtos</button></div>
+    <div class="suave peq" style="margin:10px 0">Custo unitário por SKU (ou pelo anúncio, quando o anúncio não tem SKU). O valor digitado vale a partir do mês escolhido acima, até haver outro. Estes custos são só do módulo do Mercado Livre.</div>
+    <div id="res" class="suave">Carregando...</div></div>`;
+  let r = null;
+  const carregar = async () => { r = await api(`/api/empresas/${e.id}/mlivre/custos?vigencia=${$("#vig").value}`); desenhar(); };
+  const desenhar = () => {
+    const q = $("#q").value.toLowerCase(), so = $("#sem").checked;
+    const its = r.itens.filter((x) => (!so || x.custo == null) && (!q || x.titulo.toLowerCase().includes(q) || x.chave.toLowerCase().includes(q)));
+    $("#res").innerHTML = `<div class="suave peq" style="margin-bottom:6px">${r.itens.filter((x) => x.custo == null).length} de ${r.itens.length} produto(s) sem custo em ${mesBR(r.vigencia)}.</div>
+      <div class="rolagem" style="max-height:65vh"><table><tr><th>Produto</th><th>SKU / anúncio</th><th class="num">Qtd vendida</th><th class="num">Preço médio</th><th class="num" style="min-width:140px">Custo unitário</th><th></th></tr>
+      ${its.map((x) => `<tr data-k="${esc(x.chave)}"><td>${esc(x.titulo) || '<span class="suave">—</span>'}</td><td class="mono peq">${esc(x.sku || x.anuncio)}</td><td class="num">${qtdBR(x.qtd)}</td><td class="num">${brl(x.preco_medio)}</td>
+        <td class="num"><input class="custo" inputmode="decimal" style="width:120px;text-align:right" value="${x.custo == null ? "" : brl4(x.custo)}" placeholder="informar"></td>
+        <td>${x.vigencias ? `<button class="btn peq hist">Histórico (${x.vigencias})</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6" class="vazio">Nada para mostrar. Atualize os pedidos na aba Conexão e dados.</td></tr>'}</table></div>`;
+    $("#res").classList.remove("suave");
+    $$("#res tr[data-k]").forEach((tr) => {
+      const k = tr.dataset.k;
+      $(".custo", tr).onchange = (ev) => tentar(async () => {
+        if (!ev.target.value.trim()) return;
+        await api(`/api/empresas/${e.id}/mlivre/custos`, { method: "PUT", body: { chave: k, custo: ev.target.value, vigencia: $("#vig").value } });
+        const x = r.itens.find((i) => i.chave === k);
+        x.custo = Number(ev.target.value.replace(/\./g, "").replace(",", ".")); x.vigencias = (x.vigencias || 0) + 1;
+        tr.style.background = "#E3F5EF"; setTimeout(() => { tr.style.background = ""; }, 700);
+      });
+      if ($(".hist", tr)) $(".hist", tr).onclick = () => tentar(async () => {
+        const h = await api(`/api/empresas/${e.id}/mlivre/custos/historico?chave=${encodeURIComponent(k)}`);
+        const m = modal(`<h2>Histórico de custo</h2><div class="suave peq mono">${esc(k)}</div><table style="margin-top:10px"><tr><th>A partir de</th><th class="num">Custo</th><th>Por</th><th></th></tr>
+          ${h.map((c) => `<tr><td>${mesBR(c.vigencia)}</td><td class="num">${brl4(c.custo)}</td><td class="peq suave">${esc(c.por)}</td><td><button class="btn peq perigo del" data-id="${c.id}">Excluir</button></td></tr>`).join("")}</table>
+          <div class="linha" style="margin-top:14px"><button class="btn" data-fechar>Fechar</button></div>`, true);
+        $$(".del", m).forEach((b) => b.onclick = (ev) => tentar(async () => {
+          await api(`/api/empresas/${e.id}/mlivre/custos/${b.dataset.id}`, { method: "DELETE" }); m.remove(); carregar();
+        }, ev.target));
+      });
+    });
+  };
+  $("#vig").onchange = () => tentar(carregar);
+  $("#q").oninput = () => r && desenhar();
+  $("#sem").onchange = () => r && desenhar();
+  $("#copiar").onclick = (ev) => tentar(async () => {
+    const x = await api(`/api/empresas/${e.id}/mlivre/custos/copiar`, { method: "POST", body: { vigencia: $("#vig").value } });
+    toast(`${x.copiados} custo(s) copiado(s).`); carregar();
+  }, ev.target);
+  await tentar(carregar);
+}
+
+async function mlTarifas(e) {
+  $("#aba").innerHTML = `<div class="card"><div class="linha">${seletorPeriodo(() => carregar())}</div><div id="res" style="margin-top:12px" class="suave">Carregando...</div></div>`;
+  const carregar = async () => {
+    const p = periodo();
+    const ts = await api(`/api/empresas/${e.id}/mlivre/tarifas?inicio=${p.inicio}&fim=${p.fim}`);
+    $("#res").innerHTML = `<div class="suave peq" style="margin-bottom:8px">Encargos e bonificações do faturamento oficial do Mercado Livre e do Mercado Pago, com a linha da DRE em que cada um entra. O período de faturamento pode não fechar no último dia do mês.</div>
+      <div class="rolagem" style="max-height:65vh"><table><tr><th>Mês</th><th>Origem</th><th>Descrição</th><th>Tipo</th><th>Linha da DRE</th><th>Período</th><th class="num">Valor</th></tr>
+      ${ts.map((t) => `<tr><td>${mesBR(t.periodo)}</td><td>${t.grupo === "ML" ? "Mercado Livre" : "Mercado Pago"}</td><td>${esc(t.rotulo)}</td><td class="mono peq">${esc(t.tipo)}</td>
+        <td class="peq">${esc(t.linha)}</td><td class="peq">${t.de ? `${dataBR(t.de)} a ${dataBR(t.ate)}` : "—"}</td><td class="num ${t.valor < 0 ? "neg" : ""}">${brl(t.valor)}</td></tr>`).join("") || '<tr><td colspan="7" class="vazio">Nenhuma tarifa no período.</td></tr>'}</table></div>`;
+    $("#res").classList.remove("suave");
+  };
+  await tentar(carregar);
+}
+
 // ------------------------------------------------------------------ rotas
 async function rota() {
   if (pendenteModelo) { const p = pendenteModelo(); pendenteModelo = null; if (p) await p; }
@@ -1030,6 +1180,8 @@ async function rota() {
     if (p[0] === "modelos") return await telaModelos();
     if (p[0] === "modelo" && p[1]) return await telaModelo(Number(p[1]));
     if (p[0] === "config") return await telaConfig();
+    if (p[0] === "ml" && p[1]) return await telaML(Number(p[1]), p[2] || "dre", params);
+    if (p[0] === "ml") return await telaMLEmpresas();
     return await telaEmpresas();
   } catch (e) {
     if (!EU) return;
