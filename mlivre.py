@@ -199,6 +199,11 @@ def venda(o: dict, empresa_id: int):
                    shipping_id=_int((o.get("shipping") or {}).get("id"))), lin
 
 
+def link_venda(order_id, pack_id=None):
+    """Página da venda no painel do vendedor do Mercado Livre (vendas de carrinho abrem pelo pacote)."""
+    return f"https://www.mercadolivre.com.br/vendas/{pack_id or order_id}/detalhe"
+
+
 def meses_entre(ini, fim):
     out, (a, m) = [], map(int, ini.split("-"))
     while f"{a:04d}-{m:02d}" <= fim:

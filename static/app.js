@@ -1142,6 +1142,9 @@ async function mlTarifas(e) {
 }
 
 // ------------------------------------------------------------------ rastreabilidade: vendas por pedido, extrato e auditoria
+// link da venda no painel do vendedor do Mercado Livre (carrinho: pelo pacote)
+const linkML = (oid, pack) => `https://www.mercadolivre.com.br/vendas/${pack || oid}/detalhe`;
+const abreML = (oid, pack) => `<a href="${linkML(oid, pack)}" target="_blank" rel="noopener" title="Abrir a venda no Mercado Livre" onclick="event.stopPropagation()" class="peq">↗ ML</a>`;
 const DOM_ST = { "escriturada": "b-ok", "não escriturada": "b-erro", "cancelada na Domínio": "b-erro", "sem nota": "b-aviso", "nota sem chave": "b-aviso", "Domínio não lida": "" };
 const ACHADO = {
   COMISSAO_DIVERGENTE: "Comissão cobrada ≠ informada na venda", COMISSAO_ACIMA_ACORDADO: "Comissão acima da acordada",
@@ -1159,7 +1162,7 @@ function abrirPedidoML(eid, oid) {
     const d = await api(`/api/empresas/${eid}/mlivre/pedido/${oid}`);
     const p = d.pedido || {};
     const sinal = (v) => `<span class="${v < 0 ? "neg" : ""}">${brl(v)}</span>`;
-    modal(`<div class="linha entre"><div><h2 style="margin:0">Pedido ${oid}</h2><div class="suave peq">${dataBR(p.data)} · ${esc(p.status || "")} · ${esc(p.comprador || "")}${p.pack_id ? ` · pacote ${p.pack_id}` : ""}</div></div><button class="btn" data-fechar>Fechar</button></div>
+    modal(`<div class="linha entre"><div><h2 style="margin:0">Pedido ${oid} <a class="btn peq" href="${linkML(oid, p.pack_id)}" target="_blank" rel="noopener">Abrir no Mercado Livre ↗</a></h2><div class="suave peq">${dataBR(p.data)} · ${esc(p.status || "")} · ${esc(p.comprador || "")}${p.pack_id ? ` · pacote ${p.pack_id}` : ""}</div></div><button class="btn" data-fechar>Fechar</button></div>
       <div class="linha" style="gap:18px;align-items:flex-start;margin-top:12px;flex-wrap:wrap">
         <table style="width:auto;min-width:320px"><tr><th colspan="2">Composição do resultado <span class="suave peq">(fonte: ${esc({ extrato: "extrato do Mercado Pago", faturamento: "faturamento do ML", pedido: "dados do pedido" }[p.fonte] || p.fonte)})</span></th></tr>
           ${d.componentes.filter((c) => c.valor || ["venda", "imposto", "cmv"].includes(c.chave)).map((c) => `<tr><td>${esc(c.nome)}</td><td class="num">${sinal(c.valor)}</td></tr>`).join("")}
@@ -1217,7 +1220,7 @@ async function mlPainel(e) {
       <div class="suave peq" style="margin-bottom:8px">${ps.length} de ${r.total} venda(s). Com o extrato lido, os valores vêm do que entrou e saiu no Mercado Pago (retenções por disputa não entram); sem extrato, do faturamento do ML; sem os dois, do pedido. Clique numa venda para ver a composição, a nota, as cobranças e o extrato.</div>
       <div class="rolagem" style="max-height:62vh"><table><tr><th>Data</th><th>Pedido</th><th>Produto</th><th>Nota fiscal</th><th class="num">Venda</th><th class="num">Frete comprador</th><th class="num">Devolvido</th>
         <th class="num">Tarifa</th><th class="num">Frete</th><th class="num">Frete devolução</th><th class="num">Outras</th><th class="num">Impostos</th><th class="num">Custo</th><th class="num">Resultado</th></tr>
-      ${ps.map((p) => `<tr class="clicavel" data-o="${p.order_id}"><td>${dataBR(p.data)}</td><td class="mono peq">${p.order_id}<div class="suave">${esc(p.status)}</div></td>
+      ${ps.map((p) => `<tr class="clicavel" data-o="${p.order_id}"><td>${dataBR(p.data)}</td><td class="mono peq">${p.order_id} ${abreML(p.order_id, p.pack_id)}<div class="suave">${esc(p.status)}</div></td>
         <td class="peq">${esc(p.descricao)}<div class="suave">${esc(p.sku)}${p.tipo_anuncio ? ` · ${esc(p.tipo_anuncio)}` : ""}</div></td>
         <td class="peq">${p.nota ? `${esc(p.nota.numero)}<div class="suave">${p.nota.origem === "EMISSOR_ML" ? "emissor ML" : "ERP"}</div>` : ""}<span class="badge ${DOM_ST[p.dominio] || ""}">${esc(p.dominio)}</span></td>
         ${cel(C(p, "venda"))}${cel(C(p, "frete_comprador"))}${cel(C(p, "reembolso"))}${cel(C(p, "tarifa"))}${cel(C(p, "frete"))}${cel(C(p, "frete_devolucao"))}${cel(outras(p))}${cel(C(p, "imposto"))}
@@ -1261,7 +1264,7 @@ async function mlExtrato(e) {
         ${r.resumo.map((x) => `<tr><td>${esc(x.descricao)}</td><td class="num">${x.qtd}</td><td class="num">${brl(x.credito)}</td><td class="num neg">${brl(-x.debito)}</td></tr>`).join("")}</table></details>
       <div class="rolagem" style="max-height:60vh;margin-top:10px"><table><tr><th>Data</th><th>Movimento</th><th>Venda</th><th class="num">Bruto</th><th class="num">Tarifa MP</th><th class="num">Parcel.</th><th class="num">Frete</th><th class="num">Entrada</th><th class="num">Saída</th><th class="num">Saldo</th></tr>
       ${ls.map((x) => `<tr ${x.order_id ? `class="clicavel" data-o="${x.order_id}"` : ""}><td class="peq">${esc(x.data)}</td><td>${esc(x.descricao)}<div class="suave peq mono">${esc(x.origem_id)}${x.meio ? ` · ${esc(x.meio)}` : ""}</div></td>
-        <td class="peq">${x.order_id ? `<span class="mono">${x.order_id}</span><div class="suave">${esc((x.venda || {}).descricao || "")} · por ${esc(x.como)}</div>` : (["payout", "withdrawal"].includes(String(x.tipo).toLowerCase()) ? '<span class="suave">saque</span>' : '<span class="badge b-aviso">não identificado</span>')}</td>
+        <td class="peq">${x.order_id ? `<span class="mono">${x.order_id}</span> ${abreML(x.order_id)}<div class="suave">${esc((x.venda || {}).descricao || "")} · por ${esc(x.como)}</div>` : (["payout", "withdrawal"].includes(String(x.tipo).toLowerCase()) ? '<span class="suave">saque</span>' : '<span class="badge b-aviso">não identificado</span>')}</td>
         <td class="num">${x.bruto ? brl(x.bruto) : "–"}</td><td class="num">${x.tarifa_mp ? brl(x.tarifa_mp) : "–"}</td><td class="num">${x.financiamento ? brl(x.financiamento) : "–"}</td><td class="num">${x.frete ? brl(x.frete) : "–"}</td>
         <td class="num">${x.credito ? brl(x.credito) : "–"}</td><td class="num neg">${x.debito ? brl(-x.debito) : "–"}</td><td class="num suave">${x.saldo == null ? "" : brl(x.saldo)}</td></tr>`).join("")}</table></div>`;
     $("#x-res").classList.remove("suave");
@@ -1310,7 +1313,7 @@ async function mlAuditoria(e) {
       <div class="grade" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr));margin-bottom:12px">${Object.entries(r.resumo).map(([k, v]) => `<div class="card clicavel" data-c="${k}" style="margin:0;padding:10px"><div class="peq">${esc(ACHADO[k] || k)}</div><b>${v.qtd}</b>${v.valor ? ` <span class="suave peq">R$ ${brl(v.valor)}</span>` : ""}</div>`).join("") || '<div class="vazio">Nenhuma divergência encontrada.</div>'}</div>
       <div class="rolagem" style="max-height:60vh"><table><tr><th></th><th>Achado</th><th>Data</th><th>Pedido</th><th>Detalhe</th><th class="num">Esperado</th><th class="num">Cobrado / lançado</th><th class="num">Diferença</th></tr>
       ${as.map((a) => `<tr ${a.order_id ? `class="clicavel" data-o="${a.order_id}"` : ""}><td><span class="badge ${GRAV[a.gravidade] || ""}">${esc(a.gravidade)}</span></td><td class="peq">${esc(ACHADO[a.codigo] || a.codigo)}</td><td class="peq">${a.data ? dataBR(a.data) : ""}</td>
-        <td class="mono peq">${a.order_id || ""}</td><td class="peq">${esc(a.texto)}${a.descricao ? `<div class="suave">${esc(a.descricao)}</div>` : ""}</td>
+        <td class="mono peq">${a.order_id ? `${a.order_id} ${abreML(a.order_id)}` : ""}</td><td class="peq">${esc(a.texto)}${a.descricao ? `<div class="suave">${esc(a.descricao)}</div>` : ""}</td>
         <td class="num">${a.esperado == null ? "" : brl(a.esperado)}</td><td class="num">${a.cobrado == null ? "" : brl(a.cobrado)}</td><td class="num ${a.diferenca > 0 ? "neg" : ""}">${a.diferenca == null ? "" : brl(a.diferenca)}</td></tr>`).join("")}</table></div>`;
     $("#a-res").classList.remove("suave");
     $$("#a-res tr[data-o]").forEach((tr) => tr.onclick = () => abrirPedidoML(e.id, tr.dataset.o));

@@ -26,7 +26,7 @@ import mlauditoria
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.13.0"
+VERSAO = "1.13.1"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -782,16 +782,16 @@ def ml_painel_xlsx(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depen
     _periodo_ml(inicio, fim)
     ps = mlauditoria.painel(s, e, inicio, fim)
     cs = mlauditoria.COMPONENTES
-    cab = (["Data", "Pedido", "Pacote", "Situação", "Produto", "SKU", "Anúncio", "Comprador", "NF número", "NF série", "NF chave",
+    cab = (["Data", "Pedido", "Link no Mercado Livre", "Pacote", "Situação", "Produto", "SKU", "Anúncio", "Comprador", "NF número", "NF série", "NF chave",
             "NF origem", "Domínio"] + [n for _k, n in cs]
            + ["Resultado", "Fonte", "Retido em disputa", "Custo da devolução", "Extrato entradas", "Extrato saídas", "Extrato líquido"])
-    linhas = [[p["data"], str(p["order_id"]), str(p["pack_id"] or ""), p["status"], p["descricao"], p["sku"], p["tipo_anuncio"],
+    linhas = [[p["data"], str(p["order_id"]), mlivre.link_venda(p["order_id"], p["pack_id"]), str(p["pack_id"] or ""), p["status"], p["descricao"], p["sku"], p["tipo_anuncio"],
                p["comprador"], (p["nota"] or {}).get("numero", ""), (p["nota"] or {}).get("serie", ""),
                (p["nota"] or {}).get("chave", ""), (p["nota"] or {}).get("origem", ""), p["dominio"]]
               + [p["componentes"][k] for k, _n in cs]
               + [p["resultado"], p["fonte"], p["retido"], p["custo_devolucao"], p["extrato_credito"], -p["extrato_debito"],
                  p["extrato_liquido"]] for p in ps]
-    fm = {i: MOEDA for i in range(13, len(cab)) if cab[i] != "Fonte"}
+    fm = {i: MOEDA for i in range(14, len(cab)) if cab[i] != "Fonte"}
     return _tabela_xlsx(f"Vendas_ML_{inicio}_{fim}.xlsx", "Vendas por pedido", cab, linhas, fm)
 
 
@@ -900,10 +900,11 @@ def ml_auditoria_xlsx(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=De
     e = _ml_emp(s, eid)
     _periodo_ml(inicio, fim)
     a = mlauditoria.auditoria(s, e, inicio, fim)
-    cab = ["Gravidade", "Achado", "Data", "Pedido", "Produto / movimento", "Detalhe", "Esperado", "Cobrado / lançado", "Diferença"]
-    linhas = [[x["gravidade"], x["codigo"], x["data"], str(x["order_id"] or ""), x["descricao"], x["texto"], x["esperado"],
+    cab = ["Gravidade", "Achado", "Data", "Pedido", "Link no Mercado Livre", "Produto / movimento", "Detalhe", "Esperado", "Cobrado / lançado", "Diferença"]
+    linhas = [[x["gravidade"], x["codigo"], x["data"], str(x["order_id"] or ""),
+               mlivre.link_venda(x["order_id"]) if x["order_id"] else "", x["descricao"], x["texto"], x["esperado"],
                x["cobrado"], x["diferenca"]] for x in a["achados"]]
-    return _tabela_xlsx(f"Auditoria_ML_{inicio}_{fim}.xlsx", "Auditoria", cab, linhas, {6: MOEDA, 7: MOEDA, 8: MOEDA})
+    return _tabela_xlsx(f"Auditoria_ML_{inicio}_{fim}.xlsx", "Auditoria", cab, linhas, {7: MOEDA, 8: MOEDA, 9: MOEDA})
 
 
 def _xml_nota_ml(s, e, nid):
