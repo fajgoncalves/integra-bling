@@ -27,7 +27,7 @@ import rotina
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.15.2"
+VERSAO = "1.15.3"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -98,6 +98,13 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
+        if get_config(s, "migracao_1153_meses") != "1":  # 1.15.3: meses regravados com cobranças incompletas em 10/11
+            for e in s.scalars(select(Empresa)).all():
+                st = rotina.estado(e)
+                for m in ("2026-01", "2026-03", "2026-07"):
+                    st["ml_meses"].pop(m, None)
+                e.rotina_estado = json.dumps(st)
+            set_config(s, "migracao_1153_meses", "1")
         if get_config(s, "migracao_ml_separado") != "1":  # 1.10.0: Mercado Livre vira módulo separado da DRE principal
             for c in s.scalars(select(ContaOrigem).where(ContaOrigem.origem == "MLIVRE")).all():
                 s.delete(c)

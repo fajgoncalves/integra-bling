@@ -135,8 +135,14 @@ def _rodar_job(alvo, jid, **kw):
 def ml_mes(eid, mes):
     def fazer():
         jid = _job(eid, "ml_sync", {"inicio": mes, "fim": mes, "frete": True, "notas": True, "cobrancas": True, "ads": True})
-        msg = _rodar_job(mlivre.sincronizar, jid)
+        try:
+            msg = _rodar_job(mlivre.sincronizar, jid)
+        except Exception:
+            _salvar_estado(eid, lambda x: x["ml_meses"].pop(mes, None))  # o mês volta a ficar pendente
+            raise
         if "não devolveu parte das cobranças" in msg:
+            # a importação regravou o mês sem parte das cobranças: o mês volta a ficar pendente até vir completo
+            _salvar_estado(eid, lambda x: x["ml_meses"].pop(mes, None))
             raise RuntimeError(msg)
         if "publicidade não lida" in msg:  # não impede o mês; fica como aviso para verificar (ex.: permissão de publicidade)
             _falha(eid, f"ADS:{mes}", msg[msg.index("Atenção — publicidade"):][:1000], "", "AVISO", 0)
