@@ -499,7 +499,7 @@ def ler_csv(texto):
     return list(csv.reader(io.StringIO(texto), delimiter=sep))
 
 
-def extrato_api(cli: Cliente, d1: dt.date, d2: dt.date, andamento=None, espera=10, limite_s=900):
+def extrato_api(cli: Cliente, d1: dt.date, d2: dt.date, andamento=None, espera=15, limite_s=1500):
     """Gera o relatório de liberações no Mercado Pago (pela API) e devolve as linhas do arquivo (tabela)."""
     cfg = cli.req("GET", MP + "/v1/account/release_report/config", opcional=True)
     if not cfg:  # sem configuração: cria uma, com as colunas que a auditoria usa (não altera configuração existente)
@@ -510,20 +510,49 @@ def extrato_api(cli: Cliente, d1: dt.date, d2: dt.date, andamento=None, espera=1
                        "columns": [{"key": k} for k in COLUNAS_EXTRATO]})
     ini = f"{d1.isoformat()}T03:00:00Z"
     fim = f"{(d2 + dt.timedelta(days=1)).isoformat()}T02:59:59Z"
-    cli.req("POST", MP + "/v1/account/release_report", corpo={"begin_date": ini, "end_date": fim})
-    t0 = time.monotonic()
+    url_lista = MP + "/v1/account/release_report/list"
+
+    def lista():
+        r = cli.req("GET", url_lista, opcional=True) or []
+        return r if isinstance(r, list) else (r.get("results") or r.get("reports") or [])
+
+    def mesmo_periodo(x):
+        return str(x.get("begin_date", ""))[:10] == ini[:10] and str(x.get("end_date", ""))[:10] == fim[:10]
+
+    def pronto(x):
+        return bool(x.get("file_name")) and str(x.get("status") or "processed").lower() not in (
+            "pending", "processing", "in_progress", "waiting", "error", "failed")
+
+    def baixar(x):
+        return ler_csv(cli.req("GET", MP + f"/v1/account/release_report/{x['file_name']}", texto=True))
+
+    antes = lista()
+    # relatório do mesmo período já gerado (ex.: pedido anterior que demorou): usa ele
+    feitos = [x for x in antes if mesmo_periodo(x) and pronto(x)]
+    if feitos:
+        return baixar(sorted(feitos, key=lambda x: str(x.get("date_created") or x.get("id") or ""))[-1])
+    ids_antes = {str(x.get("id") or x.get("file_name")) for x in antes}
+    criado = cli.req("POST", MP + "/v1/account/release_report", corpo={"begin_date": ini, "end_date": fim}) or {}
+    t0, ultimo = time.monotonic(), []
     while time.monotonic() - t0 < limite_s:
-        lista = cli.req("GET", MP + "/v1/account/release_report/list", opcional=True) or []
-        prontos = [x for x in lista if str(x.get("begin_date", ""))[:10] == ini[:10] and str(x.get("end_date", ""))[:10] == fim[:10]
-                   and x.get("file_name") and str(x.get("status") or "processed").lower() in ("processed", "ready", "available", "")]
+        ultimo = lista()
+        novos = [x for x in ultimo if str(x.get("id") or x.get("file_name")) not in ids_antes
+                 or (criado.get("id") and x.get("id") == criado.get("id")) or mesmo_periodo(x)]
+        prontos = [x for x in novos if pronto(x)]
         if prontos:
-            arq = sorted(prontos, key=lambda x: str(x.get("date_created") or x.get("id") or ""))[-1]["file_name"]
-            return ler_csv(cli.req("GET", MP + f"/v1/account/release_report/{arq}", texto=True))
+            return baixar(sorted(prontos, key=lambda x: str(x.get("date_created") or x.get("id") or ""))[-1])
+        falhou = [x for x in novos if str(x.get("status") or "").lower() in ("error", "failed")]
+        if falhou:
+            raise MLErro(f"O Mercado Pago informou erro ao gerar o relatório: {json.dumps(falhou[-1])[:300]}")
         if andamento:
-            andamento(f"Aguardando o Mercado Pago gerar o relatório de liberações ({int(time.monotonic() - t0)}s)...")
+            andamento(f"Aguardando o Mercado Pago gerar o relatório de liberações ({int(time.monotonic() - t0)}s; "
+                      f"{len(novos)} relatório(s) novo(s) na lista)...")
         time.sleep(espera)
-    raise MLErro("O Mercado Pago não terminou de gerar o relatório de liberações. Tente de novo em alguns minutos, "
-                 "ou baixe o relatório no Mercado Pago e envie o arquivo na aba Extrato.")
+    resumo = json.dumps([{k: x.get(k) for k in ("id", "begin_date", "end_date", "status", "file_name", "date_created")}
+                         for x in ultimo[-3:]], ensure_ascii=False)[:500]
+    raise MLErro("O Mercado Pago ainda não terminou de gerar o relatório de liberações. O pedido ficou feito lá: tente "
+                 "Atualizar de novo daqui a alguns minutos (o sistema reaproveita o relatório quando ficar pronto). "
+                 f"Últimos relatórios na lista: {resumo}")
 
 
 def identificar_extrato(s, empresa_id, linhas):
@@ -569,7 +598,7 @@ def gravar_extrato(s, empresa_id, linhas, d1: dt.date, d2: dt.date):
     return n
 
 
-def sincronizar_extrato(job_id: int, cli: Cliente | None = None, espera=10):
+def sincronizar_extrato(job_id: int, cli: Cliente | None = None, espera=15):
     with SessionLocal() as s:
         job = s.get(Job, job_id)
         p = json.loads(job.parametros or "{}")
@@ -599,7 +628,7 @@ def sincronizar_extrato(job_id: int, cli: Cliente | None = None, espera=10):
         with SessionLocal() as s:
             j = s.get(Job, job_id)
             j.status, j.fim = "ERRO", agora()
-            j.mensagem = (f"{str(e)[:700]} — Se o Mercado Pago não liberar o relatório pela API, baixe o "
+            j.mensagem = (f"{str(e)[:1200]} — Se o Mercado Pago não liberar o relatório pela API, baixe o "
                           "Relatório de liberações no Mercado Pago (Relatórios → Liberações) e envie o arquivo na aba Extrato.")
             s.commit()
 
