@@ -270,7 +270,32 @@ def detalhe(s, emp: Empresa, order_id: int):
                      "cupom": _f(x.cupom), "como": x.identificacao,
                      "retencao": str(x.descricao or "").lower().startswith("reserve")} for x in ext],
         "componentes": [{"chave": k, "nome": n, "valor": (linha or {}).get("componentes", {}).get(k, 0.0)} for k, n in COMPONENTES],
+        "dominio_devolucoes": candidatas_devolucao(s, eid, v, notas),
+        "dominio_lida": v.data.strftime("%Y-%m") in dominio_lido(s, eid, v.data, v.data),
     }
+
+
+def candidatas_devolucao(s, eid, v: MLVenda, notas):
+    """Notas de entrada (devolução de venda) na Domínio que correspondem à venda: pela chave da nota de devolução emitida
+    no ML ou, sem ela, pelo mesmo valor da nota de venda até 120 dias depois."""
+    if not _f(v.devolvido):
+        return []
+    chaves = [n.chave for n in notas if n.tipo == "devolucao" and n.chave]
+    venda = next((n for n in notas if n.tipo == "venda"), None)
+    alvo = _f(venda.valor) if venda and venda.valor is not None else _f(v.pago)
+    q = select(DominioNota).where(DominioNota.empresa_id == eid, DominioNota.lado == "E", DominioNota.data >= v.data,
+                                  DominioNota.data <= v.data + dt.timedelta(days=120))
+    out = []
+    for n in s.scalars(q.order_by(DominioNota.data)).all():
+        if n.chave in chaves:
+            como = "chave da nota de devolução do ML"
+        elif abs(_f(n.valor) - alvo) <= 0.05:
+            como = "mesmo valor da nota de venda"
+        else:
+            continue
+        out.append({"data": n.data.isoformat(), "numero": n.numero, "serie": n.serie, "chave": n.chave, "cfop": n.cfop,
+                    "valor": _f(n.valor), "cancelada": n.cancelada, "como": como})
+    return out
 
 
 def extrato(s, emp: Empresa, de: dt.date, ate: dt.date):

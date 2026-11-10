@@ -311,18 +311,57 @@ def _nota(d, origem, empresa_id, order_id):
                   valor=_num(_procura(d, {"amount", "total_amount", "invoice_amount", "total"})) or None)
 
 
+def _lista(d):
+    if isinstance(d, list):
+        return d
+    if isinstance(d, dict):
+        for k in ("results", "invoices", "data"):
+            if isinstance(d.get(k), list):
+                return d[k]
+        return [d]
+    return []
+
+
 def notas_da_venda(cli: Cliente, seller: int, v: MLVenda):
-    """Nota emitida pelo emissor do ML; se não houver, a nota informada no envio (ERP como o Bling)."""
-    out = []
-    n = _nota(cli.get(f"/users/{seller}/invoices/orders/{v.order_id}", opcional=True), "EMISSOR_ML", v.empresa_id, v.order_id)
-    if n:
-        out.append(n)
-    elif v.shipping_id:
-        n = _nota(cli.get(f"/shipments/{v.shipping_id}/invoice_data", {"siteId": "MLB"}, opcional=True), "ENVIO",
-                  v.empresa_id, v.order_id)
-        if n:
-            out.append(n)
+    """Notas da venda: emitidas pelo emissor do ML (venda e, se houver, devolução); se não houver, a nota informada no envio
+    (ERP como o Bling). Para vendas com reembolso, procura também a nota do envio de devolução (reclamação → devolução)."""
+    out, chaves = [], set()
+
+    def junta(dados, origem, tipo=None):
+        for d in _lista(dados):
+            n = _nota(d, origem, v.empresa_id, v.order_id)
+            if n and (n.chave or n.numero) not in chaves:
+                if tipo:
+                    n.tipo = tipo
+                chaves.add(n.chave or n.numero)
+                out.append(n)
+
+    junta(cli.get(f"/users/{seller}/invoices/orders/{v.order_id}", opcional=True), "EMISSOR_ML")
+    if not out and v.shipping_id:
+        junta(cli.get(f"/shipments/{v.shipping_id}/invoice_data", {"siteId": "MLB"}, opcional=True), "ENVIO")
+    if float(v.devolvido or 0) > 0:
+        try:
+            for envio in envios_de_devolucao(cli, v.order_id):
+                junta(cli.get(f"/users/{seller}/invoices/shipments/{envio}", opcional=True), "EMISSOR_ML", "devolucao")
+        except MLErro:
+            pass  # sem acesso às reclamações: a conferência da devolução fica pela Domínio
     return out
+
+
+def envios_de_devolucao(cli: Cliente, order_id: int):
+    """Envios de devolução das reclamações do pedido (pós-venda)."""
+    envios = []
+    busca = cli.get("/post-purchase/v1/claims/search", {"resource_id": order_id, "resource": "order"}, opcional=True) or {}
+    for cl in (busca.get("data") or busca.get("results") or []):
+        cid = _int(cl.get("id"))
+        if not cid:
+            continue
+        dev = cli.get(f"/post-purchase/v2/claims/{cid}/returns", opcional=True) or {}
+        for sh in _lista(dev.get("shipments") if isinstance(dev, dict) and dev.get("shipments") is not None else dev):
+            sid = _int((sh or {}).get("shipment_id") or (sh or {}).get("id"))
+            if sid:
+                envios.append(sid)
+    return envios
 
 
 # ------------------------------------------------------------------ faturamento detalhado (cobrança por pedido)

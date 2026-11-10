@@ -160,6 +160,13 @@ def ml_falso(req: httpx.Request):
                                          "attributes": {"invoice_key": K1, "xml_location": "x"}})
     if url.path.startswith("/users/555/invoices/orders/"):
         return httpx.Response(404, json={"message": "invoice not found"})
+    if url.path == "/post-purchase/v1/claims/search":
+        return httpx.Response(200, json={"data": [{"id": 55}]} if q["resource_id"] == ["2000002"] else {"data": []})
+    if url.path == "/post-purchase/v2/claims/55/returns":
+        return httpx.Response(200, json={"shipments": [{"shipment_id": 4242, "destination": {"name": "seller_address"}}]})
+    if url.path == "/users/555/invoices/shipments/4242":
+        return httpx.Response(200, json={"invoice_number": 2003, "invoice_series": "1", "status": "authorized", "amount": 50.0,
+                                         "attributes": {"invoice_key": "31260212345678000190550010000020031000000033", "invoice_type": "devolution"}})
     if url.path == "/shipments/42/invoice_data":
         assert q["siteId"] == ["MLB"]
         return httpx.Response(200, json={"fiscal_key": K2, "invoice_number": "1002", "invoice_series": "1"})
@@ -231,7 +238,7 @@ def verifica_mercado_livre(c, eid):
         j = c.get(f"/api/jobs/{r['id']}").json()
         assert j["status"] == "OK", j["mensagem"]
         assert "3 pedidos (2 pagos)" in j["mensagem"] and "5 tarifas" in j["mensagem"], j["mensagem"]
-        assert "2 notas fiscais" in j["mensagem"] and "5 cobranças detalhadas" in j["mensagem"]
+        assert "3 notas fiscais" in j["mensagem"] and "5 cobranças detalhadas" in j["mensagem"]
         assert "não devolveu parte das cobranças" in j["mensagem"] and "02/2026 MP" in j["mensagem"]
         # extrato do Mercado Pago pela API (relatório de liberações)
         rx = c.post(f"/api/empresas/{eid}/mlivre/extrato/atualizar", json={"de": "2026-01-01", "ate": "2026-02-28"}).json()
@@ -301,6 +308,8 @@ def verifica_mercado_livre(c, eid):
     assert x["creditos"] == 159 and x["debitos"] == 159 and x["saldo_final"] == 0 and x["nao_identificados"] == 1
     assert {l["como"] for l in x["linhas"] if l["order_id"]} == {"pagamento"}
     d2 = c.get(f"/api/empresas/{eid}/mlivre/pedido/2000002").json()
+    assert d2["dominio_lida"] and [n["tipo"] for n in d2["notas"]] == ["venda", "devolucao"]
+    assert d2["dominio_devolucoes"][0]["numero"] == "2003" and d2["dominio_devolucoes"][0]["como"].startswith("chave")
     assert sum(1 for l in d2["extrato"] if l["retencao"]) == 4 and {c_["chave"]: c_["valor"] for c_ in d2["componentes"]}["frete_devolucao"] == -15
     a = c.get(f"/api/empresas/{eid}/mlivre/auditoria?inicio=2026-01&fim=2026-02").json()
     A = {}
@@ -361,7 +370,8 @@ def central_falsa(req: httpx.Request):
                          "cancelada": False},
                         {"data": "2026-01-20", "numero": "1009", "serie": "1", "chave": "31260112345678000190550010000010091000000099", "cfop": 5102, "valor": 500,
                          "cancelada": False}],
-        "notas_entrada": [],
+        "notas_entrada": [{"data": "2026-02-10", "numero": "2003", "serie": "1", "chave": "31260212345678000190550010000020031000000033", "cfop": 1202, "valor": 50,
+                           "cancelada": False}],
         "produtos": [{"produto": "100", "codigo": "CAM-001", "descricao": "Camiseta", "unidade": "UN"},
                      {"produto": "200", "codigo": "BON-9", "descricao": "Boné", "unidade": "UN"}]}})
 
