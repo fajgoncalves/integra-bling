@@ -15,7 +15,7 @@ from sqlalchemy import select, func
 
 import db
 from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Movimento, DominioValor, DominioItem, Produto, ProdutoCusto, Job,
-                MLVenda, MLItem, MLTarifa, MLCusto, MLNota, Auditoria, agora, PERFIS, TIPOS_LINHA)
+                MLVenda, MLItem, MLTarifa, MLCusto, MLNota, RotinaExec, RotinaFalha, Auditoria, agora, PERFIS, TIPOS_LINHA)
 import bling
 import dominio
 import dre
@@ -23,10 +23,11 @@ import fluxo
 import mlivre
 import mlanalise
 import mlauditoria
+import rotina
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.13.3"
+VERSAO = "1.14.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -42,9 +43,14 @@ def get_db():
         s.close()
 
 
+_parar_rotina = threading.Event()
+
+
 @app.on_event("startup")
 def iniciar():
     db.criar_tabelas()
+    if os.environ.get("INTEGRA_SEM_THREADS") != "1":
+        threading.Thread(target=rotina.agendador, args=(_parar_rotina,), daemon=True).start()
     with SessionLocal() as s:
         if not s.scalar(select(func.count(ModeloDRE.id))):
             dre.criar_modelo_padrao(s)
@@ -1054,6 +1060,65 @@ async def ml_custo_copiar(eid: int, request: Request, u=Depends(usuario), s=Depe
     audit(s, u.email, "ML_CUSTO_COPIA", f"{e.id} {mes}: {n}")
     s.commit()
     return {"ok": True, "copiados": n}
+
+
+# ------------------------------------------------------------------ rotina automática
+def _falha_json(s, f):
+    e = s.get(Empresa, f.empresa_id) if f.empresa_id else None
+    return {"id": f.id, "empresa_id": f.empresa_id, "empresa": e.nome if e else "", "etapa": f.etapa, "tipo": f.tipo,
+            "tentativas": f.tentativas, "noites": f.noites, "mensagem": f.mensagem, "detalhe": f.detalhe,
+            "primeira": dt2s(f.primeira), "ultima": dt2s(f.ultima), "resolvida_em": dt2s(f.resolvida_em)}
+
+
+@app.get("/api/rotina")
+def rotina_status(_u=Depends(usuario), s=Depends(get_db)):
+    execs = s.scalars(select(RotinaExec).order_by(RotinaExec.id.desc()).limit(15)).all()
+    falhas = s.scalars(select(RotinaFalha).where(RotinaFalha.resolvida_em.is_(None)).order_by(RotinaFalha.tipo, RotinaFalha.ultima.desc())).all()
+    emps = []
+    for e in s.scalars(select(Empresa).where(Empresa.ativo == True).order_by(Empresa.nome)).all():  # noqa: E712
+        st = rotina.estado(e)
+        emps.append({"id": e.id, "nome": e.nome, "ativa": bool(e.rotina_ativa), "ml": bool(e.ml_refresh),
+                     "dominio": bool(e.cnpj or e.codigo_dominio), "ml_meses": sorted(st["ml_meses"]),
+                     "dominio_meses": sorted(st["dominio_meses"]), "extrato_de": st.get("extrato_de"), "extrato_ate": st.get("extrato_ate")})
+    return {"ativa": get_config(s, "rotina_ativa") != "0", "inicio": rotina.inicio_padrao(s), "hora": f"{rotina.HORA:02d}:00",
+            "ultima_data": get_config(s, "rotina_ultima_data"),
+            "execucoes": [{"id": r.id, "inicio": dt2s(r.inicio), "fim": dt2s(r.fim), "origem": r.origem, "status": r.status,
+                           "resumo": r.resumo, "etapa": r.etapa} for r in execs],
+            "falhas": [_falha_json(s, f) for f in falhas], "empresas": emps}
+
+
+@app.put("/api/rotina")
+async def rotina_config(request: Request, u=Depends(admin), s=Depends(get_db)):
+    b = await request.json()
+    if "ativa" in b:
+        set_config(s, "rotina_ativa", "1" if b["ativa"] else "0")
+    if b.get("inicio"):
+        set_config(s, "rotina_inicio", _mes_ok(b["inicio"], "Início"))
+    for x in b.get("empresas") or []:
+        e = s.get(Empresa, int(x.get("id") or 0))
+        if e and "ativa" in x:
+            e.rotina_ativa = bool(x["ativa"])
+    audit(s, u.email, "ROTINA_CONFIG", json.dumps(b)[:500])
+    s.commit()
+    return rotina_status(u, s)
+
+
+@app.post("/api/rotina/executar")
+def rotina_executar(u=Depends(admin), s=Depends(get_db)):
+    audit(s, u.email, "ROTINA_MANUAL", "")
+    s.commit()
+    if os.environ.get("INTEGRA_SEM_THREADS") != "1":
+        threading.Thread(target=rotina.executar, args=("manual",), daemon=True).start()
+    return {"ok": True}
+
+
+@app.post("/api/rotina/falhas/{fid}/resolver")
+def rotina_resolver(fid: int, u=Depends(admin), s=Depends(get_db)):
+    f = s.get(RotinaFalha, fid) or _404()
+    f.resolvida_em = agora()
+    audit(s, u.email, "ROTINA_FALHA_RESOLVIDA", f"{f.empresa_id} {f.etapa}")
+    s.commit()
+    return {"ok": True}
 
 
 @app.post("/api/empresas/{eid}/dominio/importar")

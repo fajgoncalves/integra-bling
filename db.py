@@ -125,6 +125,8 @@ class Empresa(Base):
     ml_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
     ml_imposto_aliq: Mapped[float] = mapped_column(Numeric(7, 4), default=0)  # % de impostos sobre vendas (DRE do ML)
     ml_regras: Mapped[str] = mapped_column(Text, default="")  # JSON: comissão acordada por tipo de anúncio etc. (auditoria)
+    rotina_ativa: Mapped[bool] = mapped_column(Boolean, default=True)  # entra na rotina automática diária
+    rotina_estado: Mapped[str] = mapped_column(Text, default="")  # JSON: meses/extrato/Domínio já importados
     dominio_sync_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     dominio_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
     criado_em: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
@@ -411,6 +413,35 @@ class Job(Base):
     fim: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class RotinaExec(Base):
+    """Execução da rotina automática diária (Mercado Livre + Domínio)."""
+    __tablename__ = "rotina_exec"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    inicio: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
+    fim: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    origem: Mapped[str] = mapped_column(String(20), default="agendada")  # agendada / manual / retomada
+    status: Mapped[str] = mapped_column(String(20), default="EXECUTANDO")  # EXECUTANDO, OK, COM_FALHAS, INTERROMPIDA
+    resumo: Mapped[str] = mapped_column(Text, default="")
+    etapa: Mapped[str] = mapped_column(String(300), default="")
+
+
+class RotinaFalha(Base):
+    """Etapa da rotina que não deu certo depois das novas tentativas — fica aberta para o desenvolvedor verificar."""
+    __tablename__ = "rotina_falhas"
+    __table_args__ = (UniqueConstraint("empresa_id", "etapa"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int | None] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), nullable=True, index=True)
+    etapa: Mapped[str] = mapped_column(String(120))  # ex.: ML_MES:2026-03, ML_EXTRATO:2026-01-01:2026-04-30, DOMINIO:2026-10:2026-11
+    tipo: Mapped[str] = mapped_column(String(10), default="ERRO")  # ERRO (não importou) / AVISO (conferência)
+    tentativas: Mapped[int] = mapped_column(Integer, default=0)
+    noites: Mapped[int] = mapped_column(Integer, default=0)
+    mensagem: Mapped[str] = mapped_column(Text, default="")
+    detalhe: Mapped[str] = mapped_column(Text, default="")  # rastreio técnico (traceback)
+    primeira: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
+    ultima: Mapped[dt.datetime] = mapped_column(DateTime, default=agora)
+    resolvida_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class Auditoria(Base):
     __tablename__ = "auditoria"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -433,7 +464,8 @@ def criar_tabelas():
                           ("ml_user_id", "BIGINT"), ("ml_apelido", "VARCHAR(120) DEFAULT ''"),
                           ("ml_conectado_em", "TIMESTAMP"), ("ml_sync_em", "TIMESTAMP"),
                           ("ml_sync_periodo", "VARCHAR(30) DEFAULT ''"),
-                          ("ml_imposto_aliq", "NUMERIC(7,4) DEFAULT 0"), ("ml_regras", "TEXT DEFAULT ''")],
+                          ("ml_imposto_aliq", "NUMERIC(7,4) DEFAULT 0"), ("ml_regras", "TEXT DEFAULT ''"),
+                          ("rotina_ativa", "BOOLEAN DEFAULT TRUE"), ("rotina_estado", "TEXT DEFAULT ''")],
              "ml_vendas": [("frete", "NUMERIC(15,2)"), ("pagamentos", "VARCHAR(300) DEFAULT ''")],
              "ml_itens": [("categoria", "VARCHAR(30) DEFAULT ''")],
              "ml_notas": [("invoice_id", "BIGINT"), ("xml", "TEXT DEFAULT ''")]}

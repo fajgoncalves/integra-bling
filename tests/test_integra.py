@@ -150,8 +150,10 @@ def ml_falso(req: httpx.Request):
         return httpx.Response(200, json={"id": 555, "nickname": "LOJA_ALFA"})
     if url.path == "/orders/search":
         assert q["seller"] == ["555"]
+        import datetime as _d
+        br = _d.timezone(_d.timedelta(hours=-3))
         de, ate = q["order.date_closed.from"][0][:10], q["order.date_closed.to"][0][:10]
-        rs = [o for o in PEDIDOS if de <= (o.get("date_closed") or o["date_created"])[:10] <= ate]
+        rs = [o for o in PEDIDOS if de <= _d.datetime.fromisoformat(o.get("date_closed") or o["date_created"]).astimezone(br).date().isoformat() <= ate]
         off, lim = int(q["offset"][0]), int(q["limit"][0])
         return httpx.Response(200, json={"results": rs[off:off + lim], "paging": {"total": len(rs), "offset": off, "limit": lim}})
     if url.path == "/users/555/invoices/documents/xml/1377978/authorized":
@@ -181,7 +183,7 @@ def ml_falso(req: httpx.Request):
         assert "offset" not in q and q["limit"] == ["1000"]
         fid = int(q["from_id"][0])
         rs = [x for x in rs if str(x["charge_info"]["detail_id"]).isdigit() and x["charge_info"]["detail_id"] > fid or (fid == 0 and x["charge_info"]["detail_id"] == "null")]
-        if mes == "2026-02" and grupo == "MP":
+        if mes == "2026-02" and grupo == "MP" and ml_chamadas.get("mp500", True):
             return httpx.Response(500, json={"message": "internal"})
         return httpx.Response(200, json={"limit": 1000, "last_id": rs[-1]["charge_info"]["detail_id"] if rs else "null", "results": rs})
     if url.netloc == "api.mercadopago.com":
@@ -363,6 +365,33 @@ def verifica_mercado_livre(c, eid):
     r = c.post(f"/api/empresas/{eid}/mlivre/extrato/arquivo", json={"arquivo": base64.b64encode(arq.encode()).decode(), "nome": "x.csv"}).json()
     assert r["movimentos"] == 1 and r["identificados"] == 1 and r["de"] == "2026-03-02"
     assert c.post(f"/api/empresas/{eid}/mlivre/extrato/arquivo", json={"arquivo": base64.b64encode(b"a;b\n1;2").decode()}).status_code == 400
+    # rotina automática: importa desde 2026-01, tenta 3 vezes, registra a falha e resolve na noite seguinte
+    import rotina
+    import datetime as _dt
+    rotina.ESPERAS, rotina.dormir = [0, 0], (lambda _x: None)
+    dom = []
+    rotina.dominio_periodo = lambda eid_, ini, fim: (lambda: dom.append((ini, fim)))
+    c.put("/api/rotina", json={"ativa": True, "inicio": "2026-01"})
+    orig_http = mlivre.httpx.Client
+    mlivre.httpx.Client = lambda **kw: orig_http(transport=httpx.MockTransport(ml_falso))
+    try:
+        rotina.executar("manual", hoje=_dt.date(2026, 2, 20))
+        rt = c.get("/api/rotina").json()
+        E = {e_["id"]: e_ for e_ in rt["empresas"]}[eid]
+        assert E["ml_meses"] == ["2026-01"] and E["extrato_de"] == "2026-01-01" and E["extrato_ate"] == "2026-02-20"
+        F = {f["etapa"]: f for f in rt["falhas"]}
+        assert F["ML_MES:2026-02"]["tentativas"] == 3 and "cobranças" in F["ML_MES:2026-02"]["mensagem"]
+        assert rt["execucoes"][0]["status"] == "COM_FALHAS" and dom == [("2026-01", "2026-02")]
+        assert not any(k.startswith("CONFERE_PEDIDOS") for k in F)  # quantidade de pedidos confere com o ML
+        ml_chamadas["mp500"] = False  # o ML voltou a responder
+        rotina.executar("agendada", hoje=_dt.date(2026, 2, 21))
+        rt = c.get("/api/rotina").json()
+        E = {e_["id"]: e_ for e_ in rt["empresas"]}[eid]
+        assert E["ml_meses"] == ["2026-01", "2026-02"] and not rt["falhas"] and rt["execucoes"][0]["status"] == "OK"
+        assert dom[-1] == ("2026-01", "2026-02")  # Domínio: depois da 1ª vez, mês anterior e atual
+    finally:
+        mlivre.httpx.Client = orig_http
+        ml_chamadas["mp500"] = True
     assert c.post(f"/api/empresas/{eid}/mlivre/desconectar").json()["ml_conectado"] is False
 
 

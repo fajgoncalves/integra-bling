@@ -867,6 +867,7 @@ async function telaModelo(id) {
 async function telaConfig() {
   const [c, us] = await Promise.all([api("/api/config"), api("/api/usuarios")]);
   casca("config", `<div class="topo"><div><h1>Configurações</h1></div></div>
+    <div class="card" id="rotina"><h2>Rotina automática</h2><div class="suave">Carregando...</div></div>
     ${c.secret_key_no_ambiente ? "" : '<div class="aviso">A variável SECRET_KEY não está definida no servidor; os segredos estão cifrados com uma chave guardada no próprio banco.</div>'}
     <div class="card"><h2>Aplicativo do Bling (padrão)</h2>
       <div class="info peq">No Bling: <b>Central de Extensões → Área do Integrador → Criar aplicativo</b> (tipo API, uso privado). Em <b>Link de redirecionamento</b> coloque o endereço abaixo. Escopos (só leitura): <b>Categorias financeiras</b> e <b>Caixas e bancos</b>. Depois copie o Client ID e o Client Secret para cá.
@@ -897,6 +898,7 @@ async function telaConfig() {
     if ($("#cf-sec").value) b.bling_client_secret = $("#cf-sec").value;
     await api("/api/config", { method: "PUT", body: b }); toast("Aplicativo do Bling salvo."); telaConfig();
   }, ev.target);
+  carregarRotina();
   $("#cf-ml-copiar").onclick = () => { navigator.clipboard.writeText(c.ml_redirect_uri).then(() => toast("Copiado.")); };
   $("#cf-ml").onclick = (ev) => tentar(async () => {
     const b = { ml_client_id: $("#cf-ml-cid").value };
@@ -1346,6 +1348,42 @@ async function mlAuditoria(e) {
     }, ev.target);
   };
   await tentar(carregar);
+}
+
+// ------------------------------------------------------------------ rotina automática (Configurações)
+async function carregarRotina() {
+  const el = $("#rotina");
+  if (!el) return;
+  const r = await api("/api/rotina");
+  const ST = { OK: "b-ok", COM_FALHAS: "b-erro", EXECUTANDO: "b-aviso", INTERROMPIDA: "b-aviso" };
+  const rodando = r.execucoes.find((x) => x.status === "EXECUTANDO");
+  el.innerHTML = `<h2>Rotina automática</h2>
+    <div class="info peq">Todo dia às <b>${r.hora}</b> (horário de Brasília) o sistema importa sozinho, para as empresas marcadas: Mercado Livre (pedidos, itens, frete, notas, cobranças), extrato do Mercado Pago e Domínio (incluindo a lista de notas). Na primeira vez busca tudo desde o mês inicial; depois, os últimos meses e o que ficou para trás. Confere a quantidade de pedidos de cada mês com o ML e as vendas sem extrato, e reimporta o que não bater. Cada etapa tenta 3 vezes; o que não der certo fica abaixo em <b>Falhas abertas</b> (para o desenvolvedor) e é tentado de novo na noite seguinte. As atualizações manuais continuam funcionando.</div>
+    <div class="linha" style="margin-top:10px"><label class="chk"><input type="checkbox" id="rt-ativa" ${r.ativa ? "checked" : ""}> Rotina ligada</label>
+      <label>Importar desde <input type="month" id="rt-ini" value="${r.inicio}"></label>
+      <button class="btn" id="rt-salvar">Salvar</button><button class="btn pri" id="rt-agora" ${rodando ? "disabled" : ""}>${rodando ? "Em execução..." : "Rodar agora"}</button></div>
+    ${rodando ? `<div class="aviso" style="margin-top:8px">Em execução desde ${dataHora(rodando.inicio)}: ${esc(rodando.etapa || "")}</div>` : ""}
+    <h3>Empresas</h3><table><tr><th></th><th>Empresa</th><th>Mercado Livre (meses importados)</th><th>Extrato</th><th>Domínio (meses)</th></tr>
+      ${r.empresas.map((e) => `<tr><td><input type="checkbox" class="rt-emp" data-id="${e.id}" ${e.ativa ? "checked" : ""}></td><td>${esc(e.nome)}</td>
+        <td class="peq">${e.ml ? (e.ml_meses.length ? `${e.ml_meses.length} (${mesBR(e.ml_meses[0])} a ${mesBR(e.ml_meses[e.ml_meses.length - 1])})` : "ainda não") : '<span class="suave">não conectada</span>'}</td>
+        <td class="peq">${e.extrato_ate ? `${dataBR(e.extrato_de)} a ${dataBR(e.extrato_ate)}` : (e.ml ? "ainda não" : "—")}</td>
+        <td class="peq">${e.dominio ? (e.dominio_meses.length ? `${e.dominio_meses.length} (${mesBR(e.dominio_meses[0])} a ${mesBR(e.dominio_meses[e.dominio_meses.length - 1])})` : "ainda não") : '<span class="suave">sem CNPJ/código</span>'}</td></tr>`).join("")}</table>
+    <h3>Falhas abertas ${r.falhas.length ? `<span class="badge b-erro">${r.falhas.length}</span>` : '<span class="badge b-ok">nenhuma</span>'}</h3>
+    ${r.falhas.length ? `<table><tr><th>Empresa</th><th>Etapa</th><th>Mensagem</th><th>Tentativas</th><th>Desde</th><th></th></tr>
+      ${r.falhas.map((f) => `<tr><td>${esc(f.empresa)}</td><td class="mono peq">${esc(f.etapa)}${f.tipo === "AVISO" ? ' <span class="badge b-aviso">aviso</span>' : ""}</td>
+        <td class="peq">${esc(f.mensagem)}${f.detalhe ? `<details><summary class="suave">detalhe técnico</summary><pre style="white-space:pre-wrap;font-size:11px;max-height:240px;overflow:auto">${esc(f.detalhe)}</pre></details>` : ""}</td>
+        <td class="num">${f.tentativas} · ${f.noites} noite(s)</td><td class="peq">${dataHora(f.primeira)}</td><td><button class="btn peq rt-res" data-id="${f.id}">Marcar resolvida</button></td></tr>`).join("")}</table>` : ""}
+    <details style="margin-top:12px"><summary><b>Últimas execuções</b></summary><table><tr><th>Início</th><th>Fim</th><th>Origem</th><th>Situação</th><th>Resumo</th></tr>
+      ${r.execucoes.map((x) => `<tr><td class="peq">${dataHora(x.inicio)}</td><td class="peq">${x.fim ? dataHora(x.fim) : ""}</td><td>${esc(x.origem)}</td><td><span class="badge ${ST[x.status] || ""}">${esc(x.status)}</span></td><td class="peq" style="white-space:pre-line">${esc(x.resumo || x.etapa)}</td></tr>`).join("") || '<tr><td colspan="5" class="vazio">Ainda não rodou.</td></tr>'}</table></details>`;
+  $("#rt-salvar").onclick = (ev) => tentar(async () => {
+    await api("/api/rotina", { method: "PUT", body: { ativa: $("#rt-ativa").checked, inicio: $("#rt-ini").value, empresas: $$(".rt-emp").map((c) => ({ id: Number(c.dataset.id), ativa: c.checked })) } });
+    toast("Rotina salva."); carregarRotina();
+  }, ev.target);
+  $("#rt-agora").onclick = (ev) => tentar(async () => {
+    if (!confirm("Rodar a rotina agora? Na primeira vez ela importa tudo desde o mês inicial e pode levar horas.")) return;
+    await api("/api/rotina/executar", { method: "POST" }); toast("Rotina iniciada."); setTimeout(carregarRotina, 1500);
+  }, ev.target);
+  $$(".rt-res").forEach((b) => b.onclick = (ev) => tentar(async () => { await api(`/api/rotina/falhas/${b.dataset.id}/resolver`, { method: "POST" }); carregarRotina(); }, ev.target));
 }
 
 // ------------------------------------------------------------------ rotas

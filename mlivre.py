@@ -759,7 +759,24 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
         notas = []
         if p.get("notas", True):
             pagos_ = [v for v in vendas.values() if v.pago]
+            # notas já lidas: reaproveita quando a venda já tem a nota de venda (e a de devolução, se houve reembolso)
+            ja = {}
+            with SessionLocal() as s0:
+                ids0 = [v.order_id for v in pagos_]
+                for k in range(0, len(ids0), 5000):
+                    for n0 in s0.scalars(select(MLNota).where(MLNota.empresa_id == emp_id, MLNota.order_id.in_(ids0[k:k + 5000]))).all():
+                        ja.setdefault(n0.order_id, []).append(
+                            {c: getattr(n0, c) for c in ("origem", "tipo", "numero", "serie", "chave", "status", "data", "valor",
+                                                         "invoice_id", "xml")})
+            reaproveitadas = 0
             for n, v in enumerate(pagos_, 1):
+                velhas = ja.get(v.order_id) or []
+                completas = any(x["tipo"] == "venda" for x in velhas) and (
+                    not float(v.devolvido or 0) or any(x["tipo"] == "devolucao" for x in velhas))
+                if completas and not p.get("notas_todas"):
+                    notas += [MLNota(empresa_id=emp_id, order_id=v.order_id, **x) for x in velhas]
+                    reaproveitadas += 1
+                    continue
                 if n % 25 == 1:
                     andamento(f"Lendo a nota fiscal de cada venda ({n} de {len(pagos_)})...", n, len(pagos_))
                 notas += notas_da_venda(cli, seller, v)
