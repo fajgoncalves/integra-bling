@@ -1,5 +1,5 @@
 "use strict";
-/* Integra Bling — front-end (JavaScript puro). */
+/* Seller 360 (antigo Integra Bling) — front-end (JavaScript puro). */
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -89,8 +89,8 @@ function casca(ativo, corpo) {
   if (EU && EU.perfil === "ADMIN") it.push(["config", "Configurações"]);
   $("#app").innerHTML = `<div class="layout">
     <nav class="lateral">
-      <div class="marca"><svg width="30" height="30" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#fff" fill-opacity=".14"/><text x="16" y="21" text-anchor="middle" font-size="13" font-weight="700" fill="#fff" font-family="Segoe UI,Arial">IB</text><path d="M7 26h18" stroke="#34C3A0" stroke-width="2.2"/></svg>
-        <div>Integra Bling<small>Alta Visão Contabilidade</small></div></div>
+      <div class="marca"><svg width="32" height="32" viewBox="0 0 64 64"><path d="M25 21v-6a7 7 0 0 1 14 0v6" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round"/><path d="M10 20h44l-3.5 36a4 4 0 0 1-4 3.6H17.5a4 4 0 0 1-4-3.6z" fill="#fff"/><path d="M42.5 36.5a10.5 10.5 0 1 1-3.1-7.4" fill="none" stroke="#1F9D7A" stroke-width="3.6" stroke-linecap="round"/><path d="M36.2 25.6l6.2 0.9-0.9 6.2" fill="none" stroke="#1F9D7A" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M26.5 41l4-4.2 3 2.6 4.3-5" fill="none" stroke="#1F3A5F" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div>Seller <span style="color:#34C3A0">360</span><small>Alta Visão Contabilidade</small></div></div>
       ${it.map(([h, t]) => `<a href="#/${h}" class="${ativo === h ? "ativo" : ""}">${t}</a>`).join("")}
       <div class="rodape">${esc(EU ? EU.nome : "")}${EU ? ` · ${EU.perfil === "ADMIN" ? "Administrador" : "Operador"}` : ""}<br><span class="peq" style="opacity:.6">versão ${esc(VERSAO_TELA || "")}</span><br><a href="#" id="trocar-senha">Trocar senha</a> · <a href="#" id="sair">Sair</a></div>
     </nav>
@@ -113,7 +113,7 @@ function telaSenha() {
 // ------------------------------------------------------------------ login e primeiro acesso
 function telaLogin(setup) {
   $("#app").innerHTML = `<div class="login"><div class="card">
-    <div class="marca" style="color:var(--azul);padding:0 0 14px"><div><b style="font-size:20px">Integra Bling</b><br><span class="suave peq">DRE multiempresa · Bling + Domínio</span></div></div>
+    <div style="padding:0 0 14px"><img src="/static/img/logo.svg" alt="Seller 360" style="width:240px;max-width:100%"><div class="suave peq" style="margin-top:4px">Resultado de e-commerce · Mercado Livre, Bling e Domínio</div></div>
     ${setup ? `<div class="info">Primeiro acesso: crie o usuário administrador.</div><label>Nome <input id="l-nome"></label><br>` : ""}
     <label>E-mail <input id="l-email" type="email" autocomplete="username"></label><br>
     <label>Senha <input id="l-senha" type="password" autocomplete="${setup ? "new-password" : "current-password"}"></label><br>
@@ -883,7 +883,7 @@ async function telaConfig() {
       <label>Secret Key <input id="cf-ml-sec" type="password" placeholder="${c.ml_secret_definido ? "(guardada — preencha para trocar)" : ""}"></label></div>
       <div class="linha" style="margin-top:12px"><button class="btn pri" id="cf-ml">Salvar</button></div></div>
     <div class="card"><h2>Central de Inteligência 360 (Domínio)</h2>
-      <div class="info peq">Na Central: <b>Administração → Gerar chave</b>, tipo <b>Integra Bling</b>. A chave só lê: lista de clientes e faturamento/devoluções da Domínio pelo Agente 360.</div>
+      <div class="info peq">Na Central: <b>Administração → Gerar chave</b>, tipo <b>Seller 360</b> (antes “Integra Bling”). A chave só lê: lista de clientes e faturamento/devoluções da Domínio pelo Agente 360.</div>
       <div class="form"><label>Endereço da Central <input id="cf-url" value="${esc(c.central_url)}" placeholder="https://..."></label>
       <label>Chave de API <input id="cf-chave" type="password" placeholder="${c.central_chave_definida ? "(guardada — preencha para trocar)" : "f360_..."}"></label></div>
       <div class="linha" style="margin-top:12px"><button class="btn pri" id="cf-central">Salvar</button><button class="btn" id="cf-testar">Testar conexão</button></div></div>

@@ -1,4 +1,4 @@
-"""Integra Bling — DRE multiempresa com dados do Bling (contas a pagar e a receber) e da Domínio
+"""Seller 360 (antigo Integra Bling) — DRE multiempresa com dados do Bling (contas a pagar e a receber) e da Domínio
 (faturamento e devoluções, via Central de Inteligência 360). Alta Visão Contabilidade."""
 import io
 import re
@@ -27,10 +27,10 @@ import rotina
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.15.3"
+VERSAO = "1.16.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
-app = FastAPI(title="Integra Bling", version=VERSAO)
+app = FastAPI(title="Seller 360", version=VERSAO)
 app.mount("/static", StaticFiles(directory=RAIZ / "static"), name="static")
 
 
