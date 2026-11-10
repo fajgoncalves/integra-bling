@@ -636,3 +636,16 @@ def test_fluxo_completo():
         assert c.post("/api/login", json={"email": "op@x.com", "senha": "senha-forte-2"}).status_code == 200
         assert c.get("/api/config").status_code == 403
         assert c.get("/api/empresas").status_code == 200
+
+
+def test_estorno_unico_de_varias_cobrancas():
+    """Venda cancelada: tarifa (20,45) e frete (29,25) cobrados e um único estorno de 49,70 com outra descrição."""
+    from types import SimpleNamespace as N
+    import mlauditoria as ma
+    cobs = [N(id=1, documento="BILL", natureza="CHARGE", tipo="CV", descricao="Tarifa de venda", valor=-20.45),
+            N(id=2, documento="BILL", natureza="CHARGE", tipo="CXD", descricao="Custo de envio", valor=-29.25),
+            N(id=3, documento="CREDIT_NOTE", natureza="CHARGE", tipo="ANU", descricao="Anulação de cargos", valor=49.70)]
+    assert ma.grupos_do_pedido(cobs)[3] == "RATEIO"
+    cobs[2].valor = 20.45  # estorno só da tarifa, pelo valor
+    g = ma.grupos_do_pedido(cobs)
+    assert g[3] == "COMISSAO"

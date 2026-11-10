@@ -57,6 +57,28 @@ def grupo_cobranca(c: MLCobranca):
     return "OUTRAS"
 
 
+def grupos_do_pedido(cobs):
+    """{id da cobrança: grupo}. Estornos (nota de crédito) vão para o grupo da cobrança que estornam: pelo mesmo valor;
+    se não casar um a um e o total dos estornos for igual ao das cobranças em aberto, cada estorno acompanha essas cobranças."""
+    grupo = {c.id: grupo_cobranca(c) for c in cobs}
+    cobradas = [c for c in cobs if c.documento != "CREDIT_NOTE" and c.natureza == "CHARGE"]
+    estornos = [c for c in cobs if c.documento == "CREDIT_NOTE" and _f(c.valor) > 0]
+    livres = list(cobradas)
+    sobra = []
+    for e in estornos:
+        par = next((c for c in livres if abs(abs(_f(c.valor)) - _f(e.valor)) <= 0.01), None)
+        if par:
+            grupo[e.id] = grupo[par.id]
+            livres.remove(par)
+        else:
+            sobra.append(e)
+    if sobra and livres and abs(sum(_f(e.valor) for e in sobra) - sum(abs(_f(c.valor)) for c in livres)) <= 0.02:
+        # estorno único de várias cobranças: distribui o rótulo pelo grupo da maior parte; o valor é rateado em painel()
+        for e in sobra:
+            grupo[e.id] = "RATEIO"
+    return grupo
+
+
 # composição do resultado da venda (valores com sinal)
 COMPONENTES = [("venda", "Venda (produtos)"), ("frete_comprador", "Frete pago pelo comprador"), ("reembolso", "Devolvido ao comprador"),
                ("tarifa", "Tarifa de venda"), ("parcelamento", "Parcelamento"), ("frete", "Frete (envio)"),
@@ -164,8 +186,18 @@ def painel(s, emp: Empresa, ini, fim):
         dev_prod = min(dev_total, pago)
         r = res_an.get(v.order_id) or {"imposto": aliq * (pago - dev_prod), "cmv": 0.0, "sem_custo": [], "estimado": False}
         g = defaultdict(float)
+        gp = grupos_do_pedido(cobs[v.order_id])
+        rateio = 0.0
         for c in cobs[v.order_id]:
-            g[grupo_cobranca(c)] += _f(c.valor)
+            if gp[c.id] == "RATEIO":
+                rateio += _f(c.valor)
+            else:
+                g[gp[c.id]] += _f(c.valor)
+        if rateio:  # estorno que cobre várias cobranças: volta para cada grupo na proporção do que foi cobrado
+            base = {k: -x for k, x in g.items() if x < 0 and k != "BONUS"}
+            tot = sum(base.values()) or 1
+            for k, x in base.items():
+                g[k] += rateio * x / tot
         g = {k: round(g.get(k, 0.0), 2) for k, _n in GRUPOS_COBRANCA}
         linhas_ext = ext[v.order_id]
         tem_pagamento = any(str(x.descricao).lower() == "payment" for x in linhas_ext)
@@ -195,7 +227,7 @@ def painel(s, emp: Empresa, ini, fim):
             c.update({"frete_comprador": 0.0, "reembolso": -dev_total, "tarifa": 0.0 if integral else -_f(v.comissao),
                       "parcelamento": 0.0, "frete": -_f(v.frete), "frete_devolucao": 0.0, "outras": 0.0})
             retido, fonte = 0.0, "pedido"
-        c = {k: round(c.get(k, 0.0), 2) for k, _n in COMPONENTES}
+        c = {k: round(c.get(k, 0.0), 2) + 0.0 for k, _n in COMPONENTES}
         resultado = round(sum(c.values()), 2)
         integral = dev_prod >= pago - 0.01 and dev_total > 0
         ns = notas[v.order_id]
@@ -226,7 +258,7 @@ def painel(s, emp: Empresa, ini, fim):
             "vendas": round(pago, 2), "devolvido": round(dev_total, 2), "devolucao_integral": integral,
             "imposto": round(r["imposto"], 2), "cmv": round(r["cmv"], 2), "sem_custo": bool(r["sem_custo"]),
             "cobrancas": g, "cobrancas_liq": round(sum(g.values()), 2),
-            "custo_devolucao": round(-resultado, 2) if integral else None,
+            "custo_devolucao": round(-resultado, 2) + 0.0 if integral else None,
             "extrato_credito": e_cred, "extrato_debito": e_deb, "extrato_liquido": round(e_cred - e_deb, 2),
             "extrato_linhas": len(linhas_ext), "no_periodo_extrato": bool(ext_min and ext_max and ext_min.date() <= v.data <= ext_max.date()),
         })
@@ -247,6 +279,7 @@ def detalhe(s, emp: Empresa, order_id: int):
                                                                    DominioNota.chave.in_([n.chave for n in notas if n.chave] or ["-"]))).all()}
     cobs = s.scalars(select(MLCobranca).where(MLCobranca.empresa_id == eid, MLCobranca.order_id == order_id)
                      .order_by(MLCobranca.data, MLCobranca.detail_id)).all()
+    gp = grupos_do_pedido(cobs)
     ext = s.scalars(select(MLExtrato).where(MLExtrato.empresa_id == eid, MLExtrato.order_id == order_id).order_by(MLExtrato.data)).all()
     return {
         "pedido": linha,
@@ -262,7 +295,9 @@ def detalhe(s, emp: Empresa, order_id: int):
                   for n in notas],
         "cobrancas": [{"data": c.data.isoformat() if c.data else None, "periodo": c.periodo, "grupo": c.grupo,
                        "documento": "Estorno (nota de crédito)" if c.documento == "CREDIT_NOTE" else "Fatura",
-                       "tipo": c.tipo, "descricao": c.descricao, "classe": dict(GRUPOS_COBRANCA)[grupo_cobranca(c)],
+                       "tipo": c.tipo, "descricao": c.descricao,
+                       "classe": ("Estorno de várias cobranças" if gp[c.id] == "RATEIO" else
+                                  ("Estorno: " if c.documento == "CREDIT_NOTE" else "") + dict(GRUPOS_COBRANCA)[gp[c.id]]),
                        "valor": _f(c.valor), "debitada": c.debitada} for c in cobs],
         "extrato": [{"data": x.data.isoformat(sep=" ")[:16], "descricao": rotulo_extrato(x.descricao), "tipo": x.descricao,
                      "origem_id": x.origem_id, "credito": _f(x.credito), "debito": _f(x.debito), "bruto": _f(x.bruto),
