@@ -15,7 +15,7 @@ import threading
 import httpx
 from sqlalchemy import select, delete
 
-from db import SessionLocal, Empresa, MLVenda, MLItem, MLTarifa, MLNota, MLCobranca, MLExtrato, Job, agora, FUSO
+from db import SessionLocal, Empresa, MLVenda, MLItem, MLTarifa, MLNota, MLCobranca, MLExtrato, MLAds, Job, agora, FUSO
 from seguranca import cifrar, decifrar, get_config
 
 AUTORIZAR = "https://auth.mercadolivre.com.br/authorization"
@@ -119,7 +119,7 @@ class Cliente:
             if self.sessao is None:
                 s.close()
 
-    def req(self, metodo, url, params=None, corpo=None, opcional=False, texto=False):
+    def req(self, metodo, url, params=None, corpo=None, opcional=False, texto=False, cabecalhos=None):
         """Chamada autenticada. url pode ser um caminho da API do ML ou um endereço completo (Mercado Pago)."""
         alvo = url if url.startswith("http") else API + url
         renovou, ultimo = False, ""
@@ -130,7 +130,8 @@ class Cliente:
                     time.sleep(espera)
                 _ultima[0] = time.monotonic()
             r = self.http.request(metodo, alvo, params=params, json=corpo,
-                                  headers={"Authorization": f"Bearer {self._access()}", "Accept": "application/json"})
+                                  headers={"Authorization": f"Bearer {self._access()}", "Accept": "application/json",
+                                           **(cabecalhos or {})})
             if r.status_code == 401 and not renovou:
                 self._access(forcar=True)
                 renovou = True
@@ -583,6 +584,7 @@ def ler_csv(texto):
     return list(csv.reader(io.StringIO(texto), delimiter=sep))
 
 
+_relatorios_pedidos = {}  # (empresa, início, fim) → quando o relatório foi pedido ao Mercado Pago
 MAX_DIAS_RELATORIO = 85  # o Mercado Pago aceita intervalos menores que 90 dias
 
 
@@ -633,11 +635,18 @@ def _extrato_api_bloco(cli: Cliente, d1: dt.date, d2: dt.date, andamento=None, e
     if feitos:
         return baixar(sorted(feitos, key=lambda x: str(x.get("date_created") or x.get("id") or ""))[-1])
     ids_antes = {str(x.get("id") or x.get("file_name")) for x in antes}
-    criado = cli.req("POST", MP + "/v1/account/release_report", corpo={"begin_date": ini, "end_date": fim}) or {}
+    chave_pedido = (cli.empresa_id, ini, fim)
+    pedido_em = _relatorios_pedidos.get(chave_pedido)
+    if pedido_em and time.time() - pedido_em < 3 * 3600:
+        criado = {}  # já pedido há pouco (o MP ainda está gerando): só espera, sem pedir outro
+        ids_antes = set()
+    else:
+        criado = cli.req("POST", MP + "/v1/account/release_report", corpo={"begin_date": ini, "end_date": fim}) or {}
+        _relatorios_pedidos[chave_pedido] = time.time()
     t0, ultimo = time.monotonic(), []
     while time.monotonic() - t0 < limite_s:
         ultimo = lista()
-        novos = [x for x in ultimo if str(x.get("id") or x.get("file_name")) not in ids_antes
+        novos = [x for x in ultimo if (criado and str(x.get("id") or x.get("file_name")) not in ids_antes)
                  or (criado.get("id") and x.get("id") == criado.get("id")) or mesmo_periodo(x)]
         prontos = [x for x in novos if pronto(x)]
         if prontos:
@@ -699,7 +708,7 @@ def gravar_extrato(s, empresa_id, linhas, d1: dt.date, d2: dt.date):
     return n
 
 
-def sincronizar_extrato(job_id: int, cli: Cliente | None = None, espera=15):
+def sincronizar_extrato(job_id: int, cli: Cliente | None = None, espera=15, limite_s=1500):
     with SessionLocal() as s:
         job = s.get(Job, job_id)
         p = json.loads(job.parametros or "{}")
@@ -715,7 +724,7 @@ def sincronizar_extrato(job_id: int, cli: Cliente | None = None, espera=15):
 
     try:
         d1, d2 = dt.date.fromisoformat(p["de"]), dt.date.fromisoformat(p["ate"])
-        tabela = extrato_api(cli, d1, d2, andamento, espera=espera)
+        tabela = extrato_api(cli, d1, d2, andamento, espera=espera, limite_s=limite_s)
         linhas, faltam = linhas_extrato(tabela, emp_id, "API")
         with SessionLocal() as s:
             n = gravar_extrato(s, emp_id, linhas, d1, d2)
@@ -732,6 +741,54 @@ def sincronizar_extrato(job_id: int, cli: Cliente | None = None, espera=15):
             j.mensagem = (f"{str(e)[:1200]} — Se o Mercado Pago não liberar o relatório pela API, baixe o "
                           "Relatório de liberações no Mercado Pago (Relatórios → Liberações) e envie o arquivo na aba Extrato.")
             s.commit()
+
+
+# ------------------------------------------------------------------ Product Ads (custo por anúncio)
+METRICAS_ADS = "clicks,prints,cost,direct_units_quantity,indirect_units_quantity,direct_amount,indirect_amount"
+
+
+def anunciante(cli: Cliente):
+    """(advertiser_id, site) do Product Ads da conta, ou (None, None) se a conta não anuncia / sem permissão."""
+    r = cli.req("GET", "/advertising/advertisers", {"product_id": "PADS"}, opcional=True, cabecalhos={"Api-Version": "1"})
+    for a in (r or {}).get("advertisers") or []:
+        if a.get("advertiser_id"):
+            return int(a["advertiser_id"]), str(a.get("site_id") or "MLB")
+    return None, None
+
+
+def ads_do_mes(cli: Cliente, mes: str, empresa_id: int):
+    """[MLAds] do mês (um por anúncio com custo). Levanta MLErro se a API de publicidade não responder."""
+    adv, site = anunciante(cli)
+    if not adv:
+        return None  # conta sem Product Ads (ou sem permissão de publicidade)
+    d1, d2 = dt.date.fromisoformat(mes + "-01"), _fim_mes(mes)
+    d2 = min(d2, agora().date())
+    out, off = {}, 0
+    while True:
+        r = cli.req("GET", f"/advertising/{site}/advertisers/{adv}/product_ads/ads/search",
+                    {"limit": 100, "offset": off, "date_from": d1.isoformat(), "date_to": d2.isoformat(),
+                     "metrics": METRICAS_ADS}, cabecalhos={"api-version": "2"})
+        res = (r or {}).get("results") or []
+        for x in res:
+            m = x.get("metrics") or {}
+            item = str(x.get("item_id") or "")
+            custo = _num(m.get("cost"))
+            if not item or not custo:
+                continue
+            a = out.get(item)
+            if not a:
+                a = out[item] = MLAds(empresa_id=empresa_id, mes=mes, anuncio=item[:30], titulo=str(x.get("title") or "")[:300],
+                                      custo=0, cliques=0, impressoes=0, vendas_ads_qtd=0, vendas_ads_valor=0)
+            a.custo = round(float(a.custo) + custo, 2)
+            a.cliques += int(_num(m.get("clicks")))
+            a.impressoes += int(_num(m.get("prints")))
+            a.vendas_ads_qtd = float(a.vendas_ads_qtd) + _num(m.get("direct_units_quantity")) + _num(m.get("indirect_units_quantity"))
+            a.vendas_ads_valor = float(a.vendas_ads_valor) + _num(m.get("direct_amount")) + _num(m.get("indirect_amount"))
+        total = int(((r or {}).get("paging") or {}).get("total") or 0)
+        off += len(res)
+        if not res or off >= total:
+            break
+    return list(out.values())
 
 
 # ------------------------------------------------------------------ job
@@ -811,6 +868,16 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
             for n, mes in enumerate(meses, 1):
                 andamento(f"Lendo as cobranças pedido a pedido de {mes[5:]}/{mes[:4]}...", n, len(meses))
                 cobs += cobrancas(cli, mes, emp_id, andamento, avisos_cob)
+        ads, avisos_ads = {}, []
+        if p.get("ads", True):
+            for n, mes in enumerate(meses, 1):
+                andamento(f"Lendo o Product Ads (custo por anúncio) de {mes[5:]}/{mes[:4]}...", n, len(meses))
+                try:
+                    r_ = ads_do_mes(cli, mes, emp_id)
+                    if r_ is not None:
+                        ads[mes] = r_
+                except MLErro as e:
+                    avisos_ads.append(f"{mes[5:]}/{mes[:4]}: {e}")
         tarifas = []
         for n, mes in enumerate(meses, 1):
             andamento(f"Lendo o faturamento (tarifas) de {mes[5:]}/{mes[:4]}...", n, len(meses))
@@ -841,6 +908,9 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
             s.add_all(vendas.values())
             for lin in itens.values():
                 s.add_all(lin)
+            for mes_, lista_ in ads.items():
+                s.execute(delete(MLAds).where(MLAds.empresa_id == emp_id, MLAds.mes == mes_))
+                s.add_all(lista_)
             s.add_all(tarifas)
             s.add_all(notas)
             s.add_all(cobs)
@@ -856,8 +926,10 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
                           f"tarifas/bonificações do faturamento, de {ini[5:]}/{ini[:4]} a {fim[5:]}/{fim[:4]}."
                           + (f" {len(notas)} notas fiscais." if p.get("notas", True) else "")
                           + (f" {len(cobs)} cobranças detalhadas." if p.get("cobrancas", True) else "")
+                          + (f" Product Ads: {sum(len(x) for x in ads.values())} anúncio(s) com custo." if ads else "")
                           + (" Atenção — o Mercado Livre não devolveu parte das cobranças detalhadas: " + "; ".join(avisos_cob)[:600]
-                             if avisos_cob else ""))
+                             if avisos_cob else "")
+                          + (" Atenção — publicidade não lida: " + "; ".join(avisos_ads)[:400] if avisos_ads else ""))
             s.commit()
     except Exception as e:  # noqa: BLE001
         with SessionLocal() as s:

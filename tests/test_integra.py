@@ -165,6 +165,16 @@ def ml_falso(req: httpx.Request):
                                          "attributes": {"invoice_key": K1, "xml_location": "x"}})
     if url.path.startswith("/users/555/invoices/orders/"):
         return httpx.Response(404, json={"message": "invoice not found"})
+    if url.path == "/advertising/advertisers":
+        assert q["product_id"] == ["PADS"] and req.headers.get("api-version") == "1"
+        return httpx.Response(200, json={"advertisers": [{"advertiser_id": 77, "site_id": "MLB", "advertiser_name": "Loja"}]})
+    if url.path == "/advertising/MLB/advertisers/77/product_ads/ads/search":
+        assert req.headers.get("api-version") == "2" and "cost" in q["metrics"][0]
+        rs = [{"item_id": "MLB1", "title": "Câmera", "metrics": {"cost": 8.0, "clicks": 40, "prints": 900, "direct_units_quantity": 1}},
+              {"item_id": "MLB9", "title": "Lente", "metrics": {"cost": 5.0, "clicks": 12, "prints": 300}},
+              {"item_id": "MLB2", "title": "Cabo", "metrics": {"cost": 0, "clicks": 0}}] if q["date_from"] == ["2026-01-01"] else []
+        off = int(q["offset"][0])
+        return httpx.Response(200, json={"paging": {"total": len(rs), "offset": off, "limit": 100}, "results": rs[off:off + 100]})
     if url.path == "/post-purchase/v1/claims/search":
         return httpx.Response(200, json={"data": [{"id": 55}]} if q["resource_id"] == ["2000002"] else {"data": []})
     if url.path == "/post-purchase/v2/claims/55/returns":
@@ -302,7 +312,7 @@ def verifica_mercado_livre(c, eid):
     assert not any("sem custo" in a for a in d["avisos"])
     assert c.get(f"/api/empresas/{eid}/mlivre/dre.xlsx?inicio=2026-01&fim=2026-02").status_code == 200
     pr = {x["chave"]: x for x in c.get(f"/api/empresas/{eid}/mlivre/produtos?inicio=2026-01&fim=2026-02").json()["itens"]}
-    assert pr["CAM-001"]["margem"] == 33 and pr["CAM-001"]["tipos"] == "Premium" and pr["MLB2"]["qtd"] == 0
+    assert pr["CAM-001"]["margem_antes_ads"] == 33 and pr["CAM-001"]["publicidade"] == 8 and pr["CAM-001"]["margem"] == 25 and pr["CAM-001"]["tipos"] == "Premium" and pr["MLB2"]["qtd"] == 0
     ts = c.get(f"/api/empresas/{eid}/mlivre/tarifas?inicio=2026-01&fim=2026-02").json()
     assert len(ts) == 5 and {t["linha"] for t in ts if t["tipo"] == "CXD"} == {"Mercado Envios (frete)"}
     # rastreabilidade: painel por pedido
@@ -311,7 +321,8 @@ def verifica_mercado_livre(c, eid):
     assert a1["nota"]["numero"] == "1001" and a1["nota"]["origem"] == "EMISSOR_ML" and a1["dominio"] == "escriturada"
     assert a2["nota"]["chave"] == K2 and a2["nota"]["origem"] == "ENVIO" and a2["dominio"] == "não escriturada"
     assert a1["cobrancas"]["COMISSAO"] == -13 and a1["cobrancas"]["FRETE"] == -20 and a1["fonte"] == "extrato"
-    assert a1["resultado"] == 100 - 10 - 33 - 25 and a1["extrato_liquido"] == 67
+    assert a1["componentes"]["publicidade"] == -8  # Product Ads do anúncio MLB1 em jan (1 unidade vendida)
+    assert a1["resultado"] == 100 - 10 - 33 - 25 - 8 and a1["extrato_liquido"] == 67
     # devolução com disputa: retenções se anulam, tarifa estornada no MP, frete de ida e de volta ficam com o vendedor
     c2 = a2["componentes"]
     assert (c2["venda"], c2["frete_comprador"], c2["reembolso"], c2["tarifa"], c2["frete"], c2["frete_devolucao"]) == (50, 10, -60, 0, -20, -15)
@@ -361,6 +372,15 @@ def verifica_mercado_livre(c, eid):
     assert not {"SEM_NOTA", "NOTA_NAO_ESCRITURADA", "VENDA_SEM_EXTRATO", "FRETE_DIVERGENTE", "VALOR_RETIDO",
                 "DEVOLUCAO_SEM_NOTA_ENTRADA"} & set(A)
     assert [n["numero"] for n in a["dominio_sem_ml"]] == ["1009"] and a["tem_cobrancas"] and a["tem_extrato"]
+    assert A["ADS_FATURA_DIVERGENTE"][0]["esperado"] == 13 and A["ADS_FATURA_DIVERGENTE"][0]["cobrado"] == 10
+    assert A["ADS_SEM_VENDA"][0]["cobrado"] == 5 and "FATURA_SEM_DETALHE" in A
+    fo = c.get(f"/api/empresas/{eid}/mlivre/fora?inicio=2026-01&fim=2026-02").json()
+    FM = {m["mes"]: m for m in fo["meses"]}
+    assert FM["2026-01"]["ads_api"] == 13 and FM["2026-01"]["ads_rateado"] == 8 and FM["2026-01"]["ads_sem_venda"] == 5
+    assert FM["2026-01"]["fatura_resumo"] == -60 and fo["ads_sem_venda"][0]["anuncio"] == "MLB9"
+    assert {g["tipo"] for g in fo["extrato_grupos"]} == {"mediation", "payout"} and fo["extrato_grupos"][-1]["saque"]
+    assert any(x["valor"] == -1 for x in fo["faturamento_sem_pedido"])
+    assert c.get(f"/api/empresas/{eid}/mlivre/fora.xlsx?inicio=2026-01&fim=2026-02").status_code == 200
     # comissão acordada: Premium 11% → 12,00 cobrado acima do esperado 11,00
     c.put(f"/api/empresas/{eid}/mlivre/config", json={"regras": {"premium_pct": "11"}})
     a = c.get(f"/api/empresas/{eid}/mlivre/auditoria?inicio=2026-01&fim=2026-02").json()

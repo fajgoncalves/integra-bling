@@ -27,7 +27,7 @@ import rotina
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.14.1"
+VERSAO = "1.15.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -617,7 +617,7 @@ async def ml_sincronizar(eid: int, request: Request, u=Depends(usuario), s=Depen
         raise HTTPException(400, "Período máximo de 24 meses por vez.")
     return _iniciar_job(s, e, "ml_sync", {"inicio": ini, "fim": fim, "frete": b.get("frete", True) is not False,
                                           "notas": b.get("notas", True) is not False,
-                                          "cobrancas": b.get("cobrancas", True) is not False}, u, mlivre.sincronizar)
+                                          "cobrancas": b.get("cobrancas", True) is not False, "ads": b.get("ads", True) is not False}, u, mlivre.sincronizar)
 
 
 def _ml_emp(s, eid):
@@ -963,6 +963,51 @@ def ml_nota_xml(eid: int, nid: int, _u=Depends(usuario), s=Depends(get_db)):
         raise HTTPException(404, "Não encontrei o XML desta nota no emissor do Mercado Livre nem no Bling.")
     return Response(xml, media_type="application/xml",
                     headers={"Content-Disposition": f'attachment; filename="NFe-{n.chave or n.numero}.xml"'})
+
+
+@app.get("/api/empresas/{eid}/mlivre/fora")
+def ml_fora(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    _periodo_ml(inicio, fim)
+    return mlauditoria.fora_das_vendas(s, e, inicio, fim)
+
+
+@app.get("/api/empresas/{eid}/mlivre/fora.xlsx")
+def ml_fora_xlsx(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(get_db)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    e = _ml_emp(s, eid)
+    _periodo_ml(inicio, fim)
+    f = mlauditoria.fora_das_vendas(s, e, inicio, fim)
+    wb = Workbook()
+    abas = [("Resumo por mês", ["Mês", "Fatura (resumo)", "Fatura (detalhe)", "Sem detalhamento", "Ads na fatura", "Ads pela API",
+                                "Ads rateado nas vendas", "Ads sem venda", "Extrato saídas sem venda", "Extrato entradas sem venda"],
+             [[m["mes"], m["fatura_resumo"], m["fatura_detalhe"], m["sem_detalhe"], m["ads_fatura"], m["ads_api"], m["ads_rateado"],
+               m["ads_sem_venda"], -m["extrato_debitos_sem_venda"], m["extrato_creditos_sem_venda"]] for m in f["meses"]]),
+            ("Extrato sem venda", ["Data", "Movimento", "Tipo (MP)", "Operação", "Referência", "Entrada", "Saída", "Bruto", "Tarifa MP", "Meio"],
+             [[x["data"], x["descricao"], x["tipo"], x["origem_id"], x["referencia"], x["credito"], -x["debito"], x["bruto"], x["tarifa_mp"],
+               x["meio"]] for x in f["extrato_linhas"]]),
+            ("Faturamento sem pedido", ["Mês", "Grupo", "Tipo", "Descrição", "Quantidade", "Valor"],
+             [[x["mes"], x["grupo"], x["tipo"], x["descricao"], x["qtd"], x["valor"]] for x in f["faturamento_sem_pedido"]]),
+            ("Ads sem venda", ["Mês", "Anúncio", "Título", "Cliques", "Impressões", "Custo"],
+             [[x["mes"], x["anuncio"], x["titulo"], x["cliques"], x["impressoes"], x["custo"]] for x in f["ads_sem_venda"]])]
+    for n, (titulo, cab, linhas) in enumerate(abas):
+        ws = wb.active if n == 0 else wb.create_sheet()
+        ws.title = titulo
+        ws.append(cab)
+        for c in ws[1]:
+            c.font = Font(bold=True)
+        for ln in linhas:
+            ws.append(ln)
+        for col in ws.iter_cols(min_row=2):
+            for x in col:
+                if isinstance(x.value, float):
+                    x.number_format = MOEDA
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                             headers={"Content-Disposition": f'attachment; filename="Fora_das_vendas_ML_{inicio}_{fim}.xlsx"'})
 
 
 @app.get("/api/empresas/{eid}/mlivre/tarifas")

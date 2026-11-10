@@ -11,7 +11,7 @@ from collections import defaultdict
 
 from sqlalchemy import select, func
 
-from db import Empresa, MLVenda, MLItem, MLNota, MLCobranca, MLExtrato, DominioNota
+from db import Empresa, MLVenda, MLItem, MLNota, MLCobranca, MLExtrato, MLTarifa, MLAds, DominioNota
 import mlanalise
 
 ROTULO_EXTRATO = {
@@ -94,7 +94,8 @@ def grupos_do_pedido(cobs):
 # composição do resultado da venda (valores com sinal)
 COMPONENTES = [("venda", "Venda (produtos)"), ("frete_comprador", "Frete pago pelo comprador"), ("reembolso", "Devolvido ao comprador"),
                ("tarifa", "Tarifa de venda"), ("parcelamento", "Parcelamento"), ("frete", "Frete (envio)"),
-               ("frete_devolucao", "Frete da devolução"), ("outras", "Outras cobranças"), ("imposto", "Impostos"),
+               ("frete_devolucao", "Frete da devolução"), ("outras", "Outras cobranças"),
+               ("publicidade", "Publicidade (Product Ads, rateada)"), ("imposto", "Impostos"),
                ("cmv", "Custo dos produtos")]
 DEVOLUCAO_MP = {"refund", "mediation", "chargeback", "dispute"}
 
@@ -191,6 +192,7 @@ def painel(s, emp: Empresa, ini, fim):
     ext_min = s.scalar(select(func.min(MLExtrato.data)).where(MLExtrato.empresa_id == eid))
     ext_max = s.scalar(select(func.max(MLExtrato.data)).where(MLExtrato.empresa_id == eid))
     res_an = {v.order_id: r for v, _its, r in mlanalise.pedidos(s, emp, ini, fim)}
+    rat = mlanalise.ads_rateio(s, eid, ini, fim)
     aliq = _f(emp.ml_imposto_aliq) / 100
     out = []
     for v in vendas:
@@ -222,7 +224,7 @@ def painel(s, emp: Empresa, ini, fim):
             c["parcelamento"] = e["parcelamento"]
             c["frete"] = e["frete"]
             c["frete_devolucao"] = e["frete_devolucao"]
-            c["outras"] = e["outras"] + g["FULL"] + g["PUBLICIDADE"]  # cobradas na fatura do ML, fora do Mercado Pago
+            c["outras"] = e["outras"] + g["FULL"]  # cobradas na fatura do ML, fora do Mercado Pago
             retido = round(e["retido"], 2)
             fonte = "extrato"
         elif cobs[v.order_id]:
@@ -232,13 +234,14 @@ def painel(s, emp: Empresa, ini, fim):
             c["parcelamento"] = g["PARCELAMENTO"]
             c["frete"] = g["FRETE"]
             c["frete_devolucao"] = g["DEVOLUCAO"]
-            c["outras"] = g["FULL"] + g["PUBLICIDADE"] + g["OUTRAS"] + g["BONUS"]
+            c["outras"] = g["FULL"] + g["OUTRAS"] + g["BONUS"]
             retido, fonte = 0.0, "faturamento"
         else:
             integral = dev_total >= pago - 0.01 and dev_total > 0
             c.update({"frete_comprador": 0.0, "reembolso": -dev_total, "tarifa": 0.0 if integral else -_f(v.comissao),
                       "parcelamento": 0.0, "frete": -_f(v.frete), "frete_devolucao": 0.0, "outras": 0.0})
             retido, fonte = 0.0, "pedido"
+        c["publicidade"] = -rat["pedido"].get(v.order_id, 0.0) + g["PUBLICIDADE"]
         c = {k: round(c.get(k, 0.0), 2) + 0.0 for k, _n in COMPONENTES}
         resultado = round(sum(c.values()), 2)
         integral = dev_prod >= pago - 0.01 and dev_total > 0
@@ -380,6 +383,67 @@ def extrato(s, emp: Empresa, de: dt.date, ate: dt.date):
             "fim_lido": s.scalar(select(func.max(MLExtrato.data)).where(MLExtrato.empresa_id == emp.id))}
 
 
+def fora_das_vendas(s, emp: Empresa, ini, fim):
+    """O que o ML/MP cobrou ou movimentou que não está ligado a uma venda: extrato sem venda, faturamento sem pedido,
+    diferença entre o resumo e o detalhe do faturamento, Product Ads (API × fatura, rateado × sem venda)."""
+    d1, d2 = _periodo(ini, fim)
+    eid = emp.id
+    meses = mlanalise.meses_entre(ini, fim)
+    # 1. extrato sem venda
+    ext = s.scalars(select(MLExtrato).where(MLExtrato.empresa_id == eid, MLExtrato.order_id.is_(None),
+                                            MLExtrato.data >= dt.datetime.combine(d1, dt.time()),
+                                            MLExtrato.data < dt.datetime.combine(d2 + dt.timedelta(days=1), dt.time()))
+                    .order_by(MLExtrato.data)).all()
+    grupos = defaultdict(lambda: {"credito": 0.0, "debito": 0.0, "qtd": 0})
+    for x in ext:
+        g = grupos[(x.data.strftime("%Y-%m"), rotulo_extrato(x.descricao), str(x.descricao or ""))]
+        g["credito"] += _f(x.credito)
+        g["debito"] += _f(x.debito)
+        g["qtd"] += 1
+    extrato_grupos = [{"mes": m, "descricao": r, "tipo": t, "credito": round(v["credito"], 2), "debito": round(v["debito"], 2),
+                       "qtd": v["qtd"], "saque": t.lower() in ("payout", "withdrawal")}
+                      for (m, r, t), v in sorted(grupos.items())]
+    extrato_linhas = [{"data": x.data.isoformat(sep=" ")[:16], "descricao": rotulo_extrato(x.descricao), "tipo": x.descricao,
+                       "origem_id": x.origem_id, "referencia": x.referencia, "credito": _f(x.credito), "debito": _f(x.debito),
+                       "bruto": _f(x.bruto), "tarifa_mp": _f(x.tarifa_mp), "meio": x.meio} for x in ext][:3000]
+    # 2. faturamento sem pedido (detalhe) e resumo × detalhe
+    cobs = s.scalars(select(MLCobranca).where(MLCobranca.empresa_id == eid, MLCobranca.periodo >= ini,
+                                              MLCobranca.periodo <= fim)).all()
+    sem_pedido = defaultdict(lambda: {"valor": 0.0, "qtd": 0})
+    detalhe_mes = defaultdict(float)
+    for c in cobs:
+        if c.documento != "CREDIT_NOTE":  # o resumo é das faturas (BILL); estornos vêm em notas de crédito à parte
+            detalhe_mes[c.periodo] += _f(c.valor)
+        if not c.order_id:
+            k = (c.periodo, c.grupo, c.tipo or "", c.descricao or "")
+            sem_pedido[k]["valor"] += _f(c.valor)
+            sem_pedido[k]["qtd"] += 1
+    faturamento_sem_pedido = [{"mes": m, "grupo": g, "tipo": t, "descricao": d, "valor": round(v["valor"], 2), "qtd": v["qtd"]}
+                              for (m, g, t, d), v in sorted(sem_pedido.items())]
+    resumo_mes = defaultdict(float)
+    pads_mes = defaultdict(float)
+    for t in s.scalars(select(MLTarifa).where(MLTarifa.empresa_id == eid, MLTarifa.periodo >= ini, MLTarifa.periodo <= fim)).all():
+        v = abs(_f(t.valor)) * (-1 if t.natureza == "CHARGE" else 1)
+        resumo_mes[t.periodo] += v
+        if t.natureza == "CHARGE" and t.tipo == "PADS":
+            pads_mes[t.periodo] += abs(_f(t.valor))
+    rat = mlanalise.ads_rateio(s, eid, ini, fim)
+    tem_ads = bool(s.scalar(select(MLAds.id).where(MLAds.empresa_id == eid).limit(1)))
+    meses_out = []
+    for m in meses:
+        deb_sem_venda = sum(g["debito"] for g in extrato_grupos if g["mes"] == m and not g["saque"])
+        cred_sem_venda = sum(g["credito"] for g in extrato_grupos if g["mes"] == m and not g["saque"])
+        a = rat["meses"].get(m) or {"api": 0.0, "alocado": 0.0, "nao_alocado": 0.0}
+        meses_out.append({"mes": m, "fatura_resumo": round(resumo_mes.get(m, 0.0), 2), "fatura_detalhe": round(detalhe_mes.get(m, 0.0), 2),
+                          "sem_detalhe": round(resumo_mes.get(m, 0.0) - detalhe_mes.get(m, 0.0), 2),
+                          "ads_fatura": round(pads_mes.get(m, 0.0), 2), "ads_api": round(a["api"], 2),
+                          "ads_rateado": round(a["alocado"], 2), "ads_sem_venda": round(a["nao_alocado"], 2),
+                          "extrato_debitos_sem_venda": round(deb_sem_venda, 2), "extrato_creditos_sem_venda": round(cred_sem_venda, 2)})
+    return {"meses": meses_out, "extrato_grupos": extrato_grupos, "extrato_linhas": extrato_linhas,
+            "faturamento_sem_pedido": faturamento_sem_pedido, "ads_sem_venda": sorted(rat["nao_alocado"], key=lambda x: -x["custo"])[:1000],
+            "tem_ads": tem_ads}
+
+
 def auditoria(s, emp: Empresa, ini, fim):
     """Lista de achados (cada um com o pedido, o que se esperava e o que foi cobrado/lançado)."""
     d1, d2 = _periodo(ini, fim)
@@ -507,6 +571,27 @@ def auditoria(s, emp: Empresa, ini, fim):
         if p["no_periodo_extrato"] and _f(v.pago) > _f(v.devolvido) and not p["extrato_linhas"]:
             add("VENDA_SEM_EXTRATO", "média", oid, "Venda paga sem nenhum movimento no extrato do Mercado Pago no período lido "
                 "(o dinheiro pode ainda não ter sido liberado).")
+    # 6b. Product Ads: custo da API de publicidade × cobrado na fatura; custo de anúncios sem venda no mês
+    fv = fora_das_vendas(s, emp, ini, fim)
+    for m in fv["meses"]:
+        if fv["tem_ads"] and (m["ads_api"] or m["ads_fatura"]):
+            dif = m["ads_fatura"] - m["ads_api"]
+            if abs(dif) > max(1.0, 0.02 * max(m["ads_api"], m["ads_fatura"])):
+                achados.append({"codigo": "ADS_FATURA_DIVERGENTE", "gravidade": "alta", "order_id": None, "data": m["mes"] + "-01",
+                                "descricao": f"Product Ads {m['mes'][5:]}/{m['mes'][:4]}",
+                                "texto": "Product Ads cobrado na fatura do ML diferente do custo informado pela API de publicidade no mês "
+                                         "(o período da fatura pode não coincidir com o mês).",
+                                "esperado": m["ads_api"], "cobrado": m["ads_fatura"], "diferenca": round(dif, 2)})
+        if m["ads_sem_venda"] > tol:
+            achados.append({"codigo": "ADS_SEM_VENDA", "gravidade": "info", "order_id": None, "data": m["mes"] + "-01",
+                            "descricao": f"Product Ads {m['mes'][5:]}/{m['mes'][:4]}",
+                            "texto": "Custo de anúncios que não tiveram venda paga no mês (não entra no resultado de nenhuma venda; "
+                                     "fica só na DRE).", "esperado": 0.0, "cobrado": m["ads_sem_venda"], "diferenca": None})
+        if abs(m["sem_detalhe"]) > max(1.0, tol):
+            achados.append({"codigo": "FATURA_SEM_DETALHE", "gravidade": "média", "order_id": None, "data": m["mes"] + "-01",
+                            "descricao": f"Faturamento {m['mes'][5:]}/{m['mes'][:4]}",
+                            "texto": "O resumo da fatura do ML/MP tem valor que não aparece no detalhamento cobrança a cobrança.",
+                            "esperado": m["fatura_detalhe"], "cobrado": m["fatura_resumo"], "diferenca": m["sem_detalhe"]})
     # 7. cobranças de pedidos que não estão entre as vendas lidas
     orfas = s.execute(select(MLCobranca.order_id, func.sum(MLCobranca.valor), func.count(MLCobranca.id))
                       .where(MLCobranca.empresa_id == eid, MLCobranca.periodo >= ini, MLCobranca.periodo <= fim,

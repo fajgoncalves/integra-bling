@@ -133,10 +133,14 @@ def _rodar_job(alvo, jid, **kw):
 # ------------------------------------------------------------------ etapas
 def ml_mes(eid, mes):
     def fazer():
-        jid = _job(eid, "ml_sync", {"inicio": mes, "fim": mes, "frete": True, "notas": True, "cobrancas": True})
+        jid = _job(eid, "ml_sync", {"inicio": mes, "fim": mes, "frete": True, "notas": True, "cobrancas": True, "ads": True})
         msg = _rodar_job(mlivre.sincronizar, jid)
         if "não devolveu parte das cobranças" in msg:
             raise RuntimeError(msg)
+        if "publicidade não lida" in msg:  # não impede o mês; fica como aviso para verificar (ex.: permissão de publicidade)
+            _falha(eid, f"ADS:{mes}", msg[msg.index("Atenção — publicidade"):][:1000], "", "AVISO", 0)
+        else:
+            _resolvida(eid, f"ADS:{mes}")
         _salvar_estado(eid, lambda x: x["ml_meses"].__setitem__(mes, agora().isoformat(timespec="seconds")))
     return fazer
 
@@ -144,7 +148,7 @@ def ml_mes(eid, mes):
 def ml_extrato(eid, d1: dt.date, d2: dt.date):
     def fazer():
         jid = _job(eid, "ml_extrato", {"de": d1.isoformat(), "ate": d2.isoformat()})
-        _rodar_job(mlivre.sincronizar_extrato, jid)
+        _rodar_job(mlivre.sincronizar_extrato, jid, limite_s=3600)
 
         def marca(x):
             if not x.get("extrato_ate") or x["extrato_ate"] < d2.isoformat():
@@ -301,14 +305,17 @@ def executar(origem="agendada", hoje=None):
 
 def agendador(parar: threading.Event):
     """Laço do serviço: à 00:00 (ou ao reiniciar de madrugada sem a rotina do dia), executa."""
-    with SessionLocal() as s:  # execução interrompida por reinício do serviço
+    retomar = False
+    with SessionLocal() as s:  # execução interrompida por reinício do serviço (ex.: publicação de versão nova)
         for r in s.scalars(select(RotinaExec).where(RotinaExec.status == "EXECUTANDO")).all():
             r.status, r.fim = "INTERROMPIDA", agora()
             r.resumo = (r.resumo or "") + "\nInterrompida (o serviço reiniciou). O que faltou é retomado."
             s.commit()
             if r.inicio.date() == agora().date():
-                set_config(s, "rotina_ultima_data", "")
-                s.commit()
+                retomar = True
+    if retomar and not parar.wait(20):
+        log("retomando a rotina interrompida pelo reinício do serviço")
+        threading.Thread(target=executar, args=("retomada",), daemon=True).start()
     while not parar.wait(30):
         try:
             agora_ = agora()

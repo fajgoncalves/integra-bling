@@ -10,7 +10,7 @@ from collections import defaultdict
 
 from sqlalchemy import select
 
-from db import Empresa, MLVenda, MLItem, MLTarifa, MLCusto, Produto, ProdutoCusto
+from db import Empresa, MLVenda, MLItem, MLTarifa, MLCusto, MLAds, Produto, ProdutoCusto
 
 # encargos do faturamento → linha da DRE do ML
 LINHA_TIPO = {"CV": "COM", "CXD": "FRETE", "PADS": "ADS"}
@@ -149,6 +149,46 @@ def pedidos(s, emp: Empresa, ini, fim, cus=None):
     return out
 
 
+def ads_rateio(s, eid, ini, fim):
+    """Rateio do custo do Product Ads (por anúncio e mês, da API de publicidade) entre as vendas pagas daquele anúncio no mês,
+    pelas unidades vendidas (líquidas de devolução). Devolve um dict com:
+      pedido {order_id: valor}, item {(order_id, anúncio): valor}, nao_alocado [{mes, anuncio, titulo, custo}],
+      meses {mes: {"api": custo, "alocado": x, "nao_alocado": y}}."""
+    d1, d2 = periodo_datas(ini, fim)
+    ads = s.scalars(select(MLAds).where(MLAds.empresa_id == eid, MLAds.mes >= ini, MLAds.mes <= fim)).all()
+    out = {"pedido": defaultdict(float), "item": defaultdict(float), "nao_alocado": [],
+           "meses": defaultdict(lambda: {"api": 0.0, "alocado": 0.0, "nao_alocado": 0.0})}
+    if not ads:
+        return out
+    unidades = defaultdict(list)  # (mes, anúncio) → [(order_id, unidades líquidas)]
+    vs = {v.order_id: v for v in s.scalars(select(MLVenda).where(MLVenda.empresa_id == eid, MLVenda.data >= d1, MLVenda.data <= d2,
+                                                                  MLVenda.pago > 0)).all()}
+    ids = list(vs)
+    for k in range(0, len(ids), 5000):
+        for it in s.scalars(select(MLItem).where(MLItem.empresa_id == eid, MLItem.order_id.in_(ids[k:k + 5000]))).all():
+            v = vs[it.order_id]
+            u = float(it.qtd or 0) * _fator(v)
+            if u > 0 and it.anuncio:
+                unidades[(v.data.strftime("%Y-%m"), it.anuncio)].append((it.order_id, u))
+    for a in ads:
+        custo = float(a.custo or 0)
+        m = out["meses"][a.mes]
+        m["api"] += custo
+        lst = unidades.get((a.mes, a.anuncio))
+        tot = sum(u for _o, u in lst) if lst else 0
+        if not tot:
+            m["nao_alocado"] += custo
+            out["nao_alocado"].append({"mes": a.mes, "anuncio": a.anuncio, "titulo": a.titulo, "custo": round(custo, 2),
+                                       "cliques": a.cliques, "impressoes": a.impressoes})
+            continue
+        m["alocado"] += custo
+        for oid, u in lst:
+            x = custo * u / tot
+            out["pedido"][oid] += x
+            out["item"][(oid, a.anuncio)] += x
+    return out
+
+
 def dre(s, emp: Empresa, ini, fim):
     meses = meses_entre(ini, fim)
     idx = {m: i for i, m in enumerate(meses)}
@@ -226,6 +266,7 @@ def produtos(s, emp: Empresa, ini, fim):
     cus = Custos(s, emp.id)
     aliq = float(emp.ml_imposto_aliq or 0) / 100
     agg = {}
+    rat = ads_rateio(s, emp.id, ini, fim)
     for v, its, r in pedidos(s, emp, ini, fim, cus):
         tot_itens = sum(float(i.preco or 0) * float(i.qtd or 0) for i in its) or 1
         for it in its:
@@ -234,7 +275,7 @@ def produtos(s, emp: Empresa, ini, fim):
             parte = bruto / tot_itens
             x = agg.setdefault(k, {"chave": k, "sku": it.sku, "anuncio": it.anuncio, "titulo": it.titulo, "tipos": set(),
                                    "pedidos": 0, "qtd": 0.0, "vendas": 0.0, "devolvido": 0.0, "imposto": 0.0, "tarifa": 0.0,
-                                   "frete": 0.0, "cmv": 0.0, "sem_custo": False, "origens": set(),
+                                   "frete": 0.0, "cmv": 0.0, "publicidade": 0.0, "sem_custo": False, "origens": set(),
                                    "estimado": False})
             x["tipos"].add({"gold_special": "Clássico", "gold_pro": "Premium"}.get(it.tipo_anuncio, it.tipo_anuncio or "—"))
             x["pedidos"] += 1
@@ -244,6 +285,7 @@ def produtos(s, emp: Empresa, ini, fim):
             x["imposto"] += aliq * bruto * r["fator"]
             x["tarifa"] += float(it.tarifa or 0) * float(it.qtd or 0) * r["fator"]
             x["frete"] += r["frete"] * parte
+            x["publicidade"] += rat["item"].get((v.order_id, it.anuncio), 0.0) if it.anuncio else 0.0
             c, origem, est = cus.custo(k, r["mes"])
             if origem:
                 x["origens"].add(origem)
@@ -255,12 +297,13 @@ def produtos(s, emp: Empresa, ini, fim):
     out = []
     for x in agg.values():
         liq = x["vendas"] - x["devolvido"]
-        x["margem"] = liq - x["imposto"] - x["tarifa"] - x["frete"] - x["cmv"]
+        x["margem_antes_ads"] = liq - x["imposto"] - x["tarifa"] - x["frete"] - x["cmv"]
+        x["margem"] = x["margem_antes_ads"] - x["publicidade"]
         x["margem_pct"] = round(x["margem"] / liq * 100, 1) if liq else None
         x["tipos"] = ", ".join(sorted(x["tipos"]))
         x["custo_atual"], _o, _e = cus.custo(x["chave"], fim)
         x["origem_custo"] = " + ".join(sorted({"ML": "Mercado Livre", "CADASTRO": "Custo dos produtos"}[o] for o in x.pop("origens")))
-        for k in ("qtd", "vendas", "devolvido", "imposto", "tarifa", "frete", "cmv", "margem"):
+        for k in ("qtd", "vendas", "devolvido", "imposto", "tarifa", "frete", "cmv", "publicidade", "margem_antes_ads", "margem"):
             x[k] = round(x[k], 4 if k == "qtd" else 2)
         out.append(x)
     out.sort(key=lambda x: -x["vendas"])

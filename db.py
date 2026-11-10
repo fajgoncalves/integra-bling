@@ -381,6 +381,22 @@ class DominioNota(Base):
     cancelada: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class MLAds(Base):
+    """Custo do Product Ads por anúncio no mês (API de publicidade do ML) — base do rateio por venda."""
+    __tablename__ = "ml_ads"
+    __table_args__ = (UniqueConstraint("empresa_id", "mes", "anuncio"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.id", ondelete="CASCADE"), index=True)
+    mes: Mapped[str] = mapped_column(String(7))
+    anuncio: Mapped[str] = mapped_column(String(30))
+    titulo: Mapped[str] = mapped_column(String(300), default="")
+    custo: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+    cliques: Mapped[int] = mapped_column(Integer, default=0)
+    impressoes: Mapped[int] = mapped_column(Integer, default=0)
+    vendas_ads_qtd: Mapped[float] = mapped_column(Numeric(15, 2), default=0)  # unidades vendidas pelo anúncio (direto + indireto)
+    vendas_ads_valor: Mapped[float] = mapped_column(Numeric(15, 2), default=0)
+
+
 class MLTarifa(Base):
     """Encargo (charge) ou bonificação (bonus) do relatório de faturamento do Mercado Livre / Mercado Pago."""
     __tablename__ = "ml_tarifas"

@@ -956,7 +956,7 @@ async function telaMLEmpresas() {
 async function telaML(id, aba = "vendas", params) {
   clearInterval(pollJobs);
   const e = await api(`/api/empresas/${id}`);
-  const abas = [["vendas", "Vendas por pedido"], ["extrato", "Extrato"], ["auditoria", "Auditoria"], ["dre", "DRE Mercado Livre"], ["produtos", "Margem por produto"], ["custos", "Custos"], ["tarifas", "Tarifas"], ["conexao", "Conexão e dados"]];
+  const abas = [["vendas", "Vendas por pedido"], ["extrato", "Extrato"], ["fora", "Fora das vendas"], ["auditoria", "Auditoria"], ["dre", "DRE Mercado Livre"], ["produtos", "Margem por produto"], ["custos", "Custos"], ["tarifas", "Tarifas"], ["conexao", "Conexão e dados"]];
   casca("ml", `<div class="topo"><div><a href="#/ml" class="peq">← Mercado Livre</a><h1>${esc(e.nome)} <span class="badge b-ml" style="vertical-align:middle">Mercado Livre</span></h1>
       <div class="suave">${e.ml_conectado ? `Conta ${esc(e.ml_apelido || "")}` : "Não conectada"} · impostos sobre vendas: ${brl4(e.ml_imposto_aliq).replace(/,?0+$/, "") || "0"}% · ${e.ml_sync_em ? `dados de ${esc(e.ml_sync_periodo)}` : "nada lido ainda"}</div></div>
       <button class="btn" id="ml-cfg">Configurar</button></div>
@@ -978,6 +978,7 @@ async function telaML(id, aba = "vendas", params) {
   if (aba === "vendas" || aba === "pedidos") return mlPainel(e);
   if (aba === "extrato") return mlExtrato(e);
   if (aba === "auditoria") return mlAuditoria(e);
+  if (aba === "fora") return mlFora(e);
   if (aba === "custos") return mlCustos(e);
   if (aba === "tarifas") return mlTarifas(e);
   if (aba === "dre") return mlDre(e);
@@ -993,7 +994,8 @@ function mlConexao(e) {
       <div class="linha"><label>De <input type="month" id="m-ini" value="${p.inicio}"></label><label>Até <input type="month" id="m-fim" value="${p.fim}"></label>
         <label class="chk"><input type="checkbox" id="m-frete" checked> Frete de cada envio</label>
         <label class="chk"><input type="checkbox" id="m-notas" checked> Nota fiscal de cada venda</label>
-        <label class="chk"><input type="checkbox" id="m-cobs" checked> Cobranças detalhadas (pedido a pedido)</label></div>
+        <label class="chk"><input type="checkbox" id="m-cobs" checked> Cobranças detalhadas (pedido a pedido)</label>
+        <label class="chk"><input type="checkbox" id="m-ads" checked> Product Ads por anúncio</label></div>
       <div class="linha" style="margin-top:12px">
         <button class="btn ${e.ml_conectado ? "" : "pri"}" id="m-con">${e.ml_conectado ? "Reconectar" : "Conectar Mercado Livre"}</button>
         <button class="btn pri" id="m-sync" ${e.ml_conectado ? "" : "disabled"}>Atualizar do Mercado Livre</button>
@@ -1006,7 +1008,7 @@ function mlConexao(e) {
     await api(`/api/empresas/${e.id}/mlivre/desconectar`, { method: "POST" }); rota();
   }, ev.target);
   $("#m-sync").onclick = (ev) => tentar(async () => {
-    await api(`/api/empresas/${e.id}/mlivre/sincronizar`, { method: "POST", body: { inicio: $("#m-ini").value, fim: $("#m-fim").value, frete: $("#m-frete").checked, notas: $("#m-notas").checked, cobrancas: $("#m-cobs").checked } });
+    await api(`/api/empresas/${e.id}/mlivre/sincronizar`, { method: "POST", body: { inicio: $("#m-ini").value, fim: $("#m-fim").value, frete: $("#m-frete").checked, notas: $("#m-notas").checked, cobrancas: $("#m-cobs").checked, ads: $("#m-ads").checked } });
     toast("Atualização do Mercado Livre iniciada."); carregarJobs(e.id);
   }, ev.target);
   carregarJobs(e.id);
@@ -1060,17 +1062,18 @@ async function mlProdutos(e) {
     let its = r.itens.filter((x) => !q || x.titulo.toLowerCase().includes(q) || x.chave.toLowerCase().includes(q));
     const o = $("#ord").value;
     its = [...its].sort((a, b) => o === "margem" ? b.margem - a.margem : o === "pior" ? a.margem - b.margem : o === "pct" ? (b.margem_pct ?? -1e9) - (a.margem_pct ?? -1e9) : b.vendas - a.vendas);
-    const t = its.reduce((a, x) => { for (const k of ["vendas", "devolvido", "imposto", "tarifa", "frete", "cmv", "margem"]) a[k] = (a[k] || 0) + x[k]; return a; }, {});
+    const t = its.reduce((a, x) => { for (const k of ["vendas", "devolvido", "imposto", "tarifa", "frete", "cmv", "publicidade", "margem"]) a[k] = (a[k] || 0) + x[k]; return a; }, {});
     const liq = (t.vendas || 0) - (t.devolvido || 0);
     $("#res").innerHTML = !r.itens.length ? '<div class="vazio">Nenhuma venda no período. Atualize na aba Conexão e dados.</div>' : `
-      <div class="kpi"><div>Vendas<b>R$ ${brl(t.vendas)}</b></div><div>Margem (antes de publicidade)<b class="${t.margem < 0 ? "neg" : ""}">R$ ${brl(t.margem)}</b></div><div>Margem %<b>${liq ? pct(t.margem / liq * 100) : "—"}</b></div>
+      <div class="kpi"><div>Vendas<b>R$ ${brl(t.vendas)}</b></div><div>Product Ads rateado<b class="neg">R$ ${brl(-(t.publicidade || 0))}</b></div><div>Margem<b class="${t.margem < 0 ? "neg" : ""}">R$ ${brl(t.margem)}</b></div><div>Margem %<b>${liq ? pct(t.margem / liq * 100) : "—"}</b></div>
         <div>Produtos com prejuízo<b>${its.filter((x) => x.margem < 0).length}</b></div></div>
-      <div class="suave peq" style="margin-bottom:8px">Por produto: vendas − reembolsos − impostos − tarifa de venda − frete do envio (rateado pelo valor dos itens do pedido) − custo. Publicidade e outras tarifas do faturamento não são por produto e ficam só na DRE.</div>
+      <div class="suave peq" style="margin-bottom:8px">Por produto: vendas − reembolsos − impostos − tarifa de venda − frete do envio (rateado pelo valor dos itens do pedido) − custo. O Product Ads é rateado pelo custo de cada anúncio no mês (API de publicidade) entre as unidades vendidas daquele anúncio; anúncios sem venda no mês ficam em “Fora das vendas”. Outras tarifas mensais ficam só na DRE.</div>
       <div class="rolagem" style="max-height:65vh"><table><tr><th>Produto</th><th>Anúncio</th><th class="num">Qtd</th><th class="num">Vendas</th><th class="num">Reembolsos</th><th class="num">Impostos</th>
-        <th class="num">Tarifa</th><th class="num">Frete</th><th class="num">Custo</th><th class="num">Margem</th><th class="num">%</th></tr>
+        <th class="num">Tarifa</th><th class="num">Frete</th><th class="num">Custo</th><th class="num">Margem antes do Ads</th><th class="num">Product Ads</th><th class="num">Margem</th><th class="num">%</th></tr>
       ${its.map((x) => `<tr><td>${esc(x.titulo)}<div class="suave peq mono">${esc(x.sku || x.anuncio)}</div></td><td class="peq">${esc(x.tipos)}</td><td class="num">${qtdBR(x.qtd)}</td><td class="num">${brl(x.vendas)}</td>
         <td class="num ${x.devolvido ? "neg" : "suave"}">${x.devolvido ? brl(-x.devolvido) : "–"}</td><td class="num neg">${brl(-x.imposto)}</td><td class="num neg">${brl(-x.tarifa)}</td><td class="num neg">${brl(-x.frete)}</td>
         <td class="num" title="${esc(x.origem_custo ? `Custo de: ${x.origem_custo}${x.estimado ? " (meses anteriores à 1ª vigência usam o primeiro custo)" : ""}` : "")}">${x.sem_custo ? '<span class="badge b-aviso">sem custo</span>' : `<span class="neg">${brl(-x.cmv)}</span>${x.estimado ? "*" : ""}`}<div class="suave peq">${esc(x.origem_custo || "")}</div></td>
+        <td class="num ${x.margem_antes_ads < 0 ? "neg" : ""}">${brl(x.margem_antes_ads)}</td><td class="num ${x.publicidade ? "neg" : "suave"}">${x.publicidade ? brl(-x.publicidade) : "–"}</td>
         <td class="num ${x.margem < 0 ? "neg" : ""}"><b>${brl(x.margem)}</b></td><td class="num ${x.margem < 0 ? "neg" : ""}">${pct(x.margem_pct)}</td></tr>`).join("")}</table></div>`;
     $("#res").classList.remove("suave");
   };
@@ -1155,7 +1158,8 @@ const ACHADO = {
   SEM_NOTA: "Venda sem nota fiscal", NOTA_NAO_ESCRITURADA: "Nota não escriturada na Domínio", NOTA_CANCELADA_DOMINIO: "Nota cancelada na Domínio",
   NOTA_SEM_CHAVE: "Nota sem chave de acesso", NOTA_VALOR_DIFERENTE: "Valor da nota ≠ valor da venda", VENDA_SEM_EXTRATO: "Venda sem movimento no extrato",
   COMISSAO_FATURA_X_EXTRATO: "Tarifa na fatura ≠ descontada no Mercado Pago", VALOR_RETIDO: "Valor retido em disputa",
-  DEVOLUCAO_SEM_NOTA_ENTRADA: "Devolução sem nota de entrada", COBRANCA_SEM_VENDA: "Cobrança sem venda", EXTRATO_SEM_PEDIDO: "Extrato sem pedido",
+  DEVOLUCAO_SEM_NOTA_ENTRADA: "Devolução sem nota de entrada", ADS_FATURA_DIVERGENTE: "Product Ads: fatura ≠ API de publicidade",
+  ADS_SEM_VENDA: "Product Ads sem venda no mês", FATURA_SEM_DETALHE: "Fatura com valor sem detalhamento", COBRANCA_SEM_VENDA: "Cobrança sem venda", EXTRATO_SEM_PEDIDO: "Extrato sem pedido",
 };
 const GRAV = { "alta": "b-erro", "média": "b-aviso", "info": "" };
 
@@ -1219,17 +1223,17 @@ async function mlPainel(e) {
     const outras = (p) => C(p, "parcelamento") + C(p, "outras");
     const cel = (v) => `<td class="num ${v < 0 ? "neg" : v ? "" : "suave"}">${v ? brl(v) : "–"}</td>`;
     $("#res").innerHTML = `<div class="kpi"><div>Vendas<b>R$ ${brl(soma("venda"))}</b></div><div>Frete pago pelos compradores<b>R$ ${brl(soma("frete_comprador"))}</b></div>
-        <div>Devolvido aos compradores<b class="neg">R$ ${brl(soma("reembolso"))}</b></div><div>Tarifas e fretes<b class="neg">R$ ${brl(soma("tarifa") + soma("frete") + soma("frete_devolucao") + soma("parcelamento") + soma("outras"))}</b></div>
+        <div>Devolvido aos compradores<b class="neg">R$ ${brl(soma("reembolso"))}</b></div><div>Tarifas e fretes<b class="neg">R$ ${brl(soma("tarifa") + soma("frete") + soma("frete_devolucao") + soma("parcelamento") + soma("outras"))}</b></div><div>Product Ads<b class="neg">R$ ${brl(soma("publicidade"))}</b></div>
         <div>Impostos e custo<b class="neg">R$ ${brl(soma("imposto") + soma("cmv"))}</b></div><div>Resultado<b class="${tot < 0 ? "neg" : ""}">R$ ${brl(tot)}</b></div></div>
       <div class="suave peq" style="margin-bottom:8px">${ps.length} de ${r.total} venda(s). Com o extrato lido, os valores vêm do que entrou e saiu no Mercado Pago (retenções por disputa não entram); sem extrato, do faturamento do ML; sem os dois, do pedido. Clique numa venda para ver a composição, a nota, as cobranças e o extrato.</div>
       <div class="rolagem" style="max-height:62vh"><table><tr><th>Data</th><th>Pedido</th><th>Produto</th><th>Nota fiscal</th><th class="num">Venda</th><th class="num">Frete comprador</th><th class="num">Devolvido</th>
-        <th class="num">Tarifa</th><th class="num">Frete</th><th class="num">Frete devolução</th><th class="num">Outras</th><th class="num">Impostos</th><th class="num">Custo</th><th class="num">Resultado</th></tr>
+        <th class="num">Tarifa</th><th class="num">Frete</th><th class="num">Frete devolução</th><th class="num">Outras</th><th class="num">Product Ads</th><th class="num">Impostos</th><th class="num">Custo</th><th class="num">Resultado</th></tr>
       ${ps.map((p) => `<tr class="clicavel" data-o="${p.order_id}"><td>${dataBR(p.data)}</td><td class="mono peq">${p.order_id} ${abreML(p.order_id, p.pack_id)}<div class="suave">${esc(p.status)}</div></td>
         <td class="peq">${esc(p.descricao)}<div class="suave">${esc(p.sku)}${p.tipo_anuncio ? ` · ${esc(p.tipo_anuncio)}` : ""}</div></td>
         <td class="peq">${p.nota ? `${esc(p.nota.numero)}<div class="suave">${p.nota.origem === "EMISSOR_ML" ? "emissor ML" : "ERP"}</div>` : ""}<span class="badge ${DOM_ST[p.dominio] || ""}">${esc(p.dominio)}</span></td>
-        ${cel(C(p, "venda"))}${cel(C(p, "frete_comprador"))}${cel(C(p, "reembolso"))}${cel(C(p, "tarifa"))}${cel(C(p, "frete"))}${cel(C(p, "frete_devolucao"))}${cel(outras(p))}${cel(C(p, "imposto"))}
+        ${cel(C(p, "venda"))}${cel(C(p, "frete_comprador"))}${cel(C(p, "reembolso"))}${cel(C(p, "tarifa"))}${cel(C(p, "frete"))}${cel(C(p, "frete_devolucao"))}${cel(outras(p))}${cel(C(p, "publicidade"))}${cel(C(p, "imposto"))}
         <td class="num">${p.sem_custo ? '<span class="badge b-aviso">sem custo</span>' : (C(p, "cmv") ? `<span class="neg">${brl(C(p, "cmv"))}</span>` : '<span class="suave">–</span>')}</td>
-        <td class="num ${p.resultado < 0 ? "neg" : ""}"><b>${brl(p.resultado)}</b><div class="suave peq">${p.fonte === "extrato" ? "extrato" : p.fonte === "faturamento" ? "faturamento" : "estimado"}${p.retido ? " · retido" : ""}</div></td></tr>`).join("") || '<tr><td colspan="14" class="vazio">Nenhuma venda.</td></tr>'}</table></div>`;
+        <td class="num ${p.resultado < 0 ? "neg" : ""}"><b>${brl(p.resultado)}</b><div class="suave peq">${p.fonte === "extrato" ? "extrato" : p.fonte === "faturamento" ? "faturamento" : "estimado"}${p.retido ? " · retido" : ""}</div></td></tr>`).join("") || '<tr><td colspan="15" class="vazio">Nenhuma venda.</td></tr>'}</table></div>`;
     $("#res").classList.remove("suave");
     $$("#res tr[data-o]").forEach((tr) => tr.onclick = () => abrirPedidoML(e.id, tr.dataset.o));
   };
@@ -1347,6 +1351,36 @@ async function mlAuditoria(e) {
       e.ml_regras = x.ml_regras; m.remove(); toast("Salvo."); carregar();
     }, ev.target);
   };
+  await tentar(carregar);
+}
+
+async function mlFora(e) {
+  $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}<button class="btn" id="f-xls">Baixar Excel</button></div>
+    <div class="suave peq" style="margin-top:8px">Tudo o que o Mercado Livre / Mercado Pago cobrou ou movimentou que <b>não está ligado a uma venda</b>: movimentos do extrato sem pedido, cobranças da fatura sem pedido, valor da fatura sem detalhamento e o Product Ads (API de publicidade × fatura; rateado nas vendas × anúncios sem venda).</div>
+    <div id="f-res" style="margin-top:12px" class="suave">Carregando...</div></div>`;
+  const carregar = async () => {
+    const p = periodo();
+    const r = await api(`/api/empresas/${e.id}/mlivre/fora?inicio=${p.inicio}&fim=${p.fim}`);
+    const cel = (v, alerta) => `<td class="num ${v < 0 ? "neg" : ""} ${alerta ? "b-erro" : ""}">${v ? brl(v) : '<span class="suave">–</span>'}</td>`;
+    const ads = (m) => r.tem_ads && Math.abs(m.ads_fatura - m.ads_api) > Math.max(1, 0.02 * Math.max(m.ads_api, m.ads_fatura));
+    $("#f-res").innerHTML = `<h3>Por mês</h3><div class="rolagem"><table><tr><th>Mês</th><th class="num">Fatura (resumo)</th><th class="num">Fatura (detalhe)</th><th class="num">Sem detalhamento</th>
+        <th class="num">Ads na fatura</th><th class="num">Ads pela API</th><th class="num">Ads rateado nas vendas</th><th class="num">Ads sem venda</th><th class="num">Extrato: saídas sem venda</th><th class="num">Extrato: entradas sem venda</th></tr>
+      ${r.meses.map((m) => `<tr><td>${mesBR(m.mes)}</td>${cel(m.fatura_resumo)}${cel(m.fatura_detalhe)}${cel(m.sem_detalhe, Math.abs(m.sem_detalhe) > 1)}
+        ${cel(-m.ads_fatura, ads(m))}${cel(-m.ads_api, ads(m))}${cel(-m.ads_rateado)}${cel(-m.ads_sem_venda)}${cel(-m.extrato_debitos_sem_venda)}${cel(m.extrato_creditos_sem_venda)}</tr>`).join("")}</table></div>
+      ${r.tem_ads ? "" : '<div class="aviso">O Product Ads por anúncio ainda não foi lido (ou a conta não anuncia / o aplicativo não tem permissão de publicidade). Atualize em Conexão e dados com “Product Ads por anúncio”.</div>'}
+      <h3 style="margin-top:16px">Extrato sem venda (por tipo)</h3>
+      <table><tr><th>Mês</th><th>Movimento</th><th class="num">Qtd</th><th class="num">Entradas</th><th class="num">Saídas</th></tr>
+        ${r.extrato_grupos.map((g) => `<tr class="${g.saque ? "suave" : ""}"><td>${mesBR(g.mes)}</td><td>${esc(g.descricao)} <span class="mono suave peq">${esc(g.tipo)}</span>${g.saque ? " <span class=\"peq\">(saque)</span>" : ""}</td><td class="num">${g.qtd}</td><td class="num">${g.credito ? brl(g.credito) : "–"}</td><td class="num neg">${g.debito ? brl(-g.debito) : "–"}</td></tr>`).join("") || '<tr><td colspan="5" class="vazio">Nenhum movimento sem venda.</td></tr>'}</table>
+      <details style="margin-top:8px"><summary>Ver os movimentos (${r.extrato_linhas.length})</summary><div class="rolagem" style="max-height:45vh"><table><tr><th>Data</th><th>Movimento</th><th>Operação / referência</th><th class="num">Entrada</th><th class="num">Saída</th></tr>
+        ${r.extrato_linhas.map((x) => `<tr><td class="peq">${esc(x.data)}</td><td>${esc(x.descricao)}</td><td class="mono peq">${esc(x.origem_id)} ${esc(x.referencia)}</td><td class="num">${x.credito ? brl(x.credito) : "–"}</td><td class="num neg">${x.debito ? brl(-x.debito) : "–"}</td></tr>`).join("")}</table></div></details>
+      <h3 style="margin-top:16px">Cobranças da fatura sem pedido</h3>
+      <table><tr><th>Mês</th><th>Origem</th><th>Descrição</th><th class="num">Qtd</th><th class="num">Valor</th></tr>
+        ${r.faturamento_sem_pedido.map((x) => `<tr><td>${mesBR(x.mes)}</td><td>${x.grupo === "ML" ? "Mercado Livre" : "Mercado Pago"}</td><td>${esc(x.descricao)} <span class="mono suave peq">${esc(x.tipo)}</span></td><td class="num">${x.qtd}</td><td class="num ${x.valor < 0 ? "neg" : ""}">${brl(x.valor)}</td></tr>`).join("") || '<tr><td colspan="5" class="vazio">Nenhuma.</td></tr>'}</table>
+      ${r.ads_sem_venda.length ? `<h3 style="margin-top:16px">Product Ads de anúncios sem venda no mês</h3><table><tr><th>Mês</th><th>Anúncio</th><th class="num">Cliques</th><th class="num">Impressões</th><th class="num">Custo</th></tr>
+        ${r.ads_sem_venda.map((x) => `<tr><td>${mesBR(x.mes)}</td><td>${esc(x.titulo)}<div class="mono suave peq">${esc(x.anuncio)}</div></td><td class="num">${x.cliques}</td><td class="num">${x.impressoes}</td><td class="num neg">${brl(-x.custo)}</td></tr>`).join("")}</table>` : ""}`;
+    $("#f-res").classList.remove("suave");
+  };
+  $("#f-xls").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/mlivre/fora.xlsx?inicio=${p.inicio}&fim=${p.fim}`; };
   await tentar(carregar);
 }
 
