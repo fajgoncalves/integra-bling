@@ -22,6 +22,7 @@ AUTORIZAR = "https://auth.mercadolivre.com.br/authorization"
 API = "https://api.mercadolibre.com"
 TOKEN = API + "/oauth/token"
 INTERVALO = 0.12
+INTERVALO_FATURAMENTO = 1.0
 _trava = threading.Lock()
 _ultima = [0.0]
 dormir = time.sleep  # espera entre novas tentativas (trocada nos testes)
@@ -123,9 +124,10 @@ class Cliente:
         """Chamada autenticada. url pode ser um caminho da API do ML ou um endereço completo (Mercado Pago)."""
         alvo = url if url.startswith("http") else API + url
         renovou, ultimo = False, ""
-        for tentativa in range(6):
+        cobranca = "/billing/" in alvo  # o faturamento tem limite de requisições bem mais baixo
+        for tentativa in range(10 if cobranca else 6):
             with _trava:
-                espera = INTERVALO - (time.monotonic() - _ultima[0])
+                espera = (INTERVALO_FATURAMENTO if cobranca else INTERVALO) - (time.monotonic() - _ultima[0])
                 if espera > 0:
                     time.sleep(espera)
                 _ultima[0] = time.monotonic()
@@ -266,6 +268,40 @@ def pedidos(cli: Cliente, seller: int, d1: dt.date, d2: dt.date):
             achados.update(dia)
             d += dt.timedelta(days=1)
     yield from achados.values()
+
+
+def ids_do_mes(cli: Cliente, seller: int, mes: str):
+    """(ids dos pedidos que a busca do ML devolve no mês, total informado pela busca)."""
+    d1, d2 = dt.date.fromisoformat(mes + "-01"), _fim_mes(mes)
+    a, total = _varrer(cli, seller, d1, d2, "date_asc")
+    if len(a) < total:
+        a.update(_varrer(cli, seller, d1, d2, "date_desc")[0])
+    return {int(i) for i in a}, total
+
+
+def completar_pedidos(cli: Cliente, seller: int, empresa_id: int, ids):
+    """Busca um a um (GET /orders/{id}) os pedidos que faltam e grava com itens, frete e nota fiscal."""
+    gravados = 0
+    for oid in ids:
+        o = cli.get(f"/orders/{oid}", opcional=True)
+        if not o:
+            continue
+        v, lin = venda(o, empresa_id)
+        if not v:
+            continue
+        if v.shipping_id and v.pago:
+            v.frete = frete_vendedor(cli, v.shipping_id, seller)
+        notas = notas_da_venda(cli, seller, v) if v.pago else []
+        with SessionLocal() as s:
+            s.execute(delete(MLItem).where(MLItem.empresa_id == empresa_id, MLItem.order_id == v.order_id))
+            s.execute(delete(MLNota).where(MLNota.empresa_id == empresa_id, MLNota.order_id == v.order_id))
+            s.execute(delete(MLVenda).where(MLVenda.empresa_id == empresa_id, MLVenda.order_id == v.order_id))
+            s.add(v)
+            s.add_all(lin)
+            s.add_all(notas)
+            s.commit()
+        gravados += 1
+    return gravados
 
 
 def faturamento(cli: Cliente, mes: str):

@@ -165,6 +165,9 @@ def ml_falso(req: httpx.Request):
                                          "attributes": {"invoice_key": K1, "xml_location": "x"}})
     if url.path.startswith("/users/555/invoices/orders/"):
         return httpx.Response(404, json={"message": "invoice not found"})
+    if url.path.startswith("/orders/") and url.path[8:].isdigit():
+        o = next((x for x in PEDIDOS if str(x["id"]) == url.path[8:]), None)
+        return httpx.Response(200, json=o) if o else httpx.Response(404)
     if url.path == "/advertising/advertisers":
         assert q["product_id"] == ["PADS"] and req.headers.get("api-version") == "1"
         return httpx.Response(200, json={"advertisers": [{"advertiser_id": 77, "site_id": "MLB", "advertiser_name": "Loja"}]})
@@ -234,7 +237,7 @@ def ml_falso(req: httpx.Request):
 def verifica_mercado_livre(c, eid):
     from datetime import date as _date
     import mlivre
-    mlivre.INTERVALO = 0
+    mlivre.INTERVALO = mlivre.INTERVALO_FATURAMENTO = 0
     mlivre.HOJE = _date(2026, 2, 25)
     mlivre.dormir = lambda _x: None
     assert c.post(f"/api/empresas/{eid}/mlivre/conectar").status_code == 400  # sem aplicativo
@@ -416,11 +419,20 @@ def verifica_mercado_livre(c, eid):
         assert rt["execucoes"][0]["status"] == "COM_FALHAS" and dom == [("2026-01", "2026-02")]
         assert not any(k.startswith("CONFERE_PEDIDOS") for k in F)  # quantidade de pedidos confere com o ML
         ml_chamadas["mp500"] = False  # o ML voltou a responder
+        from db import MLVenda as _MV
+        with SessionLocal() as s_:  # um pedido de jan "sumiu": a conferência busca um a um
+            s_.query(_MV).filter(_MV.order_id == 2000001).delete()
+            s_.commit()
+        rotina.ULTIMOS_MESES = 1
         rotina.executar("agendada", hoje=_dt.date(2026, 2, 21))
+        rotina.ULTIMOS_MESES = 3
+        with SessionLocal() as s_:
+            assert s_.query(_MV).filter(_MV.order_id == 2000001).count() == 1
         rt = c.get("/api/rotina").json()
         E = {e_["id"]: e_ for e_ in rt["empresas"]}[eid]
         assert E["ml_meses"] == ["2026-01", "2026-02"] and not rt["falhas"] and rt["execucoes"][0]["status"] == "OK"
         assert dom[-1] == ("2026-01", "2026-02")  # Domínio: depois da 1ª vez, mês anterior e atual
+        assert "1 pedido(s) que faltavam buscados" in rt["execucoes"][0]["resumo"]
     finally:
         mlivre.httpx.Client = orig_http
         ml_chamadas["mp500"] = True

@@ -170,19 +170,27 @@ def dominio_periodo(eid, ini, fim):
 
 
 def conferir_pedidos(eid, mes, cli=None):
-    """Quantidade de pedidos do mês no ML (API) × gravada. Devolve (api, gravados)."""
+    """Confere pedido a pedido: os ids que a busca do ML devolve no mês × os gravados. Os que faltarem são buscados um a um.
+    Devolve (faltavam, ainda_faltam, total_da_busca, devolvidos_pela_busca)."""
     with SessionLocal() as s:
-        e = s.get(Empresa, eid)
-        seller = e.ml_user_id
-        d1 = dt.date.fromisoformat(mes + "-01")
-        d2 = mlivre._fim_mes(mes)
-        gravados = s.scalar(select(func.count(MLVenda.id)).where(MLVenda.empresa_id == eid, MLVenda.data >= d1,
-                                                                 MLVenda.data <= d2)) or 0
+        seller = s.get(Empresa, eid).ml_user_id
     cli = cli or mlivre.Cliente(eid)
-    de, ate = mlivre._janela(d1, d2)
-    r = cli.get("/orders/search", {"seller": seller, "order.date_closed.from": de, "order.date_closed.to": ate,
-                                   "offset": 0, "limit": 1})
-    return int((r.get("paging") or {}).get("total") or 0), gravados
+    ids, total = mlivre.ids_do_mes(cli, seller, mes)
+
+    def gravados():
+        with SessionLocal() as s:
+            g = set()
+            lst = list(ids)
+            for k in range(0, len(lst), 5000):
+                g |= {o for (o,) in s.execute(select(MLVenda.order_id).where(MLVenda.empresa_id == eid,
+                                                                             MLVenda.order_id.in_(lst[k:k + 5000]))).all()}
+            return g
+    faltam = ids - gravados()
+    if faltam:
+        log(f"empresa={eid} {mes}: {len(faltam)} pedido(s) do ML não gravado(s) — buscando um a um")
+        mlivre.completar_pedidos(cli, seller, eid, sorted(faltam))
+    ainda = ids - gravados()
+    return len(faltam), ainda, total, len(ids)
 
 
 def vendas_sem_extrato(eid, ate_extrato: dt.date):
@@ -216,6 +224,12 @@ def executar(origem="agendada", hoje=None):
             emps = [(e.id, e.nome) for e in s.scalars(select(Empresa).where(Empresa.ativo == True,  # noqa: E712
                                                                              Empresa.rotina_ativa == True)).all()]  # noqa: E712
         log(f"início ({origem}) — {len(emps)} empresa(s), desde {ini_cfg}")
+        with SessionLocal() as s:  # Product Ads de meses fora da janela de 90 dias da API: não há o que ler (rateio pela fatura)
+            limite_ads = (hoje - dt.timedelta(days=88)).strftime("%Y-%m")
+            for f in s.scalars(select(RotinaFalha).where(RotinaFalha.etapa.like("ADS:%"), RotinaFalha.resolvida_em.is_(None))).all():
+                if f.etapa[4:] < limite_ads:
+                    f.resolvida_em = agora()
+            s.commit()
         resumo, falhas = [], 0
         mes_atual = hoje.strftime("%Y-%m")
         meses = mlivre.meses_entre(ini_cfg, mes_atual)
@@ -254,18 +268,22 @@ def executar(origem="agendada", hoje=None):
                 reimp = []
                 for m in meses:
                     def conferir(m=m):
-                        api, grav = conferir_pedidos(eid, m)
-                        if api != grav:
-                            log(f"empresa={eid} {m}: ML {api} pedidos × gravados {grav} — reimportando")
-                            ml_mes(eid, m)()
-                            reimp.append(m)
-                            api, grav = conferir_pedidos(eid, m)
-                            if api != grav:
-                                raise RuntimeError(f"Depois de reimportar, o ML informa {api} pedidos em {m} e há {grav} gravados.")
-                    if not tentar(eid, f"CONFERE_PEDIDOS:{m}", conferir, rid, vezes=1):  # a conferência já reimporta 1 vez
+                        faltavam, ainda, total, devolvidos = conferir_pedidos(eid, m)
+                        if faltavam:
+                            reimp.append(faltavam)
+                        if ainda:
+                            raise RuntimeError(f"{len(ainda)} pedido(s) de {m} que o ML lista não puderam ser gravados "
+                                               f"(ex.: {', '.join(str(x) for x in sorted(ainda)[:10])}).")
+                        if total > devolvidos:
+                            _falha(eid, f"CONFERE_TOTAL:{m}", f"A busca do ML informa {total} pedidos em {m}, mas devolve só "
+                                   f"{devolvidos} (todos gravados). A diferença de {total - devolvidos} é do próprio ML "
+                                   "(pedidos que a busca conta e não mostra).", "", "AVISO", 0)
+                        else:
+                            _resolvida(eid, f"CONFERE_TOTAL:{m}")
+                    if not tentar(eid, f"CONFERE_PEDIDOS:{m}", conferir, rid):
                         falhas += 1
                 if reimp:
-                    linha.append(f"{len(set(reimp))} mês(es) reimportado(s) na conferência")
+                    linha.append(f"{sum(reimp)} pedido(s) que faltavam buscados na conferência")
                 # conferência: vendas sem movimento no extrato
                 with SessionLocal() as s:
                     st = estado(s.get(Empresa, eid))
