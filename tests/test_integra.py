@@ -154,6 +154,9 @@ def ml_falso(req: httpx.Request):
         rs = [o for o in PEDIDOS if de <= (o.get("date_closed") or o["date_created"])[:10] <= ate]
         off, lim = int(q["offset"][0]), int(q["limit"][0])
         return httpx.Response(200, json={"results": rs[off:off + lim], "paging": {"total": len(rs), "offset": off, "limit": lim}})
+    if url.path == "/users/555/invoices/documents/xml/1377978/authorized":
+        ml_chamadas["xml"] = ml_chamadas.get("xml", 0) + 1
+        return httpx.Response(200, text=(Path(__file__).parent / "nfe_exemplo.xml").read_text(encoding="utf-8"))
     if url.path == "/users/555/invoices/orders/2000001":
         return httpx.Response(200, json={"id": 1377978, "status": "authorized", "invoice_number": 1001, "invoice_series": "1",
                                          "amount": 100.0, "issued_date": "2026-01-10T11:00:00.000-03:00",
@@ -307,8 +310,30 @@ def verifica_mercado_livre(c, eid):
     x = c.get(f"/api/empresas/{eid}/mlivre/extrato?de=2026-01-01&ate=2026-02-28").json()
     assert x["creditos"] == 159 and x["debitos"] == 159 and x["saldo_final"] == 0 and x["nao_identificados"] == 1
     assert {l["como"] for l in x["linhas"] if l["order_id"]} == {"pagamento"}
+    # DANFE e XML: nota do emissor do ML (XML pela API do ML, guardado) e nota do ERP (link do DANFE do Bling)
+    n1 = d["notas"][0]
+    orig_http = mlivre.httpx.Client
+    mlivre.httpx.Client = lambda **kw: orig_http(transport=httpx.MockTransport(ml_falso))
+    try:
+        r = c.get(f"/api/empresas/{eid}/mlivre/notas/{n1['id']}/danfe")
+        assert r.status_code == 200 and r.headers["content-type"] == "application/pdf" and r.content[:4] == b"%PDF"
+        assert c.get(f"/api/empresas/{eid}/mlivre/notas/{n1['id']}/xml").text.startswith("<")
+        assert ml_chamadas["xml"] == 1  # da segunda vez usa o XML guardado
+    finally:
+        mlivre.httpx.Client = orig_http
     d2 = c.get(f"/api/empresas/{eid}/mlivre/pedido/2000002").json()
     assert d2["dominio_lida"] and [n["tipo"] for n in d2["notas"]] == ["venda", "devolucao"]
+    import bling as _bling
+    orig_np = _bling.nota_por_chave
+    _bling.nota_por_chave = lambda eid_, chave, numero, data, http=None: ("", "https://www.bling.com.br/danfe/xyz")
+    orig_http = mlivre.httpx.Client
+    mlivre.httpx.Client = lambda **kw: orig_http(transport=httpx.MockTransport(ml_falso))
+    try:
+        r = c.get(f"/api/empresas/{eid}/mlivre/notas/{d2['notas'][0]['id']}/danfe", follow_redirects=False)
+        assert r.status_code == 307 and "bling.com.br" in r.headers["location"]
+    finally:
+        _bling.nota_por_chave = orig_np
+        mlivre.httpx.Client = orig_http
     assert d2["dominio_devolucoes"][0]["numero"] == "2003" and d2["dominio_devolucoes"][0]["como"].startswith("chave")
     assert sum(1 for l in d2["extrato"] if l["retencao"]) == 4 and {c_["chave"]: c_["valor"] for c_ in d2["componentes"]}["frete_devolucao"] == -15
     a = c.get(f"/api/empresas/{eid}/mlivre/auditoria?inicio=2026-01&fim=2026-02").json()

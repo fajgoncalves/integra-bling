@@ -254,7 +254,7 @@ def detalhe(s, emp: Empresa, order_id: int):
                    "categoria": i.categoria, "qtd": _f(i.qtd), "preco": _f(i.preco), "tarifa_unit": _f(i.tarifa),
                    "tarifa_pct": round(_f(i.tarifa) / _f(i.preco) * 100, 2) if _f(i.preco) else None,
                    "custo_unit": cus.custo(mlanalise.chave(i), mes)[0]} for i in its],
-        "notas": [{"tipo": n.tipo, "origem": "Emissor do Mercado Livre" if n.origem == "EMISSOR_ML" else "Informada no envio (ERP)",
+        "notas": [{"id": n.id, "tipo": n.tipo, "origem": "Emissor do Mercado Livre" if n.origem == "EMISSOR_ML" else "Informada no envio (ERP)",
                    "numero": n.numero, "serie": n.serie, "chave": n.chave, "status": n.status,
                    "data": n.data.isoformat() if n.data else None, "valor": _f(n.valor) if n.valor is not None else None,
                    "dominio": ({"numero": dom[n.chave].numero, "data": dom[n.chave].data.isoformat(), "cfop": dom[n.chave].cfop,

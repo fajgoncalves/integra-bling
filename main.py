@@ -9,13 +9,13 @@ import datetime as dt
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Depends, HTTPException
-from fastapi.responses import JSONResponse, FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, FileResponse, RedirectResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func
 
 import db
 from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Movimento, DominioValor, DominioItem, Produto, ProdutoCusto, Job,
-                MLVenda, MLItem, MLTarifa, MLCusto, Auditoria, agora, PERFIS, TIPOS_LINHA)
+                MLVenda, MLItem, MLTarifa, MLCusto, MLNota, Auditoria, agora, PERFIS, TIPOS_LINHA)
 import bling
 import dominio
 import dre
@@ -26,7 +26,7 @@ import mlauditoria
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.12.1"
+VERSAO = "1.13.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -904,6 +904,58 @@ def ml_auditoria_xlsx(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=De
     linhas = [[x["gravidade"], x["codigo"], x["data"], str(x["order_id"] or ""), x["descricao"], x["texto"], x["esperado"],
                x["cobrado"], x["diferenca"]] for x in a["achados"]]
     return _tabela_xlsx(f"Auditoria_ML_{inicio}_{fim}.xlsx", "Auditoria", cab, linhas, {6: MOEDA, 7: MOEDA, 8: MOEDA})
+
+
+def _xml_nota_ml(s, e, nid):
+    n = s.get(MLNota, nid)
+    if not n or n.empresa_id != e.id:
+        _404()
+    if n.xml:
+        return n, n.xml, ""
+    xml, link, erros = "", "", []
+    if e.ml_refresh and e.ml_user_id:
+        try:
+            xml = mlivre.xml_da_nota(mlivre.Cliente(e.id), e.ml_user_id, n)
+        except mlivre.MLErro as ex:
+            erros.append(str(ex))
+    if not xml and e.bling_refresh:
+        try:
+            xml, link = bling.nota_por_chave(e.id, n.chave, n.numero, n.data)
+        except Exception as ex:  # noqa: BLE001
+            erros.append(f"Bling: {ex}")
+    if xml:
+        n.xml = xml
+        s.commit()
+    if not xml and not link and erros:
+        raise HTTPException(404, "Não encontrei o XML desta nota. " + " | ".join(erros)[:400])
+    return n, xml, link
+
+
+@app.get("/api/empresas/{eid}/mlivre/notas/{nid}/danfe")
+def ml_nota_danfe(eid: int, nid: int, _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    n, xml, link = _xml_nota_ml(s, e, nid)
+    if not xml:
+        if link:
+            return RedirectResponse(link)
+        raise HTTPException(404, "Não encontrei o XML desta nota no emissor do Mercado Livre nem no Bling.")
+    try:
+        from brazilfiscalreport.danfe import Danfe
+        pdf = bytes(Danfe(xml=xml).output())
+    except Exception as ex:  # noqa: BLE001
+        raise HTTPException(422, f"Não consegui montar o DANFE deste XML ({type(ex).__name__}). Baixe o XML.") from None
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="DANFE-{n.numero or n.chave}.pdf"', "Cache-Control": "private, no-store"})
+
+
+@app.get("/api/empresas/{eid}/mlivre/notas/{nid}/xml")
+def ml_nota_xml(eid: int, nid: int, _u=Depends(usuario), s=Depends(get_db)):
+    e = _ml_emp(s, eid)
+    n, xml, _link = _xml_nota_ml(s, e, nid)
+    if not xml:
+        raise HTTPException(404, "Não encontrei o XML desta nota no emissor do Mercado Livre nem no Bling.")
+    return Response(xml, media_type="application/xml",
+                    headers={"Content-Disposition": f'attachment; filename="NFe-{n.chave or n.numero}.xml"'})
 
 
 @app.get("/api/empresas/{eid}/mlivre/tarifas")

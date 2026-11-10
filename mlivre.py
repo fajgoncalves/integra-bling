@@ -308,7 +308,8 @@ def _nota(d, origem, empresa_id, order_id):
                   serie=str(_procura(d, {"invoice_series", "series", "serie"}) or "")[:10], chave=chave,
                   status=str(_procura(d, {"status"}) or "")[:30],
                   data=_data_br(_procura(d, {"issued_date", "authorized_date", "invoice_date", "date_created", "emission_date"})),
-                  valor=_num(_procura(d, {"amount", "total_amount", "invoice_amount", "total"})) or None)
+                  valor=_num(_procura(d, {"amount", "total_amount", "invoice_amount", "total"})) or None,
+                  invoice_id=_int(d.get("id")) if origem == "EMISSOR_ML" and isinstance(d, dict) else None)
 
 
 def _lista(d):
@@ -346,6 +347,36 @@ def notas_da_venda(cli: Cliente, seller: int, v: MLVenda):
         except MLErro:
             pass  # sem acesso às reclamações: a conferência da devolução fica pela Domínio
     return out
+
+
+def xml_da_nota(cli: Cliente, seller: int, n: MLNota):
+    """XML autorizado da nota emitida pelo emissor do ML (pela id da nota; se faltar, pelo pedido)."""
+    alvos = []
+    if n.invoice_id:
+        alvos.append(f"/users/{seller}/invoices/documents/xml/{n.invoice_id}/authorized")
+    alvos.append(f"/users/{seller}/invoices/orders/{n.order_id}")
+    for url in alvos:
+        txt = cli.req("GET", url, opcional=True, texto=True)
+        if not txt:
+            continue
+        t = txt.lstrip("\ufeff").strip()
+        if t.startswith("<"):
+            return t
+        try:
+            d = json.loads(t)
+        except ValueError:
+            continue
+        loc = _procura(d, {"xml_location"})
+        if loc:
+            x = cli.req("GET", loc if str(loc).startswith("http") else str(loc), opcional=True, texto=True)
+            if x and x.lstrip().startswith("<"):
+                return x.strip()
+        if not n.invoice_id and _int(d.get("id") if isinstance(d, dict) else None):
+            n.invoice_id = _int(d.get("id"))
+            x = cli.req("GET", f"/users/{seller}/invoices/documents/xml/{n.invoice_id}/authorized", opcional=True, texto=True)
+            if x and x.lstrip().startswith("<"):
+                return x.strip()
+    return ""
 
 
 def envios_de_devolucao(cli: Cliente, order_id: int):

@@ -311,6 +311,8 @@ class MLNota(Base):
     status: Mapped[str] = mapped_column(String(30), default="")
     data: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     valor: Mapped[float | None] = mapped_column(Numeric(15, 2), nullable=True)
+    invoice_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # id da nota no emissor do ML
+    xml: Mapped[str] = mapped_column(Text, default="")  # XML autorizado (guardado na 1ª consulta do DANFE)
 
 
 class MLCobranca(Base):
@@ -433,7 +435,8 @@ def criar_tabelas():
                           ("ml_sync_periodo", "VARCHAR(30) DEFAULT ''"),
                           ("ml_imposto_aliq", "NUMERIC(7,4) DEFAULT 0"), ("ml_regras", "TEXT DEFAULT ''")],
              "ml_vendas": [("frete", "NUMERIC(15,2)"), ("pagamentos", "VARCHAR(300) DEFAULT ''")],
-             "ml_itens": [("categoria", "VARCHAR(30) DEFAULT ''")]}
+             "ml_itens": [("categoria", "VARCHAR(30) DEFAULT ''")],
+             "ml_notas": [("invoice_id", "BIGINT"), ("xml", "TEXT DEFAULT ''")]}
     insp = inspect(engine)
     for tab, cols in novas.items():
         tem = {c["name"] for c in insp.get_columns(tab)}

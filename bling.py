@@ -349,3 +349,37 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
 
 def _br_data(iso):
     return f"{iso[8:10]}/{iso[5:7]}/{iso[:4]}"
+
+
+def nota_por_chave(empresa_id: int, chave: str, numero: str, data, http=None):
+    """Procura no Bling a NF-e de saída pela chave (ou número) em volta da data e devolve (xml, link do DANFE).
+    Usado pelo módulo do Mercado Livre para mostrar o DANFE das notas emitidas pelo Bling."""
+    import datetime as _dt
+    cli = Cliente(empresa_id, http)
+    d = data or _dt.date.today()
+    d1, d2 = d - _dt.timedelta(days=5), d + _dt.timedelta(days=5)
+    achada = None
+    for pagina in range(1, 11):
+        r = cli.get("/nfe", {"pagina": pagina, "limite": 100, "tipo": 1,
+                             "dataEmissaoInicial": f"{d1.isoformat()} 00:00:00", "dataEmissaoFinal": f"{d2.isoformat()} 23:59:59"})
+        lista = r.get("data") or []
+        for x in lista:
+            ch = "".join(c for c in str(x.get("chaveAcesso") or "") if c.isdigit())
+            if (chave and ch == chave) or (not chave and numero and str(x.get("numero") or "").lstrip("0") == str(numero).lstrip("0")):
+                achada = x
+                break
+        if achada or len(lista) < 100:
+            break
+    if not achada:
+        return "", ""
+    det = cli.get(f"/nfe/{achada['id']}").get("data") or {}
+    link_xml, danfe = det.get("xml") or "", det.get("linkDanfe") or det.get("linkPDF") or ""
+    xml = ""
+    if link_xml:
+        try:
+            rx = cli.http.get(link_xml, follow_redirects=True, timeout=60)
+            if rx.status_code < 400 and rx.text.lstrip().startswith("<"):
+                xml = rx.text.strip()
+        except httpx.HTTPError:
+            pass
+    return xml, danfe
