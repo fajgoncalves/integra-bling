@@ -231,22 +231,41 @@ def _janela(d1: dt.date, d2: dt.date):
     return d1.isoformat() + "T00:00:00.000-03:00", d2.isoformat() + "T23:59:59.999-03:00"
 
 
-def pedidos(cli: Cliente, seller: int, d1: dt.date, d2: dt.date):
-    """Pedidos fechados entre d1 e d2. Se passar do limite de paginação, divide o período ao meio."""
+def _varrer(cli, seller, d1, d2, ordem):
     de, ate = _janela(d1, d2)
-    base = {"seller": seller, "order.date_closed.from": de, "order.date_closed.to": ate, "sort": "date_asc"}
+    base = {"seller": seller, "order.date_closed.from": de, "order.date_closed.to": ate, "sort": ordem}
     primeira = cli.get("/orders/search", {**base, "offset": 0, "limit": 50})
     total = int((primeira.get("paging") or {}).get("total") or 0)
+    achados = {o["id"]: o for o in primeira.get("results") or [] if o.get("id")}
+    off = 50
+    while off < min(total, 9950):
+        for o in cli.get("/orders/search", {**base, "offset": off, "limit": 50}).get("results") or []:
+            if o.get("id"):
+                achados[o["id"]] = o
+        off += 50
+    return achados, total
+
+
+def pedidos(cli: Cliente, seller: int, d1: dt.date, d2: dt.date):
+    """Pedidos fechados entre d1 e d2, sem perder nenhum: a paginação do ML por posição pode pular pedidos com o mesmo
+    horário entre uma página e outra; se faltar algum, varre de novo na ordem inversa e, se ainda faltar, dia a dia."""
+    achados, total = _varrer(cli, seller, d1, d2, "date_asc")
     if total > 9500 and d1 < d2:
         meio = d1 + (d2 - d1) // 2
         yield from pedidos(cli, seller, d1, meio)
         yield from pedidos(cli, seller, meio + dt.timedelta(days=1), d2)
         return
-    yield from primeira.get("results") or []
-    off = 50
-    while off < total:
-        yield from cli.get("/orders/search", {**base, "offset": off, "limit": 50}).get("results") or []
-        off += 50
+    if len(achados) < total:
+        achados.update(_varrer(cli, seller, d1, d2, "date_desc")[0])
+    if len(achados) < total and d1 < d2:
+        d = d1
+        while d <= d2:
+            dia, tot_dia = _varrer(cli, seller, d, d, "date_asc")
+            if len(dia) < tot_dia:
+                dia.update(_varrer(cli, seller, d, d, "date_desc")[0])
+            achados.update(dia)
+            d += dt.timedelta(days=1)
+    yield from achados.values()
 
 
 def faturamento(cli: Cliente, mes: str):
@@ -744,6 +763,7 @@ def sincronizar_extrato(job_id: int, cli: Cliente | None = None, espera=15, limi
 
 
 # ------------------------------------------------------------------ Product Ads (custo por anúncio)
+HOJE = None  # data de referência (testes)
 METRICAS_ADS = "clicks,prints,cost,direct_units_quantity,indirect_units_quantity,direct_amount,indirect_amount"
 
 
@@ -762,7 +782,12 @@ def ads_do_mes(cli: Cliente, mes: str, empresa_id: int):
     if not adv:
         return None  # conta sem Product Ads (ou sem permissão de publicidade)
     d1, d2 = dt.date.fromisoformat(mes + "-01"), _fim_mes(mes)
-    d2 = min(d2, agora().date())
+    hoje = HOJE or agora().date()
+    d2 = min(d2, hoje)
+    # a API de publicidade só devolve métricas dos últimos 90 dias: meses mais antigos ficam com o rateio pela fatura
+    # (o que já foi lido enquanto o mês estava na janela continua guardado: None não apaga)
+    if d1 < hoje - dt.timedelta(days=88):
+        return None
     out, off = {}, 0
     while True:
         r = cli.req("GET", f"/advertising/{site}/advertisers/{adv}/product_ads/ads/search",

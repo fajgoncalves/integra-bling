@@ -433,11 +433,12 @@ def fora_das_vendas(s, emp: Empresa, ini, fim):
     for m in meses:
         deb_sem_venda = sum(g["debito"] for g in extrato_grupos if g["mes"] == m and not g["saque"])
         cred_sem_venda = sum(g["credito"] for g in extrato_grupos if g["mes"] == m and not g["saque"])
-        a = rat["meses"].get(m) or {"api": 0.0, "alocado": 0.0, "nao_alocado": 0.0}
+        a = rat["meses"].get(m) or {"api": 0.0, "alocado": 0.0, "nao_alocado": 0.0, "estimado": False}
         meses_out.append({"mes": m, "fatura_resumo": round(resumo_mes.get(m, 0.0), 2), "fatura_detalhe": round(detalhe_mes.get(m, 0.0), 2),
                           "sem_detalhe": round(resumo_mes.get(m, 0.0) - detalhe_mes.get(m, 0.0), 2),
                           "ads_fatura": round(pads_mes.get(m, 0.0), 2), "ads_api": round(a["api"], 2),
                           "ads_rateado": round(a["alocado"], 2), "ads_sem_venda": round(a["nao_alocado"], 2),
+                          "ads_estimado": bool(a.get("estimado")),
                           "extrato_debitos_sem_venda": round(deb_sem_venda, 2), "extrato_creditos_sem_venda": round(cred_sem_venda, 2)})
     return {"meses": meses_out, "extrato_grupos": extrato_grupos, "extrato_linhas": extrato_linhas,
             "faturamento_sem_pedido": faturamento_sem_pedido, "ads_sem_venda": sorted(rat["nao_alocado"], key=lambda x: -x["custo"])[:1000],
@@ -574,7 +575,7 @@ def auditoria(s, emp: Empresa, ini, fim):
     # 6b. Product Ads: custo da API de publicidade × cobrado na fatura; custo de anúncios sem venda no mês
     fv = fora_das_vendas(s, emp, ini, fim)
     for m in fv["meses"]:
-        if fv["tem_ads"] and (m["ads_api"] or m["ads_fatura"]):
+        if fv["tem_ads"] and m["ads_api"] and not m["ads_estimado"]:
             dif = m["ads_fatura"] - m["ads_api"]
             if abs(dif) > max(1.0, 0.02 * max(m["ads_api"], m["ads_fatura"])):
                 achados.append({"codigo": "ADS_FATURA_DIVERGENTE", "gravidade": "alta", "order_id": None, "data": m["mes"] + "-01",

@@ -235,6 +235,7 @@ def verifica_mercado_livre(c, eid):
     from datetime import date as _date
     import mlivre
     mlivre.INTERVALO = 0
+    mlivre.HOJE = _date(2026, 2, 25)
     mlivre.dormir = lambda _x: None
     assert c.post(f"/api/empresas/{eid}/mlivre/conectar").status_code == 400  # sem aplicativo
     cfg = c.put("/api/config", json={"ml_client_id": "mlcid", "ml_client_secret": "mlsec"}).json()
@@ -717,3 +718,24 @@ def test_estorno_unico_de_varias_cobrancas():
     est = N(id=20, documento="CREDIT_NOTE", natureza="CHARGE", tipo="X", descricao="", valor=20.45)
     fr = N(id=21, documento="BILL", natureza="CHARGE", tipo="CXD", descricao="", valor=-29.25)
     assert ma.grupos_do_pedido(partes + [fr, est])[20] == "COMISSAO"
+
+
+def test_pedidos_sem_perder_na_paginacao():
+    """A paginação por posição do ML pode repetir um pedido e pular outro: varre de novo na ordem inversa."""
+    import datetime as _d
+    import mlivre
+
+    class Falso:
+        def get(self, caminho, params=None, opcional=False):
+            ids = list(range(1, 61))  # 60 pedidos
+            off = params["offset"]
+            if params["sort"] == "date_asc":
+                pag = ids[off:off + 50]
+                if off == 50:
+                    pag = [50] + ids[51:60]  # repete o 50 e pula o 51 (empate de horário)
+            else:
+                pag = list(reversed(ids))[off:off + 50]
+            return {"paging": {"total": 60}, "results": [{"id": i} for i in pag]}
+
+    got = {o["id"] for o in mlivre.pedidos(Falso(), 1, _d.date(2026, 1, 1), _d.date(2026, 1, 31))}
+    assert got == set(range(1, 61))

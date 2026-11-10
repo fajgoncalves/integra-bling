@@ -157,7 +157,43 @@ def ads_rateio(s, eid, ini, fim):
     d1, d2 = periodo_datas(ini, fim)
     ads = s.scalars(select(MLAds).where(MLAds.empresa_id == eid, MLAds.mes >= ini, MLAds.mes <= fim)).all()
     out = {"pedido": defaultdict(float), "item": defaultdict(float), "nao_alocado": [],
-           "meses": defaultdict(lambda: {"api": 0.0, "alocado": 0.0, "nao_alocado": 0.0})}
+           "meses": defaultdict(lambda: {"api": 0.0, "alocado": 0.0, "nao_alocado": 0.0, "estimado": False})}
+    meses_api = {a.mes for a in ads}
+    # meses sem o custo por anúncio (a API só guarda 90 dias): rateia o Product Ads da fatura pelo valor vendido (estimado)
+    pads = defaultdict(float)
+    for t in s.scalars(select(MLTarifa).where(MLTarifa.empresa_id == eid, MLTarifa.periodo >= ini, MLTarifa.periodo <= fim,
+                                              MLTarifa.natureza == "CHARGE", MLTarifa.tipo == "PADS")).all():
+        if t.periodo not in meses_api:
+            pads[t.periodo] += abs(float(t.valor or 0))
+    if pads:
+        base = defaultdict(list)
+        for v in s.scalars(select(MLVenda).where(MLVenda.empresa_id == eid, MLVenda.data >= d1, MLVenda.data <= d2,
+                                                 MLVenda.pago > 0)).all():
+            m = v.data.strftime("%Y-%m")
+            liq = float(v.pago or 0) - min(float(v.devolvido or 0), float(v.pago or 0))
+            if m in pads and liq > 0:
+                base[m].append((v, liq))
+        for m, total in pads.items():
+            mm = out["meses"][m]
+            mm["fatura_rateada"], mm["estimado"] = total, True
+            soma = sum(x for _v, x in base.get(m, []))
+            if not soma:
+                mm["nao_alocado"] += total
+                continue
+            mm["alocado"] += total
+            for v, liq in base[m]:
+                out["pedido"][v.order_id] += total * liq / soma
+        if any(out["meses"][m]["estimado"] for m in pads):
+            ids_e = [oid for oid in out["pedido"]]
+            for k in range(0, len(ids_e), 5000):
+                its = s.scalars(select(MLItem).where(MLItem.empresa_id == eid, MLItem.order_id.in_(ids_e[k:k + 5000]))).all()
+                por = defaultdict(list)
+                for it in its:
+                    por[it.order_id].append(it)
+                for oid, lst in por.items():
+                    tot = sum(float(i.preco or 0) * float(i.qtd or 0) for i in lst) or 1
+                    for i in lst:
+                        out["item"][(oid, i.anuncio)] += out["pedido"][oid] * float(i.preco or 0) * float(i.qtd or 0) / tot
     if not ads:
         return out
     unidades = defaultdict(list)  # (mes, anúncio) → [(order_id, unidades líquidas)]

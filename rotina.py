@@ -102,10 +102,11 @@ def _resolvida(eid, etapa):
             s.commit()
 
 
-def tentar(eid, etapa, fazer, rid=None):
-    """Executa fazer() até 3 vezes. fazer() devolve None (ok) ou levanta exceção. Registra/resolve a falha."""
+def tentar(eid, etapa, fazer, rid=None, vezes=None):
+    """Executa fazer() até 3 vezes (ou `vezes`). fazer() devolve None (ok) ou levanta exceção. Registra/resolve a falha."""
     erro, rastro = "", ""
-    for n in range(1 + len(ESPERAS)):
+    esperas = ESPERAS[:(vezes - 1)] if vezes else ESPERAS
+    for n in range(1 + len(esperas)):
         if rid:
             _etapa(rid, f"empresa {eid} · {etapa} · tentativa {n + 1}")
         try:
@@ -115,9 +116,9 @@ def tentar(eid, etapa, fazer, rid=None):
         except Exception as ex:  # noqa: BLE001
             erro, rastro = str(ex) or type(ex).__name__, traceback.format_exc()
             log(f"erro empresa={eid} etapa={etapa} tentativa={n + 1}: {erro[:300]}")
-            if n < len(ESPERAS):
-                dormir(ESPERAS[n])
-    _falha(eid, etapa, erro, rastro, tentativas=1 + len(ESPERAS))
+            if n < len(esperas):
+                dormir(esperas[n])
+    _falha(eid, etapa, erro, rastro, tentativas=1 + len(esperas))
     return False
 
 
@@ -261,7 +262,7 @@ def executar(origem="agendada", hoje=None):
                             api, grav = conferir_pedidos(eid, m)
                             if api != grav:
                                 raise RuntimeError(f"Depois de reimportar, o ML informa {api} pedidos em {m} e há {grav} gravados.")
-                    if not tentar(eid, f"CONFERE_PEDIDOS:{m}", conferir, rid):
+                    if not tentar(eid, f"CONFERE_PEDIDOS:{m}", conferir, rid, vezes=1):  # a conferência já reimporta 1 vez
                         falhas += 1
                 if reimp:
                     linha.append(f"{len(set(reimp))} mês(es) reimportado(s) na conferência")

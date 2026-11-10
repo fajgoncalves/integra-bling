@@ -1362,11 +1362,11 @@ async function mlFora(e) {
     const p = periodo();
     const r = await api(`/api/empresas/${e.id}/mlivre/fora?inicio=${p.inicio}&fim=${p.fim}`);
     const cel = (v, alerta) => `<td class="num ${v < 0 ? "neg" : ""} ${alerta ? "b-erro" : ""}">${v ? brl(v) : '<span class="suave">–</span>'}</td>`;
-    const ads = (m) => r.tem_ads && Math.abs(m.ads_fatura - m.ads_api) > Math.max(1, 0.02 * Math.max(m.ads_api, m.ads_fatura));
+    const ads = (m) => r.tem_ads && !m.ads_estimado && m.ads_api && Math.abs(m.ads_fatura - m.ads_api) > Math.max(1, 0.02 * Math.max(m.ads_api, m.ads_fatura));
     $("#f-res").innerHTML = `<h3>Por mês</h3><div class="rolagem"><table><tr><th>Mês</th><th class="num">Fatura (resumo)</th><th class="num">Fatura (detalhe)</th><th class="num">Sem detalhamento</th>
         <th class="num">Ads na fatura</th><th class="num">Ads pela API</th><th class="num">Ads rateado nas vendas</th><th class="num">Ads sem venda</th><th class="num">Extrato: saídas sem venda</th><th class="num">Extrato: entradas sem venda</th></tr>
       ${r.meses.map((m) => `<tr><td>${mesBR(m.mes)}</td>${cel(m.fatura_resumo)}${cel(m.fatura_detalhe)}${cel(m.sem_detalhe, Math.abs(m.sem_detalhe) > 1)}
-        ${cel(-m.ads_fatura, ads(m))}${cel(-m.ads_api, ads(m))}${cel(-m.ads_rateado)}${cel(-m.ads_sem_venda)}${cel(-m.extrato_debitos_sem_venda)}${cel(m.extrato_creditos_sem_venda)}</tr>`).join("")}</table></div>
+        ${cel(-m.ads_fatura, ads(m))}${cel(-m.ads_api, ads(m))}${m.ads_estimado ? `<td class="num neg">${brl(-m.ads_rateado)}<div class="suave peq">pela fatura</div></td>` : cel(-m.ads_rateado)}${cel(-m.ads_sem_venda)}${cel(-m.extrato_debitos_sem_venda)}${cel(m.extrato_creditos_sem_venda)}</tr>`).join("")}</table></div>
       ${r.tem_ads ? "" : '<div class="aviso">O Product Ads por anúncio ainda não foi lido (ou a conta não anuncia / o aplicativo não tem permissão de publicidade). Atualize em Conexão e dados com “Product Ads por anúncio”.</div>'}
       <h3 style="margin-top:16px">Extrato sem venda (por tipo)</h3>
       <table><tr><th>Mês</th><th>Movimento</th><th class="num">Qtd</th><th class="num">Entradas</th><th class="num">Saídas</th></tr>
