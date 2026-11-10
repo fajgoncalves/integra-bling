@@ -646,6 +646,14 @@ def test_estorno_unico_de_varias_cobrancas():
             N(id=2, documento="BILL", natureza="CHARGE", tipo="CXD", descricao="Custo de envio", valor=-29.25),
             N(id=3, documento="CREDIT_NOTE", natureza="CHARGE", tipo="ANU", descricao="Anulação de cargos", valor=49.70)]
     assert ma.grupos_do_pedido(cobs)[3] == "RATEIO"
+    cobs[2].documento, cobs[2].natureza = "BILL", "BONUS"  # estorno lançado como bonificação na fatura
+    assert ma.grupos_do_pedido(cobs)[3] == "RATEIO"
     cobs[2].valor = 20.45  # estorno só da tarifa, pelo valor
     g = ma.grupos_do_pedido(cobs)
     assert g[3] == "COMISSAO"
+    # tarifa desmembrada em 3 partes, estornada num valor só
+    partes = [N(id=10 + i, documento="BILL", natureza="CHARGE", tipo=t, descricao="", valor=-v)
+              for i, (t, v) in enumerate((("CVVML", 18.0), ("CVVPRC", 2.0), ("CVVFNU", 0.45)))]
+    est = N(id=20, documento="CREDIT_NOTE", natureza="CHARGE", tipo="X", descricao="", valor=20.45)
+    fr = N(id=21, documento="BILL", natureza="CHARGE", tipo="CXD", descricao="", valor=-29.25)
+    assert ma.grupos_do_pedido(partes + [fr, est])[20] == "COMISSAO"

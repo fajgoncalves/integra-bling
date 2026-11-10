@@ -62,7 +62,8 @@ def grupos_do_pedido(cobs):
     se não casar um a um e o total dos estornos for igual ao das cobranças em aberto, cada estorno acompanha essas cobranças."""
     grupo = {c.id: grupo_cobranca(c) for c in cobs}
     cobradas = [c for c in cobs if c.documento != "CREDIT_NOTE" and c.natureza == "CHARGE"]
-    estornos = [c for c in cobs if c.documento == "CREDIT_NOTE" and _f(c.valor) > 0]
+    # estorno: nota de crédito, ou bonificação na própria fatura (o ML também lança assim a devolução de tarifas)
+    estornos = [c for c in cobs if _f(c.valor) > 0 and (c.documento == "CREDIT_NOTE" or c.natureza == "BONUS")]
     livres = list(cobradas)
     sobra = []
     for e in estornos:
@@ -72,6 +73,17 @@ def grupos_do_pedido(cobs):
             livres.remove(par)
         else:
             sobra.append(e)
+    if sobra and livres:  # estornos em várias partes de um mesmo grupo (ex.: tarifa desmembrada)
+        for k in {grupo[c.id] for c in livres}:
+            do_grupo = [c for c in livres if grupo[c.id] == k]
+            alvo = sum(abs(_f(c.valor)) for c in do_grupo)
+            for e in list(sobra):
+                if abs(_f(e.valor) - alvo) <= 0.01:
+                    grupo[e.id] = k
+                    sobra.remove(e)
+                    for c in do_grupo:
+                        livres.remove(c)
+                    break
     if sobra and livres and abs(sum(_f(e.valor) for e in sobra) - sum(abs(_f(c.valor)) for c in livres)) <= 0.02:
         # estorno único de várias cobranças: distribui o rótulo pelo grupo da maior parte; o valor é rateado em painel()
         for e in sobra:
@@ -294,10 +306,11 @@ def detalhe(s, emp: Empresa, order_id: int):
                                 "valor": _f(dom[n.chave].valor), "cancelada": dom[n.chave].cancelada} if n.chave in dom else None)}
                   for n in notas],
         "cobrancas": [{"data": c.data.isoformat() if c.data else None, "periodo": c.periodo, "grupo": c.grupo,
-                       "documento": "Estorno (nota de crédito)" if c.documento == "CREDIT_NOTE" else "Fatura",
+                       "documento": "Estorno (nota de crédito)" if c.documento == "CREDIT_NOTE" else
+                                    ("Fatura (bonificação)" if c.natureza == "BONUS" else "Fatura"),
                        "tipo": c.tipo, "descricao": c.descricao,
                        "classe": ("Estorno de várias cobranças" if gp[c.id] == "RATEIO" else
-                                  ("Estorno: " if c.documento == "CREDIT_NOTE" else "") + dict(GRUPOS_COBRANCA)[gp[c.id]]),
+                                  ("Estorno: " if _f(c.valor) > 0 and gp[c.id] != "BONUS" else "") + dict(GRUPOS_COBRANCA)[gp[c.id]]),
                        "valor": _f(c.valor), "debitada": c.debitada} for c in cobs],
         "extrato": [{"data": x.data.isoformat(sep=" ")[:16], "descricao": rotulo_extrato(x.descricao), "tipo": x.descricao,
                      "origem_id": x.origem_id, "credito": _f(x.credito), "debito": _f(x.debito), "bruto": _f(x.bruto),
