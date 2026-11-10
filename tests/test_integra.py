@@ -196,7 +196,13 @@ def ml_falso(req: httpx.Request):
                 return httpx.Response(400, json={"message": "Invalid frequency"})
             return httpx.Response(201, json=cfg)
         if url.path == "/v1/account/release_report" and req.method == "POST":
-            ml_chamadas["relatorio"] = json.loads(req.content)
+            b_ = json.loads(req.content)
+            import datetime as _d
+            dias = (_d.datetime.fromisoformat(b_["end_date"].replace("Z", "+00:00")) - _d.datetime.fromisoformat(b_["begin_date"].replace("Z", "+00:00"))).days
+            if dias >= 90:
+                return httpx.Response(400, json={"message": "Date interval should be less than 90 days"})
+            ml_chamadas["relatorio"] = b_
+            ml_chamadas["relatorios"] = ml_chamadas.get("relatorios", 0) + 1
             return httpx.Response(202, json={})
         if url.path == "/v1/account/release_report/list":
             b = ml_chamadas.get("relatorio") or {}
@@ -216,6 +222,7 @@ def ml_falso(req: httpx.Request):
 
 
 def verifica_mercado_livre(c, eid):
+    from datetime import date as _date
     import mlivre
     mlivre.INTERVALO = 0
     mlivre.dormir = lambda _x: None
@@ -251,6 +258,10 @@ def verifica_mercado_livre(c, eid):
         jx = c.get(f"/api/jobs/{rx['id']}").json()
         assert jx["status"] == "OK" and "11 movimentos, 9 ligados" in jx["mensagem"], jx["mensagem"]
         assert ml_chamadas["relatorio"]["begin_date"] == "2026-01-01T03:00:00Z"
+        # período maior que o limite do Mercado Pago (90 dias): pede em blocos e junta
+        antes = ml_chamadas["relatorios"]
+        tab = mlivre.extrato_api(cli, _date(2026, 1, 1), _date(2026, 4, 30), espera=0)
+        assert ml_chamadas["relatorios"] - antes == 2 and len(tab) == 1 + 2 * (len(EXTRATO_CSV.strip().splitlines()) - 1)
         mlivre.sincronizar(r["id"], cli)  # de novo: substitui
     finally:
         mlivre.httpx.Client = orig

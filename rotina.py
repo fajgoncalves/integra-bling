@@ -31,7 +31,7 @@ JANELA_FIM = 7  # se o serviço reiniciar no meio da madrugada, retoma até as 0
 ESPERAS = [120, 600]  # segundos entre a 1ª e a 2ª, e entre a 2ª e a 3ª tentativa
 ULTIMOS_MESES = 3
 EXTRATO_RETROATIVO = 60
-BLOCO_EXTRATO = 120
+BLOCO_EXTRATO = 85  # o Mercado Pago só gera o relatório de liberações para menos de 90 dias
 _trava = threading.Lock()
 dormir = time.sleep
 

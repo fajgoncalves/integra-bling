@@ -42,17 +42,26 @@ def url_autorizacao(client_id, redirect_uri, state):
                                             "redirect_uri": redirect_uri, "state": state}))
 
 
+class MLAutorizacao(MLErro):
+    """O ML recusou o token (refresh inválido ou revogado): é preciso conectar de novo."""
+
+
 def _token(dados, http=None):
     http = http or httpx.Client(timeout=30)
-    r = http.post(TOKEN, data=dados, headers={"Accept": "application/json",
-                                              "Content-Type": "application/x-www-form-urlencoded"})
+    for tentativa in range(6):  # limite de requisições (429) ou instabilidade (5xx): espera e tenta de novo
+        r = http.post(TOKEN, data=dados, headers={"Accept": "application/json",
+                                                  "Content-Type": "application/x-www-form-urlencoded"})
+        if r.status_code != 429 and r.status_code < 500:
+            break
+        dormir(min(5 * 2 ** tentativa, 120))
     if r.status_code >= 400:
         try:
             j = r.json()
             msg = j.get("message") or j.get("error_description") or j.get("error") or r.text
         except ValueError:
             msg = r.text
-        raise MLErro(f"Mercado Livre recusou a autorização ({r.status_code}): {str(msg)[:300]}")
+        erro = MLAutorizacao if r.status_code in (400, 401, 403) else MLErro
+        raise erro(f"Mercado Livre recusou a autorização ({r.status_code}): {str(msg)[:300]}")
     return r.json()
 
 
@@ -98,8 +107,8 @@ class Cliente:
                 try:
                     t = _token({"grant_type": "refresh_token", "client_id": cid, "client_secret": sec,
                                 "refresh_token": decifrar(emp.ml_refresh)}, self.http)
-                except MLErro as e:
-                    raise MLErro(f"A conexão com o Mercado Livre expirou. Conecte de novo a empresa. ({e})") from None
+                except MLAutorizacao as e:
+                    raise MLAutorizacao(f"A conexão com o Mercado Livre expirou. Conecte de novo a empresa. ({e})") from None
                 guardar_tokens(emp, t)
                 if self.sessao is None:
                     s.commit()
@@ -574,7 +583,24 @@ def ler_csv(texto):
     return list(csv.reader(io.StringIO(texto), delimiter=sep))
 
 
+MAX_DIAS_RELATORIO = 85  # o Mercado Pago aceita intervalos menores que 90 dias
+
+
 def extrato_api(cli: Cliente, d1: dt.date, d2: dt.date, andamento=None, espera=15, limite_s=1500):
+    """Relatório de liberações do período, em pedidos de até 85 dias (limite do Mercado Pago), juntando as linhas."""
+    tabela, d = [], d1
+    while d <= d2:
+        fim_ = min(d2, d + dt.timedelta(days=MAX_DIAS_RELATORIO - 1))
+        if andamento and (d != d1 or fim_ != d2):
+            andamento(f"Extrato de {d:%d/%m/%Y} a {fim_:%d/%m/%Y}...")
+        parte = _extrato_api_bloco(cli, d, fim_, andamento, espera, limite_s)
+        if parte:
+            tabela = parte if not tabela else tabela + parte[1:]
+        d = fim_ + dt.timedelta(days=1)
+    return tabela
+
+
+def _extrato_api_bloco(cli: Cliente, d1: dt.date, d2: dt.date, andamento=None, espera=15, limite_s=1500):
     """Gera o relatório de liberações no Mercado Pago (pela API) e devolve as linhas do arquivo (tabela)."""
     cfg = cli.req("GET", MP + "/v1/account/release_report/config", opcional=True)
     if not cfg:  # sem configuração: cria uma, com as colunas que a auditoria usa (não altera configuração existente)
