@@ -26,7 +26,7 @@ import mlauditoria
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.11.4"
+VERSAO = "1.12.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Integra Bling", version=VERSAO)
@@ -781,18 +781,17 @@ def ml_painel_xlsx(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depen
     e = _ml_emp(s, eid)
     _periodo_ml(inicio, fim)
     ps = mlauditoria.painel(s, e, inicio, fim)
-    gs = mlauditoria.GRUPOS_COBRANCA
+    cs = mlauditoria.COMPONENTES
     cab = (["Data", "Pedido", "Pacote", "Situação", "Produto", "SKU", "Anúncio", "Comprador", "NF número", "NF série", "NF chave",
-            "NF origem", "Domínio", "Venda", "Reembolso", "Impostos"] + [n for _k, n in gs]
-           + ["Cobranças (líquido)", "Fonte das cobranças", "Custo dos produtos", "Resultado", "Custo da devolução",
-              "Extrato créditos", "Extrato débitos", "Extrato líquido", "Esperado no extrato"])
+            "NF origem", "Domínio"] + [n for _k, n in cs]
+           + ["Resultado", "Fonte", "Retido em disputa", "Custo da devolução", "Extrato entradas", "Extrato saídas", "Extrato líquido"])
     linhas = [[p["data"], str(p["order_id"]), str(p["pack_id"] or ""), p["status"], p["descricao"], p["sku"], p["tipo_anuncio"],
                p["comprador"], (p["nota"] or {}).get("numero", ""), (p["nota"] or {}).get("serie", ""),
-               (p["nota"] or {}).get("chave", ""), (p["nota"] or {}).get("origem", ""), p["dominio"], p["vendas"], -p["devolvido"],
-               -p["imposto"]] + [p["cobrancas"][k] for k, _n in gs]
-              + [p["cobrancas_liq"], p["fonte_custos"], -p["cmv"], p["resultado"], p["custo_devolucao"], p["extrato_credito"],
-                 -p["extrato_debito"], p["extrato_liquido"], p["esperado_extrato"]] for p in ps]
-    fm = {i: MOEDA for i in range(13, len(cab)) if cab[i] != "Fonte das cobranças"}
+               (p["nota"] or {}).get("chave", ""), (p["nota"] or {}).get("origem", ""), p["dominio"]]
+              + [p["componentes"][k] for k, _n in cs]
+              + [p["resultado"], p["fonte"], p["retido"], p["custo_devolucao"], p["extrato_credito"], -p["extrato_debito"],
+                 p["extrato_liquido"]] for p in ps]
+    fm = {i: MOEDA for i in range(13, len(cab)) if cab[i] != "Fonte"}
     return _tabela_xlsx(f"Vendas_ML_{inicio}_{fim}.xlsx", "Vendas por pedido", cab, linhas, fm)
 
 

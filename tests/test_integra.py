@@ -119,10 +119,16 @@ EXTRATO_CSV = ("DATE;SOURCE_ID;EXTERNAL_REFERENCE;RECORD_TYPE;DESCRIPTION;NET_CR
                "MP_FEE_AMOUNT;FINANCING_FEE_AMOUNT;SHIPPING_FEE_AMOUNT;TAXES_AMOUNT;COUPON_AMOUNT;INSTALLMENTS;PAYMENT_METHOD;"
                "BALANCE_AMOUNT;ORDER_ID;SHIPPING_ID;PACK_ID\n"
                "2026-01-25T10:00:00.000-03:00;9001;;release;payment;67.00;0.00;100.00;-13.00;0;-20.00;0;0;1;pix;67.00;;;\n"
-               "2026-02-02T10:00:00.000-03:00;9002;;release;payment;47.00;0.00;50.00;-3.00;0;0;0;0;1;pix;114.00;;;\n"
-               "2026-02-03T10:00:00.000-03:00;5550001;2000002;release;refund;0.00;50.00;-50.00;0;0;0;0;0;1;pix;64.00;;;\n"
-               "2026-02-04T10:00:00.000-03:00;8888;XYZ;release;mediation;0.00;10.00;-10.00;0;0;0;0;0;1;;54.00;;;\n"
-               "2026-02-05T10:00:00.000-03:00;7777777;;release;payout;0.00;54.00;-54.00;0;0;0;0;0;1;;0.00;;;\n")
+               "2026-02-02T10:00:00.000-03:00;9002;;release;payment;37.00;0.00;60.00;-3.00;0;-20.00;0;0;1;pix;104.00;;;\n"
+               "2026-02-02T10:00:00.000-03:00;9002;;release;reserve_for_dispute;0.00;37.00;-37.00;0;0;0;0;0;1;pix;67.00;;;\n"
+               "2026-02-03T10:00:00.000-03:00;9002;;release;reserve_for_dispute;37.00;0.00;37.00;0;0;0;0;0;1;pix;104.00;;;\n"
+               "2026-02-03T10:00:00.000-03:00;9002;;release;mediation;0.00;60.00;-60.00;0;0;0;0;0;1;pix;44.00;;;\n"
+               "2026-02-03T10:00:00.000-03:00;9002;;release;refund;3.00;0.00;0.00;3.00;0;0;0;0;1;pix;47.00;;;\n"
+               "2026-02-03T11:00:00.000-03:00;9002;;release;reserve_for_bpp_shipping_return;0.00;15.00;-15.00;0;0;0;0;0;1;pix;32.00;;;\n"
+               "2026-02-03T11:00:00.000-03:00;9002;;release;mediation;0.00;15.00;-15.00;0;0;0;0;0;1;pix;17.00;;;\n"
+               "2026-02-03T11:00:00.000-03:00;9002;;release;reserve_for_bpp_shipping_return;15.00;0.00;15.00;0;0;0;0;0;1;pix;32.00;;;\n"
+               "2026-02-04T10:00:00.000-03:00;8888;XYZ;release;mediation;0.00;10.00;-10.00;0;0;0;0;0;1;;22.00;;;\n"
+               "2026-02-05T10:00:00.000-03:00;7777777;;release;payout;0.00;22.00;-22.00;0;0;0;0;0;1;;0.00;;;\n")
 
 
 def ml_falso(req: httpx.Request):
@@ -231,7 +237,7 @@ def verifica_mercado_livre(c, eid):
         rx = c.post(f"/api/empresas/{eid}/mlivre/extrato/atualizar", json={"de": "2026-01-01", "ate": "2026-02-28"}).json()
         mlivre.sincronizar_extrato(rx["id"], cli, espera=0)
         jx = c.get(f"/api/jobs/{rx['id']}").json()
-        assert jx["status"] == "OK" and "5 movimentos, 3 ligados" in jx["mensagem"], jx["mensagem"]
+        assert jx["status"] == "OK" and "11 movimentos, 9 ligados" in jx["mensagem"], jx["mensagem"]
         assert ml_chamadas["relatorio"]["begin_date"] == "2026-01-01T03:00:00Z"
         mlivre.sincronizar(r["id"], cli)  # de novo: substitui
     finally:
@@ -281,23 +287,32 @@ def verifica_mercado_livre(c, eid):
     a1, a2 = pn[2000001], pn[2000002]
     assert a1["nota"]["numero"] == "1001" and a1["nota"]["origem"] == "EMISSOR_ML" and a1["dominio"] == "escriturada"
     assert a2["nota"]["chave"] == K2 and a2["nota"]["origem"] == "ENVIO" and a2["dominio"] == "não escriturada"
-    assert a1["cobrancas"]["COMISSAO"] == -13 and a1["cobrancas"]["FRETE"] == -20 and a1["fonte_custos"] == "faturamento"
-    assert a1["resultado"] == 100 - 10 - 33 - 25 and a1["extrato_liquido"] == 67 and a1["esperado_extrato"] == 67
-    assert a2["custo_devolucao"] == 3 and a2["extrato_liquido"] == -3 and a2["esperado_extrato"] == -3
+    assert a1["cobrancas"]["COMISSAO"] == -13 and a1["cobrancas"]["FRETE"] == -20 and a1["fonte"] == "extrato"
+    assert a1["resultado"] == 100 - 10 - 33 - 25 and a1["extrato_liquido"] == 67
+    # devolução com disputa: retenções se anulam, tarifa estornada no MP, frete de ida e de volta ficam com o vendedor
+    c2 = a2["componentes"]
+    assert (c2["venda"], c2["frete_comprador"], c2["reembolso"], c2["tarifa"], c2["frete"], c2["frete_devolucao"]) == (50, 10, -60, 0, -20, -15)
+    assert c2["imposto"] == 0 and a2["resultado"] == -35 and a2["custo_devolucao"] == 35 and a2["extrato_liquido"] == -35
+    assert a2["retido"] == 0 and a2["devolucao_integral"]
     d = c.get(f"/api/empresas/{eid}/mlivre/pedido/2000001").json()
     assert d["notas"][0]["dominio"]["numero"] == "1001" and len(d["cobrancas"]) == 2 and d["extrato"][0]["como"] == "pagamento"
     assert d["itens"][0]["tarifa_pct"] == 12 and d["itens"][0]["custo_unit"] == 25
     x = c.get(f"/api/empresas/{eid}/mlivre/extrato?de=2026-01-01&ate=2026-02-28").json()
-    assert x["creditos"] == 114 and x["debitos"] == 114 and x["saldo_final"] == 0 and x["nao_identificados"] == 1
-    assert {l["como"] for l in x["linhas"] if l["order_id"]} == {"pagamento", "referência"}
+    assert x["creditos"] == 159 and x["debitos"] == 159 and x["saldo_final"] == 0 and x["nao_identificados"] == 1
+    assert {l["como"] for l in x["linhas"] if l["order_id"]} == {"pagamento"}
+    d2 = c.get(f"/api/empresas/{eid}/mlivre/pedido/2000002").json()
+    assert sum(1 for l in d2["extrato"] if l["retencao"]) == 4 and {c_["chave"]: c_["valor"] for c_ in d2["componentes"]}["frete_devolucao"] == -15
     a = c.get(f"/api/empresas/{eid}/mlivre/auditoria?inicio=2026-01&fim=2026-02").json()
     A = {}
     for x in a["achados"]:
         A.setdefault(x["codigo"], []).append(x)
     assert A["COMISSAO_DIVERGENTE"][0]["order_id"] == 2000001 and A["COMISSAO_DIVERGENTE"][0]["diferenca"] == 1
-    assert A["TARIFA_NAO_ESTORNADA"][0]["order_id"] == 2000002 and A["CUSTO_DEVOLUCAO"][0]["cobrado"] == 3
+    assert "TARIFA_NAO_ESTORNADA" not in A and A["CUSTO_DEVOLUCAO"][0]["cobrado"] == 35
+    assert "frete da devolução 15,00" in A["CUSTO_DEVOLUCAO"][0]["texto"]
+    assert A["COMISSAO_FATURA_X_EXTRATO"][0]["order_id"] == 2000002 and A["COMISSAO_FATURA_X_EXTRATO"][0]["cobrado"] == 3
     assert A["COBRANCA_SEM_VENDA"][0]["order_id"] == 7777 and A["EXTRATO_SEM_PEDIDO"][0]["cobrado"] == -10
-    assert not {"SEM_NOTA", "NOTA_NAO_ESCRITURADA", "EXTRATO_DIVERGENTE", "VENDA_SEM_EXTRATO", "FRETE_DIVERGENTE"} & set(A)
+    assert not {"SEM_NOTA", "NOTA_NAO_ESCRITURADA", "VENDA_SEM_EXTRATO", "FRETE_DIVERGENTE", "VALOR_RETIDO",
+                "DEVOLUCAO_SEM_NOTA_ENTRADA"} & set(A)
     assert [n["numero"] for n in a["dominio_sem_ml"]] == ["1009"] and a["tem_cobrancas"] and a["tem_extrato"]
     # comissão acordada: Premium 11% → 12,00 cobrado acima do esperado 11,00
     c.put(f"/api/empresas/{eid}/mlivre/config", json={"regras": {"premium_pct": "11"}})

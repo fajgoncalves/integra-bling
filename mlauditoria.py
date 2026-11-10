@@ -42,9 +42,11 @@ def grupo_cobranca(c: MLCobranca):
         return "BONUS"
     if "devolu" in d or "return" in d or "retorno" in d:
         return "DEVOLUCAO"
-    if t == "CV" or ("tarifa" in d and "venda" in d) or "cargo por venta" in d:
+    # tarifa de venda: CV, ou desmembrada em custo por vender (CVVML), por cobrar (CVVPRC) e taxa de recebimento (CVVFNU)
+    if t == "CV" or t.startswith("CVV") or ("tarifa" in d and "venda" in d) or "custo por vender" in d \
+            or "custo por cobrar" in d or "taxa de recebimento" in d or "cargo por venta" in d:
         return "COMISSAO"
-    if t.startswith("CX") or t in ("CFLX",) or "envio" in d or "frete" in d or "envío" in d:
+    if t.startswith("CX") or t in ("CFLX", "CFFE") or "envio" in d or "frete" in d or "envío" in d:
         return "FRETE"
     if t in ("CFONPN",) or "parcel" in d or "financ" in d:
         return "PARCELAMENTO"
@@ -53,6 +55,50 @@ def grupo_cobranca(c: MLCobranca):
     if t == "PADS" or "publicidade" in d or "ads" in d:
         return "PUBLICIDADE"
     return "OUTRAS"
+
+
+# composição do resultado da venda (valores com sinal)
+COMPONENTES = [("venda", "Venda (produtos)"), ("frete_comprador", "Frete pago pelo comprador"), ("reembolso", "Devolvido ao comprador"),
+               ("tarifa", "Tarifa de venda"), ("parcelamento", "Parcelamento"), ("frete", "Frete (envio)"),
+               ("frete_devolucao", "Frete da devolução"), ("outras", "Outras cobranças"), ("imposto", "Impostos"),
+               ("cmv", "Custo dos produtos")]
+DEVOLUCAO_MP = {"refund", "mediation", "chargeback", "dispute"}
+
+
+def classificar_extrato(linhas):
+    """Separa cada linha do extrato de um pedido em componentes (a soma bate com o líquido da linha).
+    Retenções por disputa (bloqueia e libera) vão para 'retido' — líquido zero quando a disputa termina."""
+    comp = defaultdict(float)
+    reservas_frete = [round(abs(_f(x.bruto) or (_f(x.debito) - _f(x.credito))), 2) for x in linhas
+                      if "shipping_return" in str(x.descricao).lower() and _f(x.debito)]
+    for x in linhas:
+        d = str(x.descricao or "").lower()
+        liquido = _f(x.credito) - _f(x.debito)
+        if d.startswith("reserve"):
+            comp["retido"] += liquido
+            continue
+        bruto = _f(x.bruto) if x.bruto is not None and (_f(x.bruto) or d not in ("payment",)) else 0.0
+        if d == "payment":
+            comp["recebido"] += bruto
+        elif d in DEVOLUCAO_MP or d.endswith("_cancel"):
+            v = round(abs(bruto), 2)
+            if bruto < 0 and v in reservas_frete:
+                reservas_frete.remove(v)
+                comp["frete_devolucao"] += bruto
+            else:
+                comp["reembolso"] += bruto
+        elif d == "shipping":
+            comp["frete"] += bruto
+        else:
+            comp["outras"] += bruto
+        comp["tarifa"] += _f(x.tarifa_mp)
+        comp["parcelamento"] += _f(x.financiamento)
+        comp["frete"] += _f(x.frete)
+        comp["outras"] += _f(x.impostos)
+        resto = liquido - (bruto + _f(x.tarifa_mp) + _f(x.financiamento) + _f(x.frete) + _f(x.impostos))
+        if abs(resto) > 0.004:
+            comp["outras"] += resto
+    return comp
 
 
 def regras(e: Empresa):
@@ -108,29 +154,50 @@ def painel(s, emp: Empresa, ini, fim):
         for n in s.scalars(select(DominioNota).where(DominioNota.empresa_id == eid, DominioNota.chave.in_(chaves[k:k + 5000]))).all():
             dom[n.chave] = n
     meses_dom = dominio_lido(s, eid, d1, d2)
-    tem_cobs = bool(s.scalar(select(func.count(MLCobranca.id)).where(MLCobranca.empresa_id == eid, MLCobranca.periodo >= ini,
-                                                                     MLCobranca.periodo <= fim)))
     ext_min = s.scalar(select(func.min(MLExtrato.data)).where(MLExtrato.empresa_id == eid))
     ext_max = s.scalar(select(func.max(MLExtrato.data)).where(MLExtrato.empresa_id == eid))
     res_an = {v.order_id: r for v, _its, r in mlanalise.pedidos(s, emp, ini, fim)}
     aliq = _f(emp.ml_imposto_aliq) / 100
     out = []
     for v in vendas:
-        r = res_an.get(v.order_id) or {"imposto": aliq * (_f(v.pago) - _f(v.devolvido)), "cmv": 0.0, "sem_custo": [],
-                                        "estimado": False}
+        pago, dev_total = _f(v.pago), _f(v.devolvido)
+        dev_prod = min(dev_total, pago)
+        r = res_an.get(v.order_id) or {"imposto": aliq * (pago - dev_prod), "cmv": 0.0, "sem_custo": [], "estimado": False}
         g = defaultdict(float)
         for c in cobs[v.order_id]:
             g[grupo_cobranca(c)] += _f(c.valor)
-        cobrancas_liq = round(sum(g.values()), 2)
-        fonte_custos = "faturamento" if cobs[v.order_id] else ("pedido" if not tem_cobs else "sem cobrança")
-        if not cobs[v.order_id]:  # sem o detalhe do faturamento: usa o informado no pedido
-            g["COMISSAO"] = -_f(v.comissao) * (1 if _f(v.pago) > _f(v.devolvido) else 0)
-            g["FRETE"] = -_f(v.frete)
-            cobrancas_liq = round(g["COMISSAO"] + g["FRETE"], 2)
-        e_cred = round(sum(_f(x.credito) for x in ext[v.order_id]), 2)
-        e_deb = round(sum(_f(x.debito) for x in ext[v.order_id]), 2)
-        debitadas = sum(_f(c.valor) for c in cobs[v.order_id] if c.debitada)
-        esperado = round(_f(v.pago) - _f(v.devolvido) + debitadas, 2) if cobs[v.order_id] else None
+        g = {k: round(g.get(k, 0.0), 2) for k, _n in GRUPOS_COBRANCA}
+        linhas_ext = ext[v.order_id]
+        tem_pagamento = any(str(x.descricao).lower() == "payment" for x in linhas_ext)
+        c = {"venda": pago, "imposto": -r["imposto"], "cmv": -r["cmv"]}
+        if tem_pagamento:  # o extrato é a fonte do que realmente entrou e saiu
+            e = classificar_extrato(linhas_ext)
+            c["frete_comprador"] = round(e["recebido"] - pago, 2)
+            c["reembolso"] = e["reembolso"]
+            c["tarifa"] = e["tarifa"]
+            c["parcelamento"] = e["parcelamento"]
+            c["frete"] = e["frete"]
+            c["frete_devolucao"] = e["frete_devolucao"]
+            c["outras"] = e["outras"] + g["FULL"] + g["PUBLICIDADE"]  # cobradas na fatura do ML, fora do Mercado Pago
+            retido = round(e["retido"], 2)
+            fonte = "extrato"
+        elif cobs[v.order_id]:
+            c["frete_comprador"] = 0.0
+            c["reembolso"] = -dev_total
+            c["tarifa"] = g["COMISSAO"]
+            c["parcelamento"] = g["PARCELAMENTO"]
+            c["frete"] = g["FRETE"]
+            c["frete_devolucao"] = g["DEVOLUCAO"]
+            c["outras"] = g["FULL"] + g["PUBLICIDADE"] + g["OUTRAS"] + g["BONUS"]
+            retido, fonte = 0.0, "faturamento"
+        else:
+            integral = dev_total >= pago - 0.01 and dev_total > 0
+            c.update({"frete_comprador": 0.0, "reembolso": -dev_total, "tarifa": 0.0 if integral else -_f(v.comissao),
+                      "parcelamento": 0.0, "frete": -_f(v.frete), "frete_devolucao": 0.0, "outras": 0.0})
+            retido, fonte = 0.0, "pedido"
+        c = {k: round(c.get(k, 0.0), 2) for k, _n in COMPONENTES}
+        resultado = round(sum(c.values()), 2)
+        integral = dev_prod >= pago - 0.01 and dev_total > 0
         ns = notas[v.order_id]
         nv = next((n for n in ns if n.tipo == "venda"), ns[0] if ns else None)
         if not nv:
@@ -144,8 +211,8 @@ def painel(s, emp: Empresa, ini, fim):
         else:
             st_dom = "não escriturada"
         its = itens[v.order_id]
-        resultado = _f(v.pago) - _f(v.devolvido) - r["imposto"] + cobrancas_liq - r["cmv"]
-        no_extrato = bool(ext_min and ext_max and ext_min.date() <= v.data <= ext_max.date())
+        e_cred = round(sum(_f(x.credito) for x in linhas_ext), 2)
+        e_deb = round(sum(_f(x.debito) for x in linhas_ext), 2)
         out.append({
             "order_id": v.order_id, "pack_id": v.pack_id, "data": v.data.isoformat(), "status": v.status,
             "descricao": v.descricao, "comprador": v.comprador, "itens": v.itens,
@@ -154,16 +221,14 @@ def painel(s, emp: Empresa, ini, fim):
             "nota": {"numero": nv.numero, "serie": nv.serie, "chave": nv.chave, "origem": nv.origem,
                      "valor": _f(nv.valor) if nv.valor is not None else None} if nv else None,
             "nota_devolucao": next(({"numero": n.numero, "chave": n.chave} for n in ns if n.tipo == "devolucao"), None),
-            "dominio": st_dom,
-            "dominio_valor": _f(dom[nv.chave].valor) if nv and nv.chave in dom else None,
-            "vendas": round(_f(v.pago), 2), "devolvido": round(_f(v.devolvido), 2),
+            "dominio": st_dom, "dominio_valor": _f(dom[nv.chave].valor) if nv and nv.chave in dom else None,
+            "componentes": c, "resultado": resultado, "fonte": fonte, "retido": retido,
+            "vendas": round(pago, 2), "devolvido": round(dev_total, 2), "devolucao_integral": integral,
             "imposto": round(r["imposto"], 2), "cmv": round(r["cmv"], 2), "sem_custo": bool(r["sem_custo"]),
-            "cobrancas": {k: round(g.get(k, 0.0), 2) for k, _n in GRUPOS_COBRANCA}, "cobrancas_liq": cobrancas_liq,
-            "fonte_custos": fonte_custos,
-            "custo_devolucao": round(-cobrancas_liq, 2) if _f(v.devolvido) and _f(v.devolvido) >= _f(v.pago) - 0.01 else None,
+            "cobrancas": g, "cobrancas_liq": round(sum(g.values()), 2),
+            "custo_devolucao": round(-resultado, 2) if integral else None,
             "extrato_credito": e_cred, "extrato_debito": e_deb, "extrato_liquido": round(e_cred - e_deb, 2),
-            "extrato_linhas": len(ext[v.order_id]), "no_periodo_extrato": no_extrato, "esperado_extrato": esperado,
-            "resultado": round(resultado, 2),
+            "extrato_linhas": len(linhas_ext), "no_periodo_extrato": bool(ext_min and ext_max and ext_min.date() <= v.data <= ext_max.date()),
         })
     return out
 
@@ -202,7 +267,9 @@ def detalhe(s, emp: Empresa, order_id: int):
         "extrato": [{"data": x.data.isoformat(sep=" ")[:16], "descricao": rotulo_extrato(x.descricao), "tipo": x.descricao,
                      "origem_id": x.origem_id, "credito": _f(x.credito), "debito": _f(x.debito), "bruto": _f(x.bruto),
                      "tarifa_mp": _f(x.tarifa_mp), "financiamento": _f(x.financiamento), "frete": _f(x.frete),
-                     "cupom": _f(x.cupom), "como": x.identificacao} for x in ext],
+                     "cupom": _f(x.cupom), "como": x.identificacao,
+                     "retencao": str(x.descricao or "").lower().startswith("reserve")} for x in ext],
+        "componentes": [{"chave": k, "nome": n, "valor": (linha or {}).get("componentes", {}).get(k, 0.0)} for k, n in COMPONENTES],
     }
 
 
@@ -270,17 +337,44 @@ def auditoria(s, emp: Empresa, ini, fim):
             if _f(i.preco) > 0 and _f(i.tarifa) > 0:
                 pcts[(i.tipo_anuncio, i.categoria)].append(_f(i.tarifa) / _f(i.preco) * 100)
     mediana = {k: statistics.median(v) for k, v in pcts.items() if len(v) >= 3}
+    # notas de devolução (entrada) na Domínio, para conferir as vendas devolvidas
+    entradas = s.scalars(select(DominioNota).where(DominioNota.empresa_id == eid, DominioNota.lado == "E",
+                                                   DominioNota.data >= d1, DominioNota.cancelada == False)).all()  # noqa: E712
+    chaves_dev = {n.chave for n in s.scalars(select(MLNota).where(MLNota.empresa_id == eid, MLNota.tipo == "devolucao")).all() if n.chave}
+    usadas = set()
+    meses_dom = dominio_lido(s, eid, d1, d2)
+
+    def tem_nota_devolucao(oid, p):
+        nd = p.get("nota_devolucao")
+        if nd and nd.get("chave") and (nd["chave"] in chaves_dev) and any(n.chave == nd["chave"] for n in entradas):
+            return True
+        data = dt.date.fromisoformat(p["data"])
+        if data.strftime("%Y-%m") not in meses_dom:
+            return True  # Domínio não lida para o período: não aponta
+        alvo = _f((p["nota"] or {}).get("valor")) or p["vendas"]
+        for n in entradas:
+            if n.id not in usadas and data <= n.data <= data + dt.timedelta(days=120) and abs(_f(n.valor) - alvo) <= 0.05:
+                usadas.add(n.id)
+                return True
+        return False
     for oid, p in por_id.items():
         v = vendas.get(oid)
         if not v:
             continue
-        cv_fat = -p["cobrancas"]["COMISSAO"] if p["fonte_custos"] == "faturamento" else None
+        tem_fat = any(p["cobrancas"][k] for k in p["cobrancas"])
+        cv_fat = -p["cobrancas"]["COMISSAO"] if tem_fat else None
         cv_ped = _f(v.comissao)
-        integral = _f(v.devolvido) >= _f(v.pago) - 0.01 and _f(v.devolvido) > 0
+        integral = p["devolucao_integral"]
+        c = p["componentes"]
         # 1. comissão cobrada no faturamento × informada no pedido
         if cv_fat is not None and not integral and abs(cv_fat - cv_ped) > tol:
             add("COMISSAO_DIVERGENTE", "alta", oid, "Tarifa de venda cobrada no faturamento diferente da informada no pedido.",
                 round(cv_ped, 2), round(cv_fat, 2))
+        # 1b. faturamento do ML × o que foi descontado no Mercado Pago
+        if p["fonte"] == "extrato" and cv_fat is not None and abs(cv_fat - (-c["tarifa"])) > tol:
+            add("COMISSAO_FATURA_X_EXTRATO", "média", oid, "Tarifa de venda no faturamento do ML diferente da descontada (líquida de "
+                "estornos) no Mercado Pago. Se a venda foi devolvida, o estorno pode ainda não ter entrado na fatura.",
+                round(-c["tarifa"], 2), round(cv_fat, 2))
         # 2. comissão × acordada (cadastro) ou × padrão do tipo de anúncio/categoria
         for i in itens.get(oid, []):
             if _f(i.preco) <= 0 or _f(i.tarifa) <= 0:
@@ -301,18 +395,27 @@ def auditoria(s, emp: Empresa, ini, fim):
                         f"{TIPO_ANUNCIO.get(i.tipo_anuncio, i.tipo_anuncio)} na mesma categoria — {i.titulo[:60]}",
                         round(m / 100 * _f(i.preco) * _f(i.qtd), 2), round(_f(i.tarifa) * _f(i.qtd), 2))
         # 3. frete cobrado × custo do envio
-        if p["fonte_custos"] == "faturamento" and v.frete is not None and not integral:
-            fr = -p["cobrancas"]["FRETE"]
-            if abs(fr - _f(v.frete)) > max(tol, 0.5):
-                add("FRETE_DIVERGENTE", "média", oid, "Frete cobrado no faturamento diferente do custo do envio informado pelo Mercado Envios.",
-                    round(_f(v.frete), 2), round(fr, 2))
-        # 4. devolução integral com tarifa não estornada
-        if integral and p["fonte_custos"] == "faturamento" and p["cobrancas"]["COMISSAO"] < -tol:
-            add("TARIFA_NAO_ESTORNADA", "alta", oid, "Venda devolvida/cancelada integralmente, mas a tarifa de venda não foi estornada.",
-                0.0, round(-p["cobrancas"]["COMISSAO"], 2))
+        if v.frete is not None and not integral and p["fonte"] != "pedido":
+            fr = -c["frete"] - c["frete_comprador"] if p["fonte"] == "extrato" else -c["frete"]
+            fr_bruto = -c["frete"]
+            if abs(fr_bruto - _f(v.frete)) > max(tol, 0.5) and abs(fr - _f(v.frete)) > max(tol, 0.5):
+                add("FRETE_DIVERGENTE", "média", oid, "Frete descontado diferente do custo do envio informado pelo Mercado Envios.",
+                    round(_f(v.frete), 2), round(fr_bruto, 2))
+        # 4. devoluções
+        if integral and c["tarifa"] < -tol:
+            add("TARIFA_NAO_ESTORNADA", "alta", oid, "Venda devolvida/cancelada integralmente, mas a tarifa de venda não foi estornada"
+                + (" no Mercado Pago." if p["fonte"] == "extrato" else " no faturamento."), 0.0, round(-c["tarifa"], 2))
         if integral and p["custo_devolucao"] and p["custo_devolucao"] > tol:
-            add("CUSTO_DEVOLUCAO", "info", oid, "Custo que ficou com o vendedor nesta devolução (cobranças não estornadas).",
+            partes = [f"{n.lower()} {abs(c[k]):.2f}".replace(".", ",") for k, n in COMPONENTES
+                      if k in ("tarifa", "parcelamento", "frete", "frete_devolucao", "outras") and abs(c[k]) > 0.004]
+            add("CUSTO_DEVOLUCAO", "info", oid, "Custo que ficou com o vendedor nesta devolução: " + (", ".join(partes) or "—") + ".",
                 0.0, p["custo_devolucao"])
+        if abs(p["retido"]) > tol:
+            add("VALOR_RETIDO", "info", oid, "Valor ainda retido pelo Mercado Pago (disputa ou reclamação em aberto).", 0.0, round(-p["retido"], 2))
+        if p["devolvido"] > 0 and p["dominio"] == "escriturada" and not tem_nota_devolucao(oid, p):
+            add("DEVOLUCAO_SEM_NOTA_ENTRADA", "média", oid, f"Venda com devolução ao comprador e nota {p['nota']['numero']} escriturada, mas "
+                "nenhuma nota de devolução (entrada) de mesmo valor foi encontrada na Domínio até 120 dias depois. Se a mercadoria voltou, "
+                "falta escriturar a devolução.", round(p["nota"]["valor"] or p["vendas"], 2), 0.0)
         # 5. nota fiscal
         st = p["dominio"]
         if _f(v.pago) > _f(v.devolvido):
@@ -331,9 +434,6 @@ def auditoria(s, emp: Empresa, ini, fim):
         if p["no_periodo_extrato"] and _f(v.pago) > _f(v.devolvido) and not p["extrato_linhas"]:
             add("VENDA_SEM_EXTRATO", "média", oid, "Venda paga sem nenhum movimento no extrato do Mercado Pago no período lido "
                 "(o dinheiro pode ainda não ter sido liberado).")
-        if p["esperado_extrato"] is not None and p["extrato_linhas"] and abs(p["extrato_liquido"] - p["esperado_extrato"]) > max(tol, 0.5):
-            add("EXTRATO_DIVERGENTE", "alta", oid, "Líquido no extrato diferente do esperado (venda − reembolso − cobranças descontadas na operação).",
-                p["esperado_extrato"], p["extrato_liquido"])
     # 7. cobranças de pedidos que não estão entre as vendas lidas
     orfas = s.execute(select(MLCobranca.order_id, func.sum(MLCobranca.valor), func.count(MLCobranca.id))
                       .where(MLCobranca.empresa_id == eid, MLCobranca.periodo >= ini, MLCobranca.periodo <= fim,
@@ -372,5 +472,5 @@ def auditoria(s, emp: Empresa, ini, fim):
             "dominio_sem_ml": [{"data": n.data.isoformat(), "numero": n.numero, "serie": n.serie, "chave": n.chave, "cfop": n.cfop,
                                 "valor": _f(n.valor)} for n in sorted(sem_ml, key=lambda n: n.data)][:2000],
             "dominio_lida": bool(dominio_lido(s, eid, d1, d2)),
-            "tem_cobrancas": any(p["fonte_custos"] == "faturamento" for p in pn),
+            "tem_cobrancas": any(any(p["cobrancas"].values()) for p in pn),
             "tem_extrato": any(p["no_periodo_extrato"] for p in pn)}

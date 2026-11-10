@@ -1149,7 +1149,8 @@ const ACHADO = {
   TARIFA_NAO_ESTORNADA: "Tarifa não estornada na devolução", CUSTO_DEVOLUCAO: "Custo de devolução",
   SEM_NOTA: "Venda sem nota fiscal", NOTA_NAO_ESCRITURADA: "Nota não escriturada na Domínio", NOTA_CANCELADA_DOMINIO: "Nota cancelada na Domínio",
   NOTA_SEM_CHAVE: "Nota sem chave de acesso", NOTA_VALOR_DIFERENTE: "Valor da nota ≠ valor da venda", VENDA_SEM_EXTRATO: "Venda sem movimento no extrato",
-  EXTRATO_DIVERGENTE: "Extrato ≠ esperado", COBRANCA_SEM_VENDA: "Cobrança sem venda", EXTRATO_SEM_PEDIDO: "Extrato sem pedido",
+  COMISSAO_FATURA_X_EXTRATO: "Tarifa na fatura ≠ descontada no Mercado Pago", VALOR_RETIDO: "Valor retido em disputa",
+  DEVOLUCAO_SEM_NOTA_ENTRADA: "Devolução sem nota de entrada", COBRANCA_SEM_VENDA: "Cobrança sem venda", EXTRATO_SEM_PEDIDO: "Extrato sem pedido",
 };
 const GRAV = { "alta": "b-erro", "média": "b-aviso", "info": "" };
 
@@ -1159,10 +1160,13 @@ function abrirPedidoML(eid, oid) {
     const p = d.pedido || {};
     const sinal = (v) => `<span class="${v < 0 ? "neg" : ""}">${brl(v)}</span>`;
     modal(`<div class="linha entre"><div><h2 style="margin:0">Pedido ${oid}</h2><div class="suave peq">${dataBR(p.data)} · ${esc(p.status || "")} · ${esc(p.comprador || "")}${p.pack_id ? ` · pacote ${p.pack_id}` : ""}</div></div><button class="btn" data-fechar>Fechar</button></div>
-      <div class="kpi" style="margin-top:12px"><div>Venda<b>R$ ${brl(p.vendas)}</b></div><div>Reembolso<b class="neg">R$ ${brl(-p.devolvido)}</b></div>
-        <div>Cobranças ML/MP<b class="neg">R$ ${brl(p.cobrancas_liq)}</b></div><div>Impostos<b class="neg">R$ ${brl(-p.imposto)}</b></div>
-        <div>Custo dos produtos<b class="neg">R$ ${brl(-p.cmv)}</b></div><div>Resultado<b class="${p.resultado < 0 ? "neg" : ""}">R$ ${brl(p.resultado)}</b></div></div>
-      ${p.custo_devolucao != null ? `<div class="aviso">Venda devolvida/cancelada: custo que ficou com o vendedor R$ ${brl(p.custo_devolucao)} (cobranças não estornadas).</div>` : ""}
+      <div class="linha" style="gap:18px;align-items:flex-start;margin-top:12px;flex-wrap:wrap">
+        <table style="width:auto;min-width:320px"><tr><th colspan="2">Composição do resultado <span class="suave peq">(fonte: ${esc({ extrato: "extrato do Mercado Pago", faturamento: "faturamento do ML", pedido: "dados do pedido" }[p.fonte] || p.fonte)})</span></th></tr>
+          ${d.componentes.filter((c) => c.valor || ["venda", "imposto", "cmv"].includes(c.chave)).map((c) => `<tr><td>${esc(c.nome)}</td><td class="num">${sinal(c.valor)}</td></tr>`).join("")}
+          <tr class="destaque"><td>Resultado da venda</td><td class="num">${sinal(p.resultado)}</td></tr>
+          ${p.retido ? `<tr><td class="suave">Ainda retido em disputa</td><td class="num suave">${brl(p.retido)}</td></tr>` : ""}</table>
+        <div style="flex:1;min-width:240px">${p.devolucao_integral ? `<div class="aviso">Venda devolvida/cancelada: custo que ficou com o vendedor <b>R$ ${brl(p.custo_devolucao)}</b>.</div>` : ""}
+          <div class="suave peq">Com o extrato lido, a composição vem do que de fato entrou e saiu no Mercado Pago. As retenções por disputa (bloqueia e libera o mesmo valor) não entram no resultado.</div></div></div>
       <h3>Itens</h3><table><tr><th>Produto</th><th>SKU</th><th>Anúncio</th><th class="num">Qtd</th><th class="num">Preço</th><th class="num">Tarifa unit.</th><th class="num">% tarifa</th><th class="num">Custo unit.</th></tr>
         ${d.itens.map((i) => `<tr><td>${esc(i.titulo)}<div class="suave peq mono">${esc(i.anuncio)} ${esc(i.categoria)}</div></td><td class="mono peq">${esc(i.sku)}</td><td>${esc(i.tipo)}</td><td class="num">${qtdBR(i.qtd)}</td><td class="num">${brl(i.preco)}</td><td class="num">${brl(i.tarifa_unit)}</td><td class="num">${pct(i.tarifa_pct)}</td><td class="num">${i.custo_unit == null ? '<span class="badge b-aviso">sem custo</span>' : brl4(i.custo_unit)}</td></tr>`).join("")}</table>
       <h3>Nota fiscal</h3>${d.notas.length ? `<table><tr><th>Tipo</th><th>Origem</th><th>Número</th><th>Chave</th><th class="num">Valor</th><th>Na Domínio</th></tr>
@@ -1170,18 +1174,20 @@ function abrirPedidoML(eid, oid) {
           <td class="peq">${n.dominio ? `${n.dominio.cancelada ? '<span class="badge b-erro">cancelada</span>' : '<span class="badge b-ok">escriturada</span>'} ${dataBR(n.dominio.data)} · CFOP ${n.dominio.cfop} · R$ ${brl(n.dominio.valor)}` : `<span class="badge">${esc(p.dominio || "não encontrada")}</span>`}</td></tr>`).join("")}</table>` : '<div class="aviso">Nenhuma nota encontrada no Mercado Livre para esta venda.</div>'}
       <h3>Cobranças do Mercado Livre / Mercado Pago (faturamento)</h3>${d.cobrancas.length ? `<table><tr><th>Data</th><th>Documento</th><th>Descrição</th><th>Classe</th><th>Descontada na venda</th><th class="num">Valor</th></tr>
         ${d.cobrancas.map((c) => `<tr><td>${dataBR(c.data)}</td><td class="peq">${esc(c.documento)} · ${c.grupo}</td><td>${esc(c.descricao)} <span class="mono suave peq">${esc(c.tipo)}</span></td><td class="peq">${esc(c.classe)}</td><td class="peq">${c.debitada == null ? "—" : c.debitada ? "sim" : "não (fatura)"}</td><td class="num">${sinal(c.valor)}</td></tr>`).join("")}
-        <tr class="destaque"><td colspan="5">Total</td><td class="num">${sinal(d.cobrancas.reduce((a, c) => a + c.valor, 0))}</td></tr></table>` : `<div class="suave peq">Sem cobranças detalhadas para este pedido${p.fonte_custos === "pedido" ? " (usado o informado no pedido: tarifa e frete)" : ""}.</div>`}
-      <h3>Extrato do Mercado Pago</h3>${d.extrato.length ? `<table><tr><th>Data</th><th>Movimento</th><th>Operação</th><th class="num">Bruto</th><th class="num">Tarifa MP</th><th class="num">Parcel.</th><th class="num">Frete</th><th class="num">Crédito</th><th class="num">Débito</th></tr>
-        ${d.extrato.map((x) => `<tr><td>${esc(x.data)}</td><td>${esc(x.descricao)}</td><td class="mono peq">${esc(x.origem_id)}<div class="suave">por ${esc(x.como)}</div></td><td class="num">${brl(x.bruto)}</td><td class="num">${brl(x.tarifa_mp)}</td><td class="num">${brl(x.financiamento)}</td><td class="num">${brl(x.frete)}</td><td class="num">${x.credito ? brl(x.credito) : "–"}</td><td class="num neg">${x.debito ? brl(-x.debito) : "–"}</td></tr>`).join("")}
-        <tr class="destaque"><td colspan="7">Líquido no extrato${p.esperado_extrato != null ? ` (esperado R$ ${brl(p.esperado_extrato)})` : ""}</td><td class="num" colspan="2">${brl(p.extrato_liquido)}</td></tr></table>`
+        <tr class="destaque"><td colspan="5">Total</td><td class="num">${sinal(d.cobrancas.reduce((a, c) => a + c.valor, 0))}</td></tr></table>` : `<div class="suave peq">Sem cobranças detalhadas para este pedido${p.fonte === "pedido" ? " (usado o informado no pedido: tarifa e frete)" : ""}.</div>`}
+      <h3>Extrato do Mercado Pago ${d.extrato.some((x) => x.retencao) ? '<label class="chk peq" style="font-weight:400;margin-left:10px"><input type="checkbox" id="ver-ret"> mostrar bloqueios/desbloqueios</label>' : ""}</h3>${d.extrato.length ? `<table id="tab-ext"><tr><th>Data</th><th>Movimento</th><th>Operação</th><th class="num">Bruto</th><th class="num">Tarifa MP</th><th class="num">Parcel.</th><th class="num">Frete</th><th class="num">Crédito</th><th class="num">Débito</th></tr>
+        ${d.extrato.map((x) => `<tr class="${x.retencao ? "ret suave" : ""}" style="${x.retencao ? "display:none" : ""}"><td>${esc(x.data)}</td><td>${esc(x.descricao)}${x.retencao ? " <span class=\"peq\">(bloqueio/desbloqueio)</span>" : ""}</td><td class="mono peq">${esc(x.origem_id)}<div class="suave">por ${esc(x.como)}</div></td><td class="num">${brl(x.bruto)}</td><td class="num">${brl(x.tarifa_mp)}</td><td class="num">${brl(x.financiamento)}</td><td class="num">${brl(x.frete)}</td><td class="num">${x.credito ? brl(x.credito) : "–"}</td><td class="num neg">${x.debito ? brl(-x.debito) : "–"}</td></tr>`).join("")}
+        <tr class="destaque"><td colspan="7">Líquido no extrato</td><td class="num" colspan="2">${brl(p.extrato_liquido)}</td></tr></table>`
         : `<div class="suave peq">${p.no_periodo_extrato ? "Nenhum movimento no extrato ligado a este pedido." : "O extrato ainda não foi lido para a data desta venda."}</div>`}`);
+    const vr = document.getElementById("ver-ret");
+    if (vr) vr.onchange = () => document.querySelectorAll("#tab-ext tr.ret").forEach((tr) => { tr.style.display = vr.checked ? "" : "none"; });
   });
 }
 
 async function mlPainel(e) {
   $("#aba").innerHTML = `<div class="card"><div class="linha entre" style="align-items:flex-end">${seletorPeriodo(() => carregar())}
     <div class="linha"><input id="q" placeholder="Pedido, produto, SKU, NF..." style="min-width:220px">
-      <select id="f"><option value="">Todas as vendas</option><option value="dev">Com devolução</option><option value="nf">Nota com problema</option><option value="ext">Extrato diferente do esperado</option><option value="neg">Resultado negativo</option></select>
+      <select id="f"><option value="">Todas as vendas</option><option value="dev">Com devolução</option><option value="nf">Nota com problema</option><option value="ret">Com valor retido em disputa</option><option value="sem">Sem extrato</option><option value="neg">Resultado negativo</option></select>
       <button class="btn" id="xls">Baixar Excel</button></div></div>
     <div id="res" style="margin-top:12px" class="suave">Carregando...</div></div>`;
   let r = null;
@@ -1189,22 +1195,24 @@ async function mlPainel(e) {
   const desenhar = () => {
     const q = $("#q").value.toLowerCase(), f = $("#f").value;
     const ps = r.pedidos.filter((p) => (!q || String(p.order_id).includes(q) || p.descricao.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.nota && (p.nota.numero.includes(q) || p.nota.chave.includes(q))))
-      && (!f || (f === "dev" && p.devolvido) || (f === "nf" && !["escriturada", "Domínio não lida"].includes(p.dominio)) || (f === "ext" && p.esperado_extrato != null && p.extrato_linhas && Math.abs(p.extrato_liquido - p.esperado_extrato) > 0.5) || (f === "neg" && p.resultado < 0)));
-    const t = ps.reduce((a, p) => { a.v += p.vendas; a.d += p.devolvido; a.i += p.imposto; a.c += p.cobrancas_liq; a.m += p.cmv; a.r += p.resultado; return a; }, { v: 0, d: 0, i: 0, c: 0, m: 0, r: 0 });
-    const outras = (p) => Object.entries(p.cobrancas).filter(([k]) => !["COMISSAO", "FRETE"].includes(k)).reduce((a, [, v]) => a + v, 0);
-    $("#res").innerHTML = `<div class="kpi"><div>Vendas<b>R$ ${brl(t.v)}</b></div><div>Reembolsos<b class="neg">R$ ${brl(-t.d)}</b></div><div>Cobranças ML/MP<b class="neg">R$ ${brl(t.c)}</b></div>
-        <div>Impostos<b class="neg">R$ ${brl(-t.i)}</b></div><div>Custo dos produtos<b class="neg">R$ ${brl(-t.m)}</b></div><div>Resultado<b class="${t.r < 0 ? "neg" : ""}">R$ ${brl(t.r)}</b></div></div>
-      <div class="suave peq" style="margin-bottom:8px">${ps.length} de ${r.total} venda(s). Cobranças pelo faturamento do ML pedido a pedido (com estornos); sem o detalhe, usa a tarifa e o frete do pedido. Clique numa venda para ver itens, nota, cobranças e extrato.</div>
-      <div class="rolagem" style="max-height:62vh"><table><tr><th>Data</th><th>Pedido</th><th>Produto</th><th>Nota fiscal</th><th class="num">Venda</th><th class="num">Reembolso</th><th class="num">Impostos</th>
-        <th class="num">Comissão</th><th class="num">Frete</th><th class="num">Outras</th><th class="num">Custo</th><th class="num">Resultado</th><th class="num">Extrato</th></tr>
+      && (!f || (f === "dev" && p.devolvido) || (f === "nf" && !["escriturada", "Domínio não lida"].includes(p.dominio)) || (f === "ret" && p.retido) || (f === "sem" && p.fonte !== "extrato") || (f === "neg" && p.resultado < 0)));
+    const C = (p, k) => p.componentes[k] || 0;
+    const soma = (k) => ps.reduce((a, p) => a + C(p, k), 0);
+    const tot = ps.reduce((a, p) => a + p.resultado, 0);
+    const outras = (p) => C(p, "parcelamento") + C(p, "outras");
+    const cel = (v) => `<td class="num ${v < 0 ? "neg" : v ? "" : "suave"}">${v ? brl(v) : "–"}</td>`;
+    $("#res").innerHTML = `<div class="kpi"><div>Vendas<b>R$ ${brl(soma("venda"))}</b></div><div>Frete pago pelos compradores<b>R$ ${brl(soma("frete_comprador"))}</b></div>
+        <div>Devolvido aos compradores<b class="neg">R$ ${brl(soma("reembolso"))}</b></div><div>Tarifas e fretes<b class="neg">R$ ${brl(soma("tarifa") + soma("frete") + soma("frete_devolucao") + soma("parcelamento") + soma("outras"))}</b></div>
+        <div>Impostos e custo<b class="neg">R$ ${brl(soma("imposto") + soma("cmv"))}</b></div><div>Resultado<b class="${tot < 0 ? "neg" : ""}">R$ ${brl(tot)}</b></div></div>
+      <div class="suave peq" style="margin-bottom:8px">${ps.length} de ${r.total} venda(s). Com o extrato lido, os valores vêm do que entrou e saiu no Mercado Pago (retenções por disputa não entram); sem extrato, do faturamento do ML; sem os dois, do pedido. Clique numa venda para ver a composição, a nota, as cobranças e o extrato.</div>
+      <div class="rolagem" style="max-height:62vh"><table><tr><th>Data</th><th>Pedido</th><th>Produto</th><th>Nota fiscal</th><th class="num">Venda</th><th class="num">Frete comprador</th><th class="num">Devolvido</th>
+        <th class="num">Tarifa</th><th class="num">Frete</th><th class="num">Frete devolução</th><th class="num">Outras</th><th class="num">Impostos</th><th class="num">Custo</th><th class="num">Resultado</th></tr>
       ${ps.map((p) => `<tr class="clicavel" data-o="${p.order_id}"><td>${dataBR(p.data)}</td><td class="mono peq">${p.order_id}<div class="suave">${esc(p.status)}</div></td>
         <td class="peq">${esc(p.descricao)}<div class="suave">${esc(p.sku)}${p.tipo_anuncio ? ` · ${esc(p.tipo_anuncio)}` : ""}</div></td>
         <td class="peq">${p.nota ? `${esc(p.nota.numero)}<div class="suave">${p.nota.origem === "EMISSOR_ML" ? "emissor ML" : "ERP"}</div>` : ""}<span class="badge ${DOM_ST[p.dominio] || ""}">${esc(p.dominio)}</span></td>
-        <td class="num">${brl(p.vendas)}</td><td class="num ${p.devolvido ? "neg" : "suave"}">${p.devolvido ? brl(-p.devolvido) : "–"}</td><td class="num neg">${brl(-p.imposto)}</td>
-        <td class="num neg">${brl(p.cobrancas.COMISSAO)}</td><td class="num neg">${brl(p.cobrancas.FRETE)}</td><td class="num ${outras(p) < 0 ? "neg" : ""}">${brl(outras(p))}</td>
-        <td class="num">${p.sem_custo ? '<span class="badge b-aviso">sem custo</span>' : `<span class="neg">${brl(-p.cmv)}</span>`}</td>
-        <td class="num ${p.resultado < 0 ? "neg" : ""}"><b>${brl(p.resultado)}</b>${p.fonte_custos !== "faturamento" ? '<div class="suave peq">estimado</div>' : ""}</td>
-        <td class="num">${p.extrato_linhas ? `${brl(p.extrato_liquido)}${p.esperado_extrato != null && Math.abs(p.extrato_liquido - p.esperado_extrato) > 0.5 ? `<div><span class="badge b-erro">esperado ${brl(p.esperado_extrato)}</span></div>` : ""}` : `<span class="suave">${p.no_periodo_extrato ? "sem movimento" : "–"}</span>`}</td></tr>`).join("") || '<tr><td colspan="13" class="vazio">Nenhuma venda.</td></tr>'}</table></div>`;
+        ${cel(C(p, "venda"))}${cel(C(p, "frete_comprador"))}${cel(C(p, "reembolso"))}${cel(C(p, "tarifa"))}${cel(C(p, "frete"))}${cel(C(p, "frete_devolucao"))}${cel(outras(p))}${cel(C(p, "imposto"))}
+        <td class="num">${p.sem_custo ? '<span class="badge b-aviso">sem custo</span>' : (C(p, "cmv") ? `<span class="neg">${brl(C(p, "cmv"))}</span>` : '<span class="suave">–</span>')}</td>
+        <td class="num ${p.resultado < 0 ? "neg" : ""}"><b>${brl(p.resultado)}</b><div class="suave peq">${p.fonte === "extrato" ? "extrato" : p.fonte === "faturamento" ? "faturamento" : "estimado"}${p.retido ? " · retido" : ""}</div></td></tr>`).join("") || '<tr><td colspan="14" class="vazio">Nenhuma venda.</td></tr>'}</table></div>`;
     $("#res").classList.remove("suave");
     $$("#res tr[data-o]").forEach((tr) => tr.onclick = () => abrirPedidoML(e.id, tr.dataset.o));
   };

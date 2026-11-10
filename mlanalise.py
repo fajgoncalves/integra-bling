@@ -130,7 +130,7 @@ def pedidos(s, emp: Empresa, ini, fim, cus=None):
     out = []
     for v in vs:
         mes, f = v.data.strftime("%Y-%m"), _fator(v)
-        pago, dev = float(v.pago or 0), float(v.devolvido or 0)
+        pago, dev = float(v.pago or 0), min(float(v.devolvido or 0), float(v.pago or 0))  # reembolso de frete fica fora
         cmv, sem, estimado = 0.0, [], False
         for it in itens[v.order_id]:
             c, _origem, est = cus.custo(chave(it), mes)
