@@ -36,32 +36,13 @@ def rotulo_extrato(d):
     return ROTULO_EXTRATO.get(str(d or "").strip().lower(), str(d or ""))
 
 
+CLASSE_GRUPO = {"COM": "COMISSAO", "PARC": "PARCELAMENTO", "FRETE": "FRETE", "DEVOL": "DEVOLUCAO", "ADS": "PUBLICIDADE",
+                "FULL": "FULL", "DIFAL": "OUTRAS", "OUTRAS": "OUTRAS", "TMP": "OUTRAS", "BONUS": "BONUS"}
+
+
 def grupo_cobranca(c: MLCobranca):
-    t, d = (c.tipo or "").upper(), (c.descricao or "").lower()
-    # estornos ("Cancelamento do custo por vender/por cobrar/da taxa de recebimento" — BVVML, BVVPRC, BVVFNU...) voltam
-    # para o grupo da cobrança estornada, mesmo quando o ML os lança como bonificação
-    if t.startswith("BVV") or ("cancelamento" in d and ("custo por vender" in d or "custo por cobrar" in d
-                                                         or "taxa de recebimento" in d or "tarifa de venda" in d)):
-        return "COMISSAO"
-    if "cancelamento" in d and ("envio" in d or "frete" in d):
-        return "FRETE"
-    if c.natureza == "BONUS" and c.documento != "CREDIT_NOTE":
-        return "BONUS"
-    if "devolu" in d or "return" in d or "retorno" in d:
-        return "DEVOLUCAO"
-    # tarifa de venda: CV, ou desmembrada em custo por vender (CVVML), por cobrar (CVVPRC) e taxa de recebimento (CVVFNU)
-    if t == "CV" or t.startswith("CVV") or ("tarifa" in d and "venda" in d) or "custo por vender" in d \
-            or "custo por cobrar" in d or "taxa de recebimento" in d or "cargo por venta" in d:
-        return "COMISSAO"
-    if t.startswith("CX") or t in ("CFLX", "CFFE") or "envio" in d or "frete" in d or "envío" in d:
-        return "FRETE"
-    if t in ("CFONPN",) or "parcel" in d or "financ" in d:
-        return "PARCELAMENTO"
-    if "full" in d or "armazen" in d or "estoque" in d or t.startswith("CF"):
-        return "FULL"
-    if t == "PADS" or "publicidade" in d or "ads" in d:
-        return "PUBLICIDADE"
-    return "OUTRAS"
+    """Grupo da cobrança no resultado da venda — pelo código do ML (C… cobrança, B… estorno da mesma tarifa)."""
+    return CLASSE_GRUPO[mlanalise.classe_tarifa(c.grupo, c.natureza, c.tipo, c.descricao)]
 
 
 def grupos_do_pedido(cobs):

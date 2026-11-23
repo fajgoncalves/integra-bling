@@ -138,9 +138,10 @@ class Cliente:
                 self._access(forcar=True)
                 renovou = True
                 continue
-            if r.status_code == 429 or r.status_code >= 500:
+            limite = r.status_code == 429 or (r.status_code == 400 and "429" in r.text[:300])  # o faturamento devolve 400 "…code 429"
+            if limite or r.status_code >= 500:
                 ultimo = f"{r.status_code} {r.text[:200]}"
-                dormir(min(3 * 2 ** tentativa, 60) if r.status_code == 429 else min(2 ** tentativa, 20))
+                dormir(min(3 * 2 ** tentativa, 60) if limite else min(2 ** tentativa, 20))
                 continue
             if r.status_code in (400, 403, 404) and opcional:
                 return None
@@ -214,6 +215,11 @@ def venda(o: dict, empresa_id: int):
 def link_venda(order_id, pack_id=None):
     """Página da venda no painel do vendedor do Mercado Livre (vendas de carrinho abrem pelo pacote)."""
     return f"https://www.mercadolivre.com.br/vendas/{pack_id or order_id}/detalhe"
+
+
+def _mes_seguinte(mes):
+    a, m = map(int, mes.split("-"))
+    return f"{a + (m == 12):04d}-{1 if m == 12 else m + 1:02d}"
 
 
 def meses_entre(ini, fim):
@@ -467,18 +473,20 @@ def envios_de_devolucao(cli: Cliente, order_id: int):
 
 # ------------------------------------------------------------------ faturamento detalhado (cobrança por pedido)
 def cobrancas(cli: Cliente, mes: str, empresa_id: int, andamento=None, avisos=None):
-    """Detalhe do faturamento (cada cobrança/bonificação com o pedido). Paginação por from_id/last_id, como pede o ML.
-    Uma falha num grupo/documento vira aviso e não derruba a atualização."""
-    out, vistos = [], set()
+    """Detalhe do faturamento do período de chave `mes` (AAAA-MM; o ML fecha cada fatura no dia 12): cada cobrança,
+    bonificação e estorno, com o pedido. Paginação por from_id/last_id até ler o total (o ML devolve ~950 por página).
+    Devolve (lista, completo). Uma falha num grupo/documento vira aviso e marca o período como incompleto."""
+    out, vistos, completo = [], set(), True
     for grupo in ("ML", "MP"):
         for doc in ("BILL", "CREDIT_NOTE"):
-            from_id, lidos = 0, 0
+            from_id, lidos, total = 0, 0, None
             try:
-                while True:
+                for _pagina in range(1000):
                     r = cli.get(f"/billing/integration/periods/key/{mes}-01/group/{grupo}/details",
                                 {"document_type": doc, "limit": 1000, "from_id": from_id}, opcional=True)
                     if not r:
                         break
+                    total = int(r.get("total") or 0) if total is None else total
                     res = r.get("results") or []
                     for x in res:
                         ci = x.get("charge_info") or {}
@@ -488,9 +496,7 @@ def cobrancas(cli: Cliente, mes: str, empresa_id: int, andamento=None, avisos=No
                         vistos.add((grupo, did))
                         nat = "BONUS" if "BONUS" in str(ci.get("detail_type") or "").upper() else "CHARGE"
                         v = abs(_num(ci.get("detail_amount")))
-                        if doc == "CREDIT_NOTE":
-                            pass  # nota de crédito é sempre estorno a favor do vendedor (+), mesmo lançada como bonificação
-                        else:
+                        if doc != "CREDIT_NOTE":  # nota de crédito é sempre estorno a favor do vendedor (+)
                             v = -v if nat == "CHARGE" else v
                         vendas_ = x.get("sales_info") or []
                         oid = (vendas_[0] or {}).get("order_id") if vendas_ else None
@@ -504,16 +510,19 @@ def cobrancas(cli: Cliente, mes: str, empresa_id: int, andamento=None, avisos=No
                                               if ci.get("debited_from_operation") is not None else None))
                     lidos += len(res)
                     prox = _int(r.get("last_id")) or (max(_int((x.get("charge_info") or {}).get("detail_id")) or 0 for x in res) if res else None)
-                    if not res or len(res) < 1000 or not prox or prox == from_id:
+                    if not res or not prox or prox == from_id or (total and lidos >= total):
                         break
                     from_id = prox
-                    if andamento:
-                        andamento(f"Lendo as cobranças de {mes[5:]}/{mes[:4]} ({grupo}, {lidos} até agora)...")
+                    if andamento and _pagina % 5 == 4:
+                        andamento(f"Lendo as cobranças da fatura {mes[5:]}/{mes[:4]} ({grupo}, {lidos} de {total})...")
+                if total and lidos < total:
+                    raise MLErro(f"o ML informou {total} lançamentos e devolveu {lidos}")
             except MLErro as e:
+                completo = False
                 if avisos is None:
                     raise
                 avisos.append(f"{mes[5:]}/{mes[:4]} {grupo} {'estornos' if doc == 'CREDIT_NOTE' else 'cobranças'}: {e}")
-    return out
+    return out, completo
 
 
 # ------------------------------------------------------------------ extrato do Mercado Pago (relatório de liberações)
@@ -924,11 +933,17 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
                 if n % 25 == 1:
                     andamento(f"Lendo a nota fiscal de cada venda ({n} de {len(pagos_)})...", n, len(pagos_))
                 notas += notas_da_venda(cli, seller, v)
-        cobs, avisos_cob = [], []
+        # faturas do ML: a de chave AAAA-MM vai do dia 13 do mês anterior ao dia 12 do mês; a do mês seguinte (aberta)
+        # tem as cobranças do fim do período
+        chaves = meses + [_mes_seguinte(fim)]
+        cobs, avisos_cob, chaves_cob = [], [], []
         if p.get("cobrancas", True):
-            for n, mes in enumerate(meses, 1):
-                andamento(f"Lendo as cobranças pedido a pedido de {mes[5:]}/{mes[:4]}...", n, len(meses))
-                cobs += cobrancas(cli, mes, emp_id, andamento, avisos_cob)
+            for n, mes in enumerate(chaves, 1):
+                andamento(f"Lendo as cobranças da fatura {mes[5:]}/{mes[:4]}...", n, len(chaves))
+                lst, ok = cobrancas(cli, mes, emp_id, andamento, avisos_cob)
+                if ok:
+                    cobs += lst
+                    chaves_cob.append(mes)
         ads, avisos_ads = {}, []
         if p.get("ads", True):
             for n, mes in enumerate(meses, 1):
@@ -939,9 +954,10 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
                         ads[mes] = r_
                 except MLErro as e:
                     avisos_ads.append(f"{mes[5:]}/{mes[:4]}: {e}")
-        tarifas = []
-        for n, mes in enumerate(meses, 1):
-            andamento(f"Lendo o faturamento (tarifas) de {mes[5:]}/{mes[:4]}...", n, len(meses))
+        tarifas, chaves_tar = [], []
+        for n, mes in enumerate(chaves, 1):
+            andamento(f"Lendo o resumo da fatura {mes[5:]}/{mes[:4]}...", n, len(chaves))
+            chaves_tar.append(mes)
             agg = {}
             for g, nat, tipo, rot, val, de, ate in faturamento(cli, mes):
                 k = (g, nat, tipo, rot)
@@ -958,10 +974,13 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
                 s.execute(delete(MLItem).where(MLItem.empresa_id == emp_id, MLItem.order_id.in_(lote)))
                 s.execute(delete(MLVenda).where(MLVenda.empresa_id == emp_id, MLVenda.order_id.in_(lote)))
             s.execute(delete(MLVenda).where(MLVenda.empresa_id == emp_id, MLVenda.data >= d1, MLVenda.data <= d2))
-            s.execute(delete(MLTarifa).where(MLTarifa.empresa_id == emp_id, MLTarifa.periodo >= ini, MLTarifa.periodo <= fim))
-            if p.get("cobrancas", True):
-                s.execute(delete(MLCobranca).where(MLCobranca.empresa_id == emp_id, MLCobranca.periodo >= ini,
-                                                   MLCobranca.periodo <= fim))
+            s.execute(delete(MLTarifa).where(MLTarifa.empresa_id == emp_id, MLTarifa.periodo.in_(chaves_tar or ["-"])))
+            if chaves_cob:
+                s.execute(delete(MLCobranca).where(MLCobranca.empresa_id == emp_id, MLCobranca.periodo.in_(chaves_cob)))
+                # um lançamento pode mudar de fatura (ex.: da fatura aberta para a fechada): sai de onde estava
+                dids = [c.detail_id for c in cobs]
+                for k in range(0, len(dids), 5000):
+                    s.execute(delete(MLCobranca).where(MLCobranca.empresa_id == emp_id, MLCobranca.detail_id.in_(dids[k:k + 5000])))
             if p.get("notas", True):
                 for k in range(0, len(ids), 5000):
                     s.execute(delete(MLNota).where(MLNota.empresa_id == emp_id, MLNota.order_id.in_(ids[k:k + 5000])))

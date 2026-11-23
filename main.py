@@ -15,7 +15,7 @@ from sqlalchemy import select, func, text
 
 import db
 from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Movimento, DominioValor, DominioItem, Produto, ProdutoCusto, Job,
-                MLVenda, MLItem, MLTarifa, MLCusto, MLNota, MLCobranca, RotinaExec, RotinaFalha, Auditoria, agora, PERFIS, TIPOS_LINHA)
+                MLVenda, MLItem, MLTarifa, MLCusto, MLNota, RotinaExec, RotinaFalha, Auditoria, agora, PERFIS, TIPOS_LINHA)
 import bling
 import dominio
 import dre
@@ -27,7 +27,7 @@ import rotina
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.16.1"
+VERSAO = "1.17.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Seller 360", version=VERSAO)
@@ -46,47 +46,11 @@ def get_db():
 _parar_rotina = threading.Event()
 
 
-def _diag_faturamento():  # DIAG temporário (23/11): conferir o faturamento do ML gravado
-    try:
-        with SessionLocal() as s:
-            for mes in ("2026-08", "2026-09", "2026-10"):
-                ts = s.scalars(select(MLTarifa).where(MLTarifa.periodo == mes)).all()
-                print(f"[DIAG] {mes} resumo: " + " | ".join(f"{t.grupo}/{t.natureza}/{t.tipo}/{t.rotulo}={float(t.valor):.2f}"
-                                                            f"({t.de}~{t.ate})" for t in ts), flush=True)
-                rows = s.execute(select(MLCobranca.grupo, MLCobranca.documento, MLCobranca.natureza, MLCobranca.tipo,
-                                        func.count(MLCobranca.id), func.sum(MLCobranca.valor),
-                                        func.count(MLCobranca.order_id)).where(MLCobranca.periodo == mes)
-                                 .group_by(MLCobranca.grupo, MLCobranca.documento, MLCobranca.natureza, MLCobranca.tipo)).all()
-                print(f"[DIAG] {mes} detalhe: " + " | ".join(f"{g}/{d}/{n}/{t} n={c} soma={float(v or 0):.2f} c/pedido={cp}"
-                                                             for g, d, n, t, c, v, cp in rows), flush=True)
-                desc = s.execute(select(MLCobranca.tipo, MLCobranca.descricao).where(MLCobranca.periodo == mes)
-                                 .distinct().limit(60)).all()
-                print(f"[DIAG] {mes} descrições: " + " | ".join(f"{t}={d}" for t, d in desc), flush=True)
-        cli = mlivre.Cliente(1)
-        for url, prm in (("/billing/integration/monthly/periods", {"group": "ML", "document_type": "BILL", "offset": 0, "limit": 6}),
-                         ("/billing/integration/periods/key/2026-09-01/summary/details", {"group": "ML", "document_type": "BILL"}),
-                         ("/billing/integration/periods/key/2026-10-01/summary/details", {"group": "ML", "document_type": "BILL"}),
-                         ("/billing/integration/periods/key/2026-10-01/group/ML/details", {"document_type": "BILL", "limit": 1000, "from_id": 0})):
-            try:
-                r = cli.req("GET", url, prm, texto=True)
-                print(f"[DIAG] GET {url} {prm} -> {len(r)} bytes: {r[:1800]}", flush=True)
-                if url.endswith("/details") and "group/ML" in url:
-                    import json as _j
-                    d = _j.loads(r)
-                    print(f"[DIAG] chaves={list(d)[:20]} n_results={len(d.get('results') or [])} total={d.get('total')} "
-                          f"last_id={d.get('last_id')} paging={d.get('paging')}", flush=True)
-            except Exception as ex:  # noqa: BLE001
-                print(f"[DIAG] GET {url} erro {ex}", flush=True)
-    except Exception as ex:  # noqa: BLE001
-        print(f"[DIAG] erro {ex}", flush=True)
-
-
 @app.on_event("startup")
 def iniciar():
     db.criar_tabelas()
     if os.environ.get("INTEGRA_SEM_THREADS") != "1":
         threading.Thread(target=rotina.agendador, args=(_parar_rotina,), daemon=True).start()
-        threading.Thread(target=_diag_faturamento, daemon=True).start()
     with SessionLocal() as s:
         if not s.scalar(select(func.count(ModeloDRE.id))):
             dre.criar_modelo_padrao(s)
@@ -134,6 +98,15 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
+        if get_config(s, "migracao_1170_faturas") != "1":  # 1.17.0: faturas do ML lidas pela metade — reimporta tudo
+            for e in s.scalars(select(Empresa)).all():
+                st = rotina.estado(e)
+                st["ml_meses"] = {}
+                e.rotina_estado = json.dumps(st)
+            set_config(s, "migracao_1170_faturas", "1")
+            s.commit()
+            if os.environ.get("INTEGRA_SEM_THREADS") != "1":
+                threading.Thread(target=rotina.executar, args=("correção das faturas",), daemon=True).start()
         if get_config(s, "migracao_1161_estornos") != "1":  # 1.16.1: estornos (nota de crédito) gravados com sinal negativo
             s.execute(text("UPDATE ml_cobrancas SET valor = -valor WHERE documento = 'CREDIT_NOTE' AND valor < 0"))
             set_config(s, "migracao_1161_estornos", "1")

@@ -8,12 +8,18 @@ import re
 import datetime as dt
 from collections import defaultdict
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 
-from db import Empresa, MLVenda, MLItem, MLTarifa, MLCusto, MLAds, Produto, ProdutoCusto
+from db import Empresa, MLVenda, MLItem, MLTarifa, MLCusto, MLAds, MLCobranca, Produto, ProdutoCusto
 
 # encargos do faturamento → linha da DRE do ML
-LINHA_TIPO = {"CV": "COM", "CXD": "FRETE", "PADS": "ADS"}
+# códigos das cobranças do ML (C… = cobrança, B… = estorno/bonificação da mesma tarifa): sufixo → linha da DRE
+SUFIXOS = {"VVML": "COM", "VVPRC": "COM", "VVFNU": "COM", "V": "COM",
+           "VVFN": "PARC", "FONPN": "PARC",
+           "FFE": "FRETE", "FFI": "FRETE", "XDE": "FRETE", "XDI": "FRETE", "XD": "FRETE", "FFLX": "FRETE",
+           "XDED": "DEVOL", "XDID": "DEVOL", "DSDB": "DEVOL",
+           "DLIT": "ADS", "FWA": "FULL", "FCBE": "FULL", "DIFAL": "DIFAL"}
+LINHA_TIPO = {"PADS": "ADS", "CV": "COM", "CXD": "FRETE"}
 LINHAS = [  # (código, nome, tipo, fórmula)
     ("RB", "Vendas brutas (pedidos pagos)", "CONTA", ""),
     ("DEV", "(-) Reembolsos e cancelamentos", "CONTA", ""),
@@ -23,10 +29,14 @@ LINHAS = [  # (código, nome, tipo, fórmula)
     ("CMV", "(-) Custo dos produtos vendidos", "CONTA", ""),
     ("LB", "(=) Lucro bruto", "TOTAL", "RL + CMV"),
     ("CML", "(-) Custos do Mercado Livre", "GRUPO", ""),
-    ("COM", "Tarifas de venda (comissão)", "CONTA", "CML"),
-    ("FRETE", "Mercado Envios (frete)", "CONTA", "CML"),
-    ("ADS", "Publicidade (Product Ads)", "CONTA", "CML"),
-    ("OUTRAS", "Outras tarifas do Mercado Livre (Full, armazenagem...)", "CONTA", "CML"),
+    ("COM", "Tarifas de venda (líquidas de estornos)", "CONTA", "CML"),
+    ("PARC", "Taxas de parcelamento", "CONTA", "CML"),
+    ("FRETE", "Mercado Envios (frete de envio)", "CONTA", "CML"),
+    ("DEVOL", "Tarifas de devolução", "CONTA", "CML"),
+    ("ADS", "Publicidade (Product Ads e outras campanhas)", "CONTA", "CML"),
+    ("FULL", "Full (armazenagem e coleta)", "CONTA", "CML"),
+    ("DIFAL", "ICMS-DIFAL cobrado pelo Mercado Livre", "CONTA", "CML"),
+    ("OUTRAS", "Outras tarifas do Mercado Livre", "CONTA", "CML"),
     ("TMP", "Tarifas do Mercado Pago", "CONTA", "CML"),
     ("BONUS", "(+) Bonificações do Mercado Livre", "CONTA", "CML"),
     ("MC", "(=) Margem de contribuição", "TOTAL", "LB + CML"),
@@ -101,12 +111,33 @@ class Custos:
         return len(self.ml.get(k, []))
 
 
-def linha_tarifa(t: MLTarifa):
-    if t.natureza != "CHARGE":
-        return "BONUS"
-    if t.grupo == "MP":
+def classe_tarifa(grupo, natureza, tipo, descricao=""):
+    """Linha da DRE de uma cobrança do ML pelo código (CVVML, BVVML, CFFE, CXDED, PADS, CDIFAL...).
+    Estornos (B…) vão para a mesma linha da cobrança que estornam (C…)."""
+    t = str(tipo or "").upper()
+    if grupo == "MP":
         return "TMP"
-    return LINHA_TIPO.get(t.tipo, "OUTRAS")
+    if t in LINHA_TIPO:
+        return LINHA_TIPO[t]
+    suf = t[1:] if t[:1] in ("B", "C") and len(t) > 2 else t
+    if suf in SUFIXOS:
+        return SUFIXOS[suf]
+    d = str(descricao or "").lower()
+    if "devolu" in d:
+        return "DEVOL"
+    if "parcel" in d:
+        return "PARC"
+    if "envio" in d or "frete" in d:
+        return "FRETE"
+    if "publicidade" in d:
+        return "ADS"
+    if "full" in d or "armazen" in d:
+        return "FULL"
+    return "BONUS" if natureza != "CHARGE" else "OUTRAS"
+
+
+def linha_tarifa(t: MLTarifa):
+    return classe_tarifa(t.grupo, t.natureza, t.tipo, t.rotulo)
 
 
 def _fator(v: MLVenda):
@@ -246,15 +277,34 @@ def dre(s, emp: Empresa, ini, fim):
             if chave(it) in r["sem_custo"]:
                 x = sem_custo.setdefault(chave(it), {"chave": chave(it), "titulo": it.titulo, "vendas": 0.0})
                 x["vendas"] += float(it.preco or 0) * float(it.qtd or 0)
+    # cobranças do ML/MP pela data de cada lançamento (mês da competência), pelo detalhe das faturas; nos meses sem o
+    # detalhe, usa o resumo da fatura de chave do mês
     meses_tarifa = set()
+    d1_, d2_ = periodo_datas(ini, fim)
+    rotulos = {}
+    for g, nat, tipo, desc, data, valor in s.execute(
+            select(MLCobranca.grupo, MLCobranca.natureza, MLCobranca.tipo, MLCobranca.descricao, MLCobranca.data,
+                   func.sum(MLCobranca.valor))
+            .where(MLCobranca.empresa_id == emp.id, MLCobranca.data >= d1_, MLCobranca.data <= d2_)
+            .group_by(MLCobranca.grupo, MLCobranca.natureza, MLCobranca.tipo, MLCobranca.descricao, MLCobranca.data)).all():
+        m = data.strftime("%Y-%m")
+        ln = classe_tarifa(g, nat, tipo, desc)
+        x = float(valor or 0)
+        val[ln][idx[m]] += x
+        rotulos.setdefault(tipo, desc)
+        comp[ln][f"{rotulos[tipo] or tipo} ({tipo})"][idx[m]] += x
+        meses_tarifa.add(m)
     for t in s.scalars(select(MLTarifa).where(MLTarifa.empresa_id == emp.id, MLTarifa.periodo >= ini,
                                               MLTarifa.periodo <= fim)).all():
+        if t.periodo in meses_tarifa:
+            continue
         ln = linha_tarifa(t)
         i = idx[t.periodo]
-        x = abs(float(t.valor or 0)) * (1 if ln == "BONUS" else -1)
+        x = abs(float(t.valor or 0)) * (1 if t.natureza != "CHARGE" else -1)
         val[ln][i] += x
-        comp[ln][f"{t.rotulo} ({t.tipo})"][i] += x
-        meses_tarifa.add(t.periodo)
+        comp[ln][f"{t.rotulo} ({t.tipo}) · resumo da fatura"][i] += x
+    meses_tarifa |= {t.periodo for t in s.scalars(select(MLTarifa).where(MLTarifa.empresa_id == emp.id,
+                                                                         MLTarifa.periodo >= ini, MLTarifa.periodo <= fim)).all()}
     for cod, _n, tipo, form in LINHAS:  # grupos e totais, na ordem
         if tipo == "GRUPO":
             filhos = [c for c, _, tp, f in LINHAS if tp == "CONTA" and f == cod]

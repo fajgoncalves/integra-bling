@@ -309,16 +309,18 @@ def verifica_mercado_livre(c, eid):
     L = {x["codigo"]: x for x in d["linhas"]}
     assert L["RB"]["valores"] == [100, 50] and L["DEV"]["valores"] == [0, -50] and L["IMP"]["valores"] == [-10, 0]
     assert L["CMV"]["valores"] == [-25, 0] and L["LB"]["total"] == 65
-    assert L["COM"]["valores"] == [-15, 0] and L["FRETE"]["valores"] == [-40, 0] and L["ADS"]["valores"] == [-10, 0]
-    assert L["TMP"]["valores"] == [0, -2.5] and L["BONUS"]["valores"] == [5, 0] and L["CML"]["total"] == -62.5
-    assert L["MC"]["total"] == 2.5 and L["COM"]["composicao"][0]["descricao"] == "Tarifa de venda (CV)"
+    # tarifas pelo detalhe das faturas (data de cada lançamento); fevereiro sem detalhe completo usa o resumo da fatura
+    assert L["COM"]["valores"] == [-115, 0] and L["FRETE"]["valores"] == [-20, 0] and L["ADS"]["valores"] == [0, 0]
+    assert L["TMP"]["valores"] == [-1, -2.5] and L["BONUS"]["valores"] == [0, 0] and L["CML"]["total"] == -138.5
+    assert L["COM"]["composicao"][0]["descricao"] == "Tarifa de venda (CV)"
+    assert any("resumo da fatura" in c_["descricao"] for c_ in L["TMP"]["composicao"])
     assert d["conferencia"]["comissao_pedidos"] == 12 and d["conferencia"]["frete_pedidos"] == 29
     assert not any("sem custo" in a for a in d["avisos"])
     assert c.get(f"/api/empresas/{eid}/mlivre/dre.xlsx?inicio=2026-01&fim=2026-02").status_code == 200
     pr = {x["chave"]: x for x in c.get(f"/api/empresas/{eid}/mlivre/produtos?inicio=2026-01&fim=2026-02").json()["itens"]}
     assert pr["CAM-001"]["margem_antes_ads"] == 33 and pr["CAM-001"]["publicidade"] == 8 and pr["CAM-001"]["margem"] == 25 and pr["CAM-001"]["tipos"] == "Premium" and pr["MLB2"]["qtd"] == 0
     ts = c.get(f"/api/empresas/{eid}/mlivre/tarifas?inicio=2026-01&fim=2026-02").json()
-    assert len(ts) == 5 and {t["linha"] for t in ts if t["tipo"] == "CXD"} == {"Mercado Envios (frete)"}
+    assert len(ts) == 5 and {t["linha"] for t in ts if t["tipo"] == "CXD"} == {"Mercado Envios (frete de envio)"}
     # rastreabilidade: painel por pedido
     pn = {x["order_id"]: x for x in c.get(f"/api/empresas/{eid}/mlivre/painel?inicio=2026-01&fim=2026-02").json()["pedidos"]}
     a1, a2 = pn[2000001], pn[2000002]
@@ -413,26 +415,29 @@ def verifica_mercado_livre(c, eid):
         rotina.executar("manual", hoje=_dt.date(2026, 2, 20))
         rt = c.get("/api/rotina").json()
         E = {e_["id"]: e_ for e_ in rt["empresas"]}[eid]
-        assert E["ml_meses"] == ["2026-01"] and E["extrato_de"] == "2026-01-01" and E["extrato_ate"] == "2026-02-20"
+        # a fatura de fev (que também tem as cobranças do fim de jan) não veio completa: jan e fev ficam pendentes
+        assert E["ml_meses"] == [] and E["extrato_de"] == "2026-01-01" and E["extrato_ate"] == "2026-02-20"
         F = {f["etapa"]: f for f in rt["falhas"]}
         assert F["ML_MES:2026-02"]["tentativas"] == 3 and "cobranças" in F["ML_MES:2026-02"]["mensagem"]
+        assert "ML_MES:2026-01" in F
         assert rt["execucoes"][0]["status"] == "COM_FALHAS" and dom == [("2026-01", "2026-02")]
         assert not any(k.startswith("CONFERE_PEDIDOS") for k in F)  # quantidade de pedidos confere com o ML
         ml_chamadas["mp500"] = False  # o ML voltou a responder
+        rotina.executar("agendada", hoje=_dt.date(2026, 2, 21))
+        rt = c.get("/api/rotina").json()
+        E = {e_["id"]: e_ for e_ in rt["empresas"]}[eid]
+        assert E["ml_meses"] == ["2026-01", "2026-02"] and not rt["falhas"] and rt["execucoes"][0]["status"] == "OK"
+        assert dom[-1] == ("2026-01", "2026-02")  # Domínio: depois da 1ª vez, mês anterior e atual
         from db import MLVenda as _MV
         with SessionLocal() as s_:  # um pedido de jan "sumiu": a conferência busca um a um
             s_.query(_MV).filter(_MV.order_id == 2000001).delete()
             s_.commit()
         rotina.ULTIMOS_MESES = 1
-        rotina.executar("agendada", hoje=_dt.date(2026, 2, 21))
+        rotina.executar("agendada", hoje=_dt.date(2026, 2, 22))
         rotina.ULTIMOS_MESES = 3
         with SessionLocal() as s_:
             assert s_.query(_MV).filter(_MV.order_id == 2000001).count() == 1
-        rt = c.get("/api/rotina").json()
-        E = {e_["id"]: e_ for e_ in rt["empresas"]}[eid]
-        assert E["ml_meses"] == ["2026-01", "2026-02"] and not rt["falhas"] and rt["execucoes"][0]["status"] == "OK"
-        assert dom[-1] == ("2026-01", "2026-02")  # Domínio: depois da 1ª vez, mês anterior e atual
-        assert "1 pedido(s) que faltavam buscados" in rt["execucoes"][0]["resumo"]
+        assert "1 pedido(s) que faltavam buscados" in c.get("/api/rotina").json()["execucoes"][0]["resumo"]
     finally:
         mlivre.httpx.Client = orig_http
         ml_chamadas["mp500"] = True
@@ -715,9 +720,9 @@ def test_estorno_unico_de_varias_cobrancas():
     """Venda cancelada: tarifa (20,45) e frete (29,25) cobrados e um único estorno de 49,70 com outra descrição."""
     from types import SimpleNamespace as N
     import mlauditoria as ma
-    cobs = [N(id=1, documento="BILL", natureza="CHARGE", tipo="CV", descricao="Tarifa de venda", valor=-20.45),
-            N(id=2, documento="BILL", natureza="CHARGE", tipo="CXD", descricao="Custo de envio", valor=-29.25),
-            N(id=3, documento="CREDIT_NOTE", natureza="CHARGE", tipo="ANU", descricao="Anulação de cargos", valor=49.70)]
+    cobs = [N(id=1, grupo="ML", documento="BILL", natureza="CHARGE", tipo="CV", descricao="Tarifa de venda", valor=-20.45),
+            N(id=2, grupo="ML", documento="BILL", natureza="CHARGE", tipo="CXD", descricao="Custo de envio", valor=-29.25),
+            N(id=3, grupo="ML", documento="CREDIT_NOTE", natureza="CHARGE", tipo="ANU", descricao="Anulação de cargos", valor=49.70)]
     assert ma.grupos_do_pedido(cobs)[3] == "RATEIO"
     cobs[2].documento, cobs[2].natureza = "BILL", "BONUS"  # estorno lançado como bonificação na fatura
     assert ma.grupos_do_pedido(cobs)[3] == "RATEIO"
@@ -725,10 +730,10 @@ def test_estorno_unico_de_varias_cobrancas():
     g = ma.grupos_do_pedido(cobs)
     assert g[3] == "COMISSAO"
     # tarifa desmembrada em 3 partes, estornada num valor só
-    partes = [N(id=10 + i, documento="BILL", natureza="CHARGE", tipo=t, descricao="", valor=-v)
+    partes = [N(id=10 + i, grupo="ML", documento="BILL", natureza="CHARGE", tipo=t, descricao="", valor=-v)
               for i, (t, v) in enumerate((("CVVML", 18.0), ("CVVPRC", 2.0), ("CVVFNU", 0.45)))]
-    est = N(id=20, documento="CREDIT_NOTE", natureza="CHARGE", tipo="X", descricao="", valor=20.45)
-    fr = N(id=21, documento="BILL", natureza="CHARGE", tipo="CXD", descricao="", valor=-29.25)
+    est = N(id=20, grupo="ML", documento="CREDIT_NOTE", natureza="CHARGE", tipo="X", descricao="", valor=20.45)
+    fr = N(id=21, grupo="ML", documento="BILL", natureza="CHARGE", tipo="CXD", descricao="", valor=-29.25)
     assert ma.grupos_do_pedido(partes + [fr, est])[20] == "COMISSAO"
 
 
@@ -770,5 +775,29 @@ def test_devolucao_frete_pelo_valor_devolvido():
     assert (r["recebido"], r["reembolso"], r["tarifa"], r["frete"], r["frete_devolucao"], r["retido"]) == \
         (198.0, -198.0, 0.0, -44.15, -88.30, 0.0)
     # estornos da tarifa lançados pelo ML como bonificação em nota de crédito
-    est = N(id=1, documento="CREDIT_NOTE", natureza="BONUS", tipo="BVVML", descricao="Cancelamento do Custo por vender no Mercado Livre", valor=15.10)
+    est = N(id=1, grupo="ML", documento="CREDIT_NOTE", natureza="BONUS", tipo="BVVML", descricao="Cancelamento do Custo por vender no Mercado Livre", valor=15.10)
     assert ma.grupo_cobranca(est) == "COMISSAO"
+
+
+def test_codigos_e_paginacao_do_faturamento():
+    import mlanalise as ma
+    import mlivre
+    esperado = {"CVVML": "COM", "BVVML": "COM", "CVVPRC": "COM", "CVVFNU": "COM", "CVVFN": "PARC", "CFONPN": "PARC",
+                "BFONPN": "PARC", "CFFE": "FRETE", "BFFE": "FRETE", "CXDE": "FRETE", "BXDE": "FRETE", "CFFI": "FRETE",
+                "CXDED": "DEVOL", "BXDED": "DEVOL", "CDSDB": "DEVOL", "BDSDB": "DEVOL", "CXDID": "DEVOL", "PADS": "ADS",
+                "CDLIT": "ADS", "CFWA": "FULL", "CFCBE": "FULL", "CDIFAL": "DIFAL", "CPAC": "OUTRAS", "CESM": "OUTRAS"}
+    for t, ln in esperado.items():
+        assert ma.classe_tarifa("ML", "BONUS" if t[0] == "B" else "CHARGE", t) == ln, t
+    assert ma.classe_tarifa("MP", "CHARGE", "CSHIA") == "TMP"
+
+    class Falso:  # o ML devolve 950 por página mesmo pedindo 1000; total 2000
+        def get(self, caminho, params=None, opcional=False):
+            if "/group/ML/" not in caminho or params["document_type"] != "BILL":
+                return None
+            ids = list(range(1, 2001))
+            resto = [i for i in ids if i > params["from_id"]][:950]
+            return {"total": 2000, "last_id": resto[-1] if resto else None,
+                    "results": [{"charge_info": {"detail_id": i, "detail_amount": 1, "detail_type": "CHARGE", "detail_sub_type": "CVVML"}}
+                                for i in resto]}
+    lst, ok = mlivre.cobrancas(Falso(), "2026-10", 1, avisos=[])
+    assert ok and len(lst) == 2000
