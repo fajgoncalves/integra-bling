@@ -751,3 +751,24 @@ def test_pedidos_sem_perder_na_paginacao():
 
     got = {o["id"] for o in mlivre.pedidos(Falso(), 1, _d.date(2026, 1, 1), _d.date(2026, 1, 31))}
     assert got == set(range(1, 61))
+
+
+def test_devolucao_frete_pelo_valor_devolvido():
+    """Pedido real 2000018640366962: o MP lança tudo como mediação; a retenção de frete de devolução (133,06) tem o mesmo
+    valor de parte do reembolso. Pelo valor devolvido ao comprador (198,00) a divisão fecha com o resumo do ML."""
+    from types import SimpleNamespace as N
+    import mlauditoria as ma
+    L = lambda d, cred, deb, bruto, tar=0.0, fr=0.0: N(descricao=d, credito=cred, debito=deb, bruto=bruto, tarifa_mp=tar,  # noqa: E731
+                                                     financiamento=0.0, frete=fr, impostos=0.0)
+    linhas = [L("mediation", 0, 88.30, -88.30), L("payment", 133.06, 0, 198.00, -20.79, -44.15),
+              L("reserve_for_bpp_shipping_return", 0, 133.06, -133.06), L("reserve_for_bpp_shipping_return", 133.06, 0, 133.06),
+              L("reserve_for_bpp_shipping_return", 0, 88.30, -88.30), L("reserve_for_bpp_shipping_return", 88.30, 0, 88.30),
+              L("refund", 20.79, 0, 0.0, 20.79), L("mediation", 0, 20.79, -20.79), L("mediation", 0, 133.06, -133.06),
+              L("mediation", 0, 44.15, -44.15)]
+    c = ma.classificar_extrato(linhas, 198.00)
+    r = {k: round(v, 2) for k, v in c.items()}
+    assert (r["recebido"], r["reembolso"], r["tarifa"], r["frete"], r["frete_devolucao"], r["retido"]) == \
+        (198.0, -198.0, 0.0, -44.15, -88.30, 0.0)
+    # estornos da tarifa lançados pelo ML como bonificação em nota de crédito
+    est = N(id=1, documento="CREDIT_NOTE", natureza="BONUS", tipo="BVVML", descricao="Cancelamento do Custo por vender no Mercado Livre", valor=15.10)
+    assert ma.grupo_cobranca(est) == "COMISSAO"

@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.responses import JSONResponse, FileResponse, RedirectResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 
 import db
 from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Movimento, DominioValor, DominioItem, Produto, ProdutoCusto, Job,
@@ -27,7 +27,7 @@ import rotina
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.16.0"
+VERSAO = "1.16.1"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Seller 360", version=VERSAO)
@@ -98,6 +98,9 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
+        if get_config(s, "migracao_1161_estornos") != "1":  # 1.16.1: estornos (nota de crédito) gravados com sinal negativo
+            s.execute(text("UPDATE ml_cobrancas SET valor = -valor WHERE documento = 'CREDIT_NOTE' AND valor < 0"))
+            set_config(s, "migracao_1161_estornos", "1")
         if get_config(s, "migracao_1153_meses") != "1":  # 1.15.3: meses regravados com cobranças incompletas em 10/11
             for e in s.scalars(select(Empresa)).all():
                 st = rotina.estado(e)

@@ -38,7 +38,14 @@ def rotulo_extrato(d):
 
 def grupo_cobranca(c: MLCobranca):
     t, d = (c.tipo or "").upper(), (c.descricao or "").lower()
-    if c.natureza == "BONUS":
+    # estornos ("Cancelamento do custo por vender/por cobrar/da taxa de recebimento" — BVVML, BVVPRC, BVVFNU...) voltam
+    # para o grupo da cobrança estornada, mesmo quando o ML os lança como bonificação
+    if t.startswith("BVV") or ("cancelamento" in d and ("custo por vender" in d or "custo por cobrar" in d
+                                                         or "taxa de recebimento" in d or "tarifa de venda" in d)):
+        return "COMISSAO"
+    if "cancelamento" in d and ("envio" in d or "frete" in d):
+        return "FRETE"
+    if c.natureza == "BONUS" and c.documento != "CREDIT_NOTE":
         return "BONUS"
     if "devolu" in d or "return" in d or "retorno" in d:
         return "DEVOLUCAO"
@@ -100,9 +107,11 @@ COMPONENTES = [("venda", "Venda (produtos)"), ("frete_comprador", "Frete pago pe
 DEVOLUCAO_MP = {"refund", "mediation", "chargeback", "dispute"}
 
 
-def classificar_extrato(linhas):
+def classificar_extrato(linhas, devolvido=0.0, integral=False):
     """Separa cada linha do extrato de um pedido em componentes (a soma bate com o líquido da linha).
-    Retenções por disputa (bloqueia e libera) vão para 'retido' — líquido zero quando a disputa termina."""
+    Retenções por disputa (bloqueia e libera) vão para 'retido' — líquido zero quando a disputa termina.
+    Reclamações/reembolsos: o MP lança tudo como mediação, sem separar frete. Quando o pedido informa quanto foi devolvido
+    ao comprador (`devolvido`), esse valor vai para 'reembolso' e o que passar dele é frete da devolução."""
     comp = defaultdict(float)
     reservas_frete = [round(abs(_f(x.bruto) or (_f(x.debito) - _f(x.credito))), 2) for x in linhas
                       if "shipping_return" in str(x.descricao).lower() and _f(x.debito)]
@@ -133,6 +142,13 @@ def classificar_extrato(linhas):
         resto = liquido - (bruto + _f(x.tarifa_mp) + _f(x.financiamento) + _f(x.frete) + _f(x.impostos))
         if abs(resto) > 0.004:
             comp["outras"] += resto
+    if integral:  # devolução total: o comprador recebe de volta tudo o que pagou (produto + frete que ele pagou)
+        devolvido = max(devolvido, comp["recebido"])
+    if devolvido > 0:  # pelo valor devolvido ao comprador (não depende de casar valores de retenção)
+        total = comp["reembolso"] + comp["frete_devolucao"]
+        if total < 0:
+            comp["reembolso"] = -min(-total, devolvido)
+            comp["frete_devolucao"] = total - comp["reembolso"]
     return comp
 
 
@@ -217,7 +233,7 @@ def painel(s, emp: Empresa, ini, fim):
         tem_pagamento = any(str(x.descricao).lower() == "payment" for x in linhas_ext)
         c = {"venda": pago, "imposto": -r["imposto"], "cmv": -r["cmv"]}
         if tem_pagamento:  # o extrato é a fonte do que realmente entrou e saiu
-            e = classificar_extrato(linhas_ext)
+            e = classificar_extrato(linhas_ext, dev_total, dev_total >= pago - 0.01 and dev_total > 0)
             c["frete_comprador"] = round(e["recebido"] - pago, 2)
             c["reembolso"] = e["reembolso"]
             c["tarifa"] = e["tarifa"]

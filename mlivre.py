@@ -489,7 +489,7 @@ def cobrancas(cli: Cliente, mes: str, empresa_id: int, andamento=None, avisos=No
                         nat = "BONUS" if "BONUS" in str(ci.get("detail_type") or "").upper() else "CHARGE"
                         v = abs(_num(ci.get("detail_amount")))
                         if doc == "CREDIT_NOTE":
-                            v = v if nat == "CHARGE" else -v  # estorno de cobrança (+) / anulação de bonificação (−)
+                            pass  # nota de crédito é sempre estorno a favor do vendedor (+), mesmo lançada como bonificação
                         else:
                             v = -v if nat == "CHARGE" else v
                         vendas_ = x.get("sales_info") or []
