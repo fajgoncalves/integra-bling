@@ -944,6 +944,9 @@ def sincronizar(job_id: int, cli: Cliente | None = None):
                 if ok:
                     cobs += lst
                     chaves_cob.append(mes)
+        with SessionLocal() as s_:  # nada antes do início configurado (a fatura de set/26 traz lançamentos de ago/26)
+            corte = dt.date.fromisoformat((get_config(s_, "rotina_inicio") or "2026-09") + "-01")
+        cobs = [c for c in cobs if c.data is None or c.data >= corte]
         ads, avisos_ads = {}, []
         if p.get("ads", True):
             for n, mes in enumerate(meses, 1):

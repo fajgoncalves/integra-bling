@@ -2,7 +2,7 @@
 
 Para cada empresa ativa na rotina:
   1. Mercado Livre — pedidos, itens, frete, notas fiscais e cobranças detalhadas, mês a mês. Primeiro todos os meses desde o
-     início configurado (padrão 2026-01) que ainda não foram importados; depois, sempre, os 3 últimos meses (devoluções,
+     início configurado (padrão 2026-09) que ainda não foram importados; depois, sempre, os 3 últimos meses (devoluções,
      estornos e faturamento chegam depois da venda).
   2. Extrato do Mercado Pago — desde o início (primeira vez, em blocos de até 120 dias); depois, dos últimos 60 dias até hoje.
   3. Domínio — todos os meses desde o início na primeira vez; depois, o mês anterior e o atual.
@@ -41,7 +41,7 @@ def log(msg):
 
 
 def inicio_padrao(s):
-    return get_config(s, "rotina_inicio") or "2026-01"
+    return get_config(s, "rotina_inicio") or "2026-09"
 
 
 def estado(e: Empresa):

@@ -481,6 +481,9 @@ def central_falsa(req: httpx.Request):
 
 def test_fluxo_completo():
     with TestClient(main.app) as c:
+        with SessionLocal() as s_:  # os dados de teste são de jan/2026
+            main.set_config(s_, "rotina_inicio", "2026-01")
+            s_.commit()
         assert c.get("/api/estado").json()["precisa_setup"] is True
         assert c.post("/api/setup", json={"nome": "Adm", "email": "adm@x.com", "senha": "curta"}).status_code == 400
         assert c.post("/api/setup", json={"nome": "Adm", "email": "adm@x.com", "senha": "senha-forte-1"}).status_code == 200

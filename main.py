@@ -27,7 +27,7 @@ import rotina
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.17.0"
+VERSAO = "1.17.1"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Seller 360", version=VERSAO)
@@ -98,6 +98,29 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
+        if get_config(s, "migracao_1171_desde_set") != "1":  # 1.17.1: módulo ML só de set/2026 em diante
+            corte = dt.date(2026, 9, 1)
+            set_config(s, "rotina_inicio", "2026-09")
+            set_config(s, "migracao_1170_faturas", "1")
+            s.execute(text("DELETE FROM ml_itens WHERE order_id IN (SELECT order_id FROM ml_vendas WHERE data < :c)"), {"c": corte})
+            s.execute(text("DELETE FROM ml_notas WHERE order_id IN (SELECT order_id FROM ml_vendas WHERE data < :c)"), {"c": corte})
+            for sql in ("DELETE FROM ml_vendas WHERE data < :c", "DELETE FROM ml_cobrancas WHERE data < :c",
+                        "DELETE FROM ml_extrato WHERE data < :c", "DELETE FROM dominio_notas WHERE data < :c",
+                        "DELETE FROM ml_ads WHERE mes < '2026-09'", "DELETE FROM ml_tarifas WHERE periodo < '2026-09'",
+                        "DELETE FROM rotina_falhas WHERE etapa LIKE 'ML_MES:2026-0%' AND etapa < 'ML_MES:2026-09'",
+                        "DELETE FROM rotina_falhas WHERE etapa LIKE 'ML_EXTRATO:2026-0%' AND etapa < 'ML_EXTRATO:2026-09'"):
+                s.execute(text(sql), {"c": corte})
+            for e in s.scalars(select(Empresa)).all():
+                st = rotina.estado(e)
+                st["ml_meses"] = {m: v for m, v in st["ml_meses"].items() if m >= "2026-09"}
+                st["dominio_meses"] = {m: v for m, v in st["dominio_meses"].items() if m >= "2026-09"}
+                if st.get("extrato_de"):
+                    st["extrato_de"] = max(st["extrato_de"], "2026-09-01")
+                e.rotina_estado = json.dumps(st)
+            set_config(s, "migracao_1171_desde_set", "1")
+            s.commit()
+            if os.environ.get("INTEGRA_SEM_THREADS") != "1":
+                threading.Thread(target=rotina.executar, args=("desde set/2026",), daemon=True).start()
         if get_config(s, "migracao_1170_faturas") != "1":  # 1.17.0: faturas do ML lidas pela metade — reimporta tudo
             for e in s.scalars(select(Empresa)).all():
                 st = rotina.estado(e)
