@@ -62,6 +62,21 @@ def _diag_faturamento():  # DIAG temporário (23/11): conferir o faturamento do 
                 desc = s.execute(select(MLCobranca.tipo, MLCobranca.descricao).where(MLCobranca.periodo == mes)
                                  .distinct().limit(60)).all()
                 print(f"[DIAG] {mes} descrições: " + " | ".join(f"{t}={d}" for t, d in desc), flush=True)
+        cli = mlivre.Cliente(1)
+        for url, prm in (("/billing/integration/monthly/periods", {"group": "ML", "document_type": "BILL", "offset": 0, "limit": 6}),
+                         ("/billing/integration/periods/key/2026-09-01/summary/details", {"group": "ML", "document_type": "BILL"}),
+                         ("/billing/integration/periods/key/2026-10-01/summary/details", {"group": "ML", "document_type": "BILL"}),
+                         ("/billing/integration/periods/key/2026-10-01/group/ML/details", {"document_type": "BILL", "limit": 1000, "from_id": 0})):
+            try:
+                r = cli.req("GET", url, prm, texto=True)
+                print(f"[DIAG] GET {url} {prm} -> {len(r)} bytes: {r[:1800]}", flush=True)
+                if url.endswith("/details") and "group/ML" in url:
+                    import json as _j
+                    d = _j.loads(r)
+                    print(f"[DIAG] chaves={list(d)[:20]} n_results={len(d.get('results') or [])} total={d.get('total')} "
+                          f"last_id={d.get('last_id')} paging={d.get('paging')}", flush=True)
+            except Exception as ex:  # noqa: BLE001
+                print(f"[DIAG] GET {url} erro {ex}", flush=True)
     except Exception as ex:  # noqa: BLE001
         print(f"[DIAG] erro {ex}", flush=True)
 
