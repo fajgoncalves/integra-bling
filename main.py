@@ -46,11 +46,32 @@ def get_db():
 _parar_rotina = threading.Event()
 
 
+def _diag_faturamento():  # DIAG temporário (23/11): conferir o faturamento do ML gravado
+    try:
+        with SessionLocal() as s:
+            for mes in ("2026-08", "2026-09", "2026-10"):
+                ts = s.scalars(select(MLTarifa).where(MLTarifa.periodo == mes)).all()
+                print(f"[DIAG] {mes} resumo: " + " | ".join(f"{t.grupo}/{t.natureza}/{t.tipo}/{t.rotulo}={float(t.valor):.2f}"
+                                                            f"({t.de}~{t.ate})" for t in ts), flush=True)
+                rows = s.execute(select(MLCobranca.grupo, MLCobranca.documento, MLCobranca.natureza, MLCobranca.tipo,
+                                        func.count(MLCobranca.id), func.sum(MLCobranca.valor),
+                                        func.count(MLCobranca.order_id)).where(MLCobranca.periodo == mes)
+                                 .group_by(MLCobranca.grupo, MLCobranca.documento, MLCobranca.natureza, MLCobranca.tipo)).all()
+                print(f"[DIAG] {mes} detalhe: " + " | ".join(f"{g}/{d}/{n}/{t} n={c} soma={float(v or 0):.2f} c/pedido={cp}"
+                                                             for g, d, n, t, c, v, cp in rows), flush=True)
+                desc = s.execute(select(MLCobranca.tipo, MLCobranca.descricao).where(MLCobranca.periodo == mes)
+                                 .distinct().limit(60)).all()
+                print(f"[DIAG] {mes} descrições: " + " | ".join(f"{t}={d}" for t, d in desc), flush=True)
+    except Exception as ex:  # noqa: BLE001
+        print(f"[DIAG] erro {ex}", flush=True)
+
+
 @app.on_event("startup")
 def iniciar():
     db.criar_tabelas()
     if os.environ.get("INTEGRA_SEM_THREADS") != "1":
         threading.Thread(target=rotina.agendador, args=(_parar_rotina,), daemon=True).start()
+        threading.Thread(target=_diag_faturamento, daemon=True).start()
     with SessionLocal() as s:
         if not s.scalar(select(func.count(ModeloDRE.id))):
             dre.criar_modelo_padrao(s)
