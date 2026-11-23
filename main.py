@@ -15,7 +15,7 @@ from sqlalchemy import select, func, text
 
 import db
 from db import (SessionLocal, Usuario, Empresa, ModeloDRE, LinhaDRE, ContaOrigem, Movimento, DominioValor, DominioItem, Produto, ProdutoCusto, Job,
-                MLVenda, MLItem, MLTarifa, MLCusto, MLNota, RotinaExec, RotinaFalha, Auditoria, agora, PERFIS, TIPOS_LINHA)
+                MLVenda, MLItem, MLTarifa, MLCusto, MLNota, MLCobranca, RotinaExec, RotinaFalha, Auditoria, agora, PERFIS, TIPOS_LINHA)
 import bling
 import dominio
 import dre
