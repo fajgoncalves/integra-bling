@@ -482,12 +482,26 @@ def cobrancas(cli: Cliente, mes: str, empresa_id: int, andamento=None, avisos=No
             from_id, lidos, total = 0, 0, None
             try:
                 for _pagina in range(1000):
-                    r = cli.get(f"/billing/integration/periods/key/{mes}-01/group/{grupo}/details",
-                                {"document_type": doc, "limit": 1000, "from_id": from_id}, opcional=True)
+                    # o ML às vezes devolve a página com linhas a menos (ex.: 550 de 1000) — o "total" da resposta é o que
+                    # falta a partir do from_id, então a página deve ter min(1000, total); se vier curta, pede de novo e junta
+                    res, r, esperado = [], None, None
+                    for _tent in range(8):
+                        r_ = cli.get(f"/billing/integration/periods/key/{mes}-01/group/{grupo}/details",
+                                     {"document_type": doc, "limit": 1000, "from_id": from_id, "sort_by": "ID", "order_by": "ASC"},
+                                     opcional=True)
+                        if not r_:
+                            break
+                        r = r_
+                        esperado = min(1000, int(r_.get("total") or 0))
+                        ja = {_int((x.get("charge_info") or {}).get("detail_id")) for x in res}
+                        res += [x for x in (r_.get("results") or []) if _int((x.get("charge_info") or {}).get("detail_id")) not in ja]
+                        if len(res) >= esperado:
+                            break
                     if not r:
                         break
                     total = int(r.get("total") or 0) if total is None else total
-                    res = r.get("results") or []
+                    if esperado is not None and len(res) < esperado:
+                        raise MLErro(f"a página a partir do lançamento {from_id} veio com {len(res)} de {esperado} linhas")
                     for x in res:
                         ci = x.get("charge_info") or {}
                         did = _int(ci.get("detail_id"))
@@ -509,7 +523,7 @@ def cobrancas(cli: Cliente, mes: str, empresa_id: int, andamento=None, avisos=No
                                               debitada=(str(ci.get("debited_from_operation") or "").upper() in ("YES", "SI", "SIM", "TRUE"))
                                               if ci.get("debited_from_operation") is not None else None))
                     lidos += len(res)
-                    prox = _int(r.get("last_id")) or (max(_int((x.get("charge_info") or {}).get("detail_id")) or 0 for x in res) if res else None)
+                    prox = max(_int(r.get("last_id")) or 0, max(_int((x.get("charge_info") or {}).get("detail_id")) or 0 for x in res) if res else 0)
                     if not res or not prox or prox == from_id or (total and lidos >= total):
                         break
                     from_id = prox

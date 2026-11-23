@@ -27,7 +27,7 @@ import rotina
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.17.1"
+VERSAO = "1.17.2"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Seller 360", version=VERSAO)
@@ -44,35 +44,6 @@ def get_db():
 
 
 _parar_rotina = threading.Event()
-
-
-def _diag_paginacao():  # DIAG temporário (23/11): paginação do detalhe das faturas do ML
-    import time as _t
-    _t.sleep(5)
-    try:
-        cli = mlivre.Cliente(1)
-        u = "/billing/integration/periods/key/2026-10-01/group/ML/details"
-        for nome, extra in (("padrao", {}), ("sort", {"sort_by": "ID", "order_by": "ASC"})):
-            fid, ids = 0, set()
-            for pg in range(40):
-                r = cli.get(u, {"document_type": "BILL", "limit": 1000, "from_id": fid, **extra}, opcional=True) or {}
-                res = r.get("results") or []
-                d = [int((x.get("charge_info") or {}).get("detail_id") or 0) for x in res]
-                novos = len(set(d) - ids)
-                ids |= set(d)
-                print(f"[DIAG] {nome} pg{pg} from={fid} n={len(res)} novos={novos} total={r.get('total')} last_id={r.get('last_id')} "
-                      f"offset={r.get('offset')} limit={r.get('limit')} min={min(d) if d else None} max={max(d) if d else None} "
-                      f"primeiro={d[0] if d else None} ultimo={d[-1] if d else None} unicos={len(ids)}", flush=True)
-                nxt = r.get("last_id")
-                if not res or not nxt or str(nxt) == str(fid):
-                    break
-                fid = nxt
-        for off in (0, 1000, 15000):
-            r = cli.get(u, {"document_type": "BILL", "limit": 1000, "offset": off}, opcional=True) or {}
-            d = [int((x.get("charge_info") or {}).get("detail_id") or 0) for x in (r.get("results") or [])]
-            print(f"[DIAG] offset={off} n={len(d)} total={r.get('total')} min={min(d) if d else None} max={max(d) if d else None}", flush=True)
-    except Exception as ex:  # noqa: BLE001
-        print(f"[DIAG] erro {ex}", flush=True)
 
 
 @app.on_event("startup")
@@ -127,8 +98,6 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
-        if os.environ.get("INTEGRA_SEM_THREADS") != "1":
-            threading.Thread(target=_diag_paginacao, daemon=True).start()
         if get_config(s, "migracao_1171_desde_set") != "1":  # 1.17.1: módulo ML só de set/2026 em diante
             corte = dt.date(2026, 9, 1)
             set_config(s, "rotina_inicio", "2026-09")

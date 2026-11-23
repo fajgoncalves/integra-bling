@@ -793,14 +793,22 @@ def test_codigos_e_paginacao_do_faturamento():
         assert ma.classe_tarifa("ML", "BONUS" if t[0] == "B" else "CHARGE", t) == ln, t
     assert ma.classe_tarifa("MP", "CHARGE", "CSHIA") == "TMP"
 
-    class Falso:  # o ML devolve 950 por página mesmo pedindo 1000; total 2000
+    class Falso:  # total = o que falta a partir do from_id; na 1ª tentativa de cada página o ML "perde" 50 linhas
+        def __init__(self):
+            self.vistas = set()
+
         def get(self, caminho, params=None, opcional=False):
             if "/group/ML/" not in caminho or params["document_type"] != "BILL":
                 return None
-            ids = list(range(1, 2001))
-            resto = [i for i in ids if i > params["from_id"]][:950]
-            return {"total": 2000, "last_id": resto[-1] if resto else None,
+            resto = [i for i in range(1, 2501) if i > params["from_id"]]
+            pag = resto[:1000]
+            k = params["from_id"]
+            if k not in self.vistas:
+                self.vistas.add(k)
+                pag = pag[:500] + pag[550:]
+            return {"total": len(resto), "last_id": resto[:1000][-1] if resto else 0,
                     "results": [{"charge_info": {"detail_id": i, "detail_amount": 1, "detail_type": "CHARGE", "detail_sub_type": "CVVML"}}
-                                for i in resto]}
+                                for i in pag]}
     lst, ok = mlivre.cobrancas(Falso(), "2026-10", 1, avisos=[])
-    assert ok and len(lst) == 2000
+    assert ok and len(lst) == 2500 and len({c.detail_id for c in lst}) == 2500
+
