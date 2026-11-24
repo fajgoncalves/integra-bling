@@ -47,30 +47,34 @@ def get_db():
 _parar_rotina = threading.Event()
 
 
-def _diag_conciliacao():  # DIAG temporário (24/11): extrato dos pedidos devolvidos sem reembolso no extrato
+def _diag_conciliacao():  # DIAG temporário (24/11): pedidos cancelados sem reembolso no extrato
     import time as _t
     _t.sleep(10)
     try:
         from db import MLExtrato as _E
         with SessionLocal() as s:
-            for oid in (2000018750134448, 2000018736258988, 2000019275528750, 2000018735501084):
-                v = s.scalar(select(MLVenda).where(MLVenda.order_id == oid))
-                print(f"[DIAG] {oid} status={v.status} pago={v.pago} devolvido={v.devolvido} data={v.data} pack={v.pack_id}", flush=True)
-                for x in s.scalars(select(_E).where(_E.order_id == oid).order_by(_E.data)).all():
-                    print(f"[DIAG] {oid} {x.data} {x.tipo_registro} {x.descricao} cred={x.credito} deb={x.debito} bruto={x.bruto} "
-                          f"tar={x.tarifa_mp} fin={x.financiamento} fr={x.frete} imp={x.impostos} origem={x.origem_id} ident={x.identificacao}", flush=True)
             e = s.get(Empresa, 1)
-            P = mlauditoria.painel(s, e, "2026-10", "2026-10")
-            cont = defaultdict(lambda: [0, 0.0])
-            for p in P:
-                d = p["componentes"]["reembolso"] + min(p["devolvido"], p["vendas"])
-                if abs(d) > 0.01:
-                    k = ("sem_reembolso_no_extrato" if p["componentes"]["reembolso"] == 0 else "reembolso_maior" if d < 0 else "reembolso_menor",
-                         p["status"], p["fonte"])
-                    cont[k][0] += 1
-                    cont[k][1] += d
-            for k, v in cont.items():
-                print(f"[DIAG] out {k} n={v[0]} soma={v[1]:.2f}", flush=True)
+            print(f"[DIAG] extrato de {s.scalar(select(func.min(_E.data)))} a {s.scalar(select(func.max(_E.data)))}", flush=True)
+            for m in ("2026-09", "2026-10", "2026-11"):
+                P = mlauditoria.painel(s, e, m, m)
+                alvo = [p for p in P if p["componentes"]["reembolso"] == 0 and p["devolvido"] > 0 and p["fonte"] == "extrato"]
+                tipos = defaultdict(int)
+                achou = 0
+                for p in alvo:
+                    lin = s.scalars(select(_E).where(_E.order_id == p["order_id"])).all()
+                    descs = ",".join(sorted({x.descricao for x in lin}))
+                    tipos[descs] += 1
+                    orig = {x.origem_id for x in lin if x.origem_id}
+                    outras = s.scalars(select(_E).where(_E.origem_id.in_(orig or {"-"}), (_E.order_id.is_(None)) | (_E.order_id != p["order_id"]))).all()
+                    if outras:
+                        achou += 1
+                        if achou <= 3:
+                            for x in outras:
+                                print(f"[DIAG] {m} {p['order_id']} outra-linha {x.data} {x.descricao} cred={x.credito} deb={x.debito} order={x.order_id}", flush=True)
+                    v = s.scalar(select(MLVenda).where(MLVenda.order_id == p["order_id"]))
+                    if len(alvo) and tipos[descs] <= 2:
+                        print(f"[DIAG] {m} {p['order_id']} st={v.status} pago={v.pago} dev={v.devolvido} descs={descs} liq={p['extrato_liquido']}", flush=True)
+                print(f"[DIAG] {m} alvo={len(alvo)} soma={sum(p['vendas'] for p in alvo):.2f} com_linha_em_outro={achou} tipos={dict(tipos)}", flush=True)
     except Exception:  # noqa: BLE001
         import traceback
         print(f"[DIAG] erro {traceback.format_exc()}", flush=True)
