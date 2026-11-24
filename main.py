@@ -5,6 +5,7 @@ import re
 import json
 import secrets
 import threading
+from collections import defaultdict
 import datetime as dt
 from pathlib import Path
 
@@ -46,38 +47,31 @@ def get_db():
 _parar_rotina = threading.Event()
 
 
-def _diag_conciliacao():  # DIAG temporário (24/11): conciliação out/nov 2026
+def _diag_conciliacao():  # DIAG temporário (24/11): extrato dos pedidos devolvidos sem reembolso no extrato
     import time as _t
     _t.sleep(10)
     try:
+        from db import MLExtrato as _E
         with SessionLocal() as s:
-            for e in s.scalars(select(Empresa).where(Empresa.ml_refresh.isnot(None))).all():
-                for m in ("2026-10", "2026-11"):
-                    c = mlauditoria.conciliacao(s, e, m, m)
-                    print(f"[DIAG] {m} painel={c['resultado_painel']} dre={c['margem_dre']} dif={c['diferenca']} conf={c['conferencia']}", flush=True)
-                    for l in c["linhas"]:
-                        print(f"[DIAG] {m} {l['valor']:>12} {l['descricao']}", flush=True)
-                    P = mlauditoria.painel(s, e, m, m)
-                    D = {v.order_id: r for v, _i, r in mlanalise.pedidos(s, e, m, m)}
-                    so_p = [p for p in P if p["order_id"] not in D]
-                    print(f"[DIAG] {m} painel={len(P)} dre={len(D)} so_painel={len(so_p)} reemb_so_painel={sum(p['componentes']['reembolso'] for p in so_p):.2f}", flush=True)
-                    di = dc = dd = 0.0
-                    ex = []
-                    for p in P:
-                        r = D.get(p["order_id"])
-                        if not r:
-                            continue
-                        a = p["componentes"]["imposto"] + r["imposto"]
-                        b = p["componentes"]["cmv"] + r["cmv"]
-                        d = p["componentes"]["reembolso"] + r["devolvido"]
-                        di += a; dc += b; dd += d
-                        if abs(a) + abs(b) + abs(d) > 1 and len(ex) < 8:
-                            ex.append((p["order_id"], p["fonte"], p["vendas"], p["devolvido"], p["componentes"]["reembolso"], r["devolvido"],
-                                       p["componentes"]["imposto"], -r["imposto"], p["componentes"]["cmv"], -r["cmv"]))
-                    print(f"[DIAG] {m} dif_imposto={di:.2f} dif_cmv={dc:.2f} dif_dev={dd:.2f}", flush=True)
-                    for x in ex:
-                        print(f"[DIAG] {m} ex {x}", flush=True)
-    except Exception as ex:  # noqa: BLE001
+            for oid in (2000018750134448, 2000018736258988, 2000019275528750, 2000018735501084):
+                v = s.scalar(select(MLVenda).where(MLVenda.order_id == oid))
+                print(f"[DIAG] {oid} status={v.status} pago={v.pago} devolvido={v.devolvido} data={v.data} pack={v.pack_id}", flush=True)
+                for x in s.scalars(select(_E).where(_E.order_id == oid).order_by(_E.data)).all():
+                    print(f"[DIAG] {oid} {x.data} {x.tipo_registro} {x.descricao} cred={x.credito} deb={x.debito} bruto={x.bruto} "
+                          f"tar={x.tarifa_mp} fin={x.financiamento} fr={x.frete} imp={x.impostos} origem={x.origem_id} ident={x.identificacao}", flush=True)
+            e = s.get(Empresa, 1)
+            P = mlauditoria.painel(s, e, "2026-10", "2026-10")
+            cont = defaultdict(lambda: [0, 0.0])
+            for p in P:
+                d = p["componentes"]["reembolso"] + min(p["devolvido"], p["vendas"])
+                if abs(d) > 0.01:
+                    k = ("sem_reembolso_no_extrato" if p["componentes"]["reembolso"] == 0 else "reembolso_maior" if d < 0 else "reembolso_menor",
+                         p["status"], p["fonte"])
+                    cont[k][0] += 1
+                    cont[k][1] += d
+            for k, v in cont.items():
+                print(f"[DIAG] out {k} n={v[0]} soma={v[1]:.2f}", flush=True)
+    except Exception:  # noqa: BLE001
         import traceback
         print(f"[DIAG] erro {traceback.format_exc()}", flush=True)
 
