@@ -676,7 +676,8 @@ def conciliacao(s, emp: Empresa, ini, fim):
         ("Frete pago pelos compradores", tot["frete_comprador"],
          "Entra no painel (vem do extrato do Mercado Pago). A DRE não tem essa receita."),
         ("Devoluções", tot["reembolso"] - L["DEV"],
-         "O painel usa o que saiu do Mercado Pago para o comprador, inclusive frete devolvido. A DRE limita a devolução ao valor dos produtos."),
+         "O painel usa o que de fato saiu do Mercado Pago para o comprador (extrato); a DRE usa o valor devolvido informado em "
+         "cada pedido, limitado ao valor dos produtos. Ex.: venda cancelada antes de o dinheiro ser liberado não gera saída no extrato."),
         ("Impostos sobre vendas", tot["imposto"] - L["IMP"], ""),
         ("Custo dos produtos", tot["cmv"] - L["CMV"], ""),
         ("Cobranças de vendas de outros meses", -outras_vendas,
@@ -684,7 +685,7 @@ def conciliacao(s, emp: Empresa, ini, fim):
         ("Cobranças sem venda", -sem_venda,
          "Cobranças do período que não pertencem a uma venda: só estão na DRE" + (f" ({sem_txt})." if sem_txt else ".")),
         ("Tarifas e fretes das vendas: extrato × fatura", resto_tar,
-         f"O painel usa o que o Mercado Pago debitou de cada venda (inclui R$ {mlanalise._br(-fora)} lançados fora do período, como "
+         f"O painel usa o que o Mercado Pago debitou de cada venda (inclui R$ {mlanalise._br(abs(fora))} lançados fora do período, como "
          "devoluções cobradas depois); a DRE usa a fatura do ML pela data de cada lançamento."),
         ("Publicidade", tot["publicidade"] - L["ADS"],
          "O painel rateia o Product Ads por venda; a DRE usa o total da fatura (inclui campanhas sem venda no período)."),

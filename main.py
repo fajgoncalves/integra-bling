@@ -46,20 +46,6 @@ def get_db():
 _parar_rotina = threading.Event()
 
 
-def _diag_conciliacao():  # DIAG temporário (24/11): conciliação set/2026
-    import time as _t
-    _t.sleep(10)
-    try:
-        with SessionLocal() as s:
-            for e in s.scalars(select(Empresa).where(Empresa.ml_refresh.isnot(None))).all():
-                c = mlauditoria.conciliacao(s, e, "2026-09", "2026-09")
-                print(f"[DIAG] {e.id} painel={c['resultado_painel']} dre={c['margem_dre']} dif={c['diferenca']} conf={c['conferencia']}", flush=True)
-                for l in c["linhas"]:
-                    print(f"[DIAG] {l['valor']:>12} {l['descricao']} | {l['explicacao']}", flush=True)
-    except Exception as ex:  # noqa: BLE001
-        print(f"[DIAG] erro {ex!r}", flush=True)
-
-
 @app.on_event("startup")
 def iniciar():
     db.criar_tabelas()
@@ -112,8 +98,6 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
-        if os.environ.get("INTEGRA_SEM_THREADS") != "1":
-            threading.Thread(target=_diag_conciliacao, daemon=True).start()
         if get_config(s, "migracao_1171_desde_set") != "1":  # 1.17.1: módulo ML só de set/2026 em diante
             corte = dt.date(2026, 9, 1)
             set_config(s, "rotina_inicio", "2026-09")
