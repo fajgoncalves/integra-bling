@@ -314,6 +314,8 @@ def verifica_mercado_livre(c, eid):
     assert L["TMP"]["valores"] == [-1, -2.5] and L["BONUS"]["valores"] == [0, 0] and L["CML"]["total"] == -138.5
     assert L["COM"]["composicao"][0]["descricao"] == "Tarifa de venda (CV)"
     assert any("resumo da fatura" in c_["descricao"] for c_ in L["TMP"]["composicao"])
+    cc = c.get(f"/api/empresas/{eid}/mlivre/conciliacao?inicio=2026-01&fim=2026-02").json()
+    assert abs(cc["conferencia"]) < 0.02 and cc["diferenca"] == round(cc["resultado_painel"] - cc["margem_dre"], 2), cc
     assert d["conferencia"]["comissao_pedidos"] == 12 and d["conferencia"]["frete_pedidos"] == 29
     assert not any("sem custo" in a for a in d["avisos"])
     assert c.get(f"/api/empresas/{eid}/mlivre/dre.xlsx?inicio=2026-01&fim=2026-02").status_code == 200

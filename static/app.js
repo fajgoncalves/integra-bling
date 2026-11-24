@@ -1043,7 +1043,19 @@ async function mlDre(e) {
     $("#conf").innerHTML = `<h2>Conferência</h2><table><tr><th></th><th class="num">Nos pedidos</th><th class="num">No faturamento do ML</th><th class="num">Diferença</th></tr>
       <tr><td>Tarifa de venda (comissão)</td><td class="num">${brl(k.comissao_pedidos)}</td><td class="num">${brl(k.comissao_faturamento)}</td><td class="num">${brl(k.comissao_faturamento - k.comissao_pedidos)}</td></tr>
       <tr><td>Frete pago pelo vendedor</td><td class="num">${brl(k.frete_pedidos)}</td><td class="num">${brl(k.frete_faturamento)}</td><td class="num">${brl(k.frete_faturamento - k.frete_pedidos)}</td></tr></table>
-      <div class="suave peq" style="margin-top:8px">Diferenças pequenas são normais: o faturamento do ML fecha em datas próprias, cobra tarifas de pedidos de outros meses e estorna as de vendas canceladas.</div>`;
+      <div class="suave peq" style="margin-top:8px">Diferenças pequenas são normais: o faturamento do ML fecha em datas próprias, cobra tarifas de pedidos de outros meses e estorna as de vendas canceladas.</div>
+      <div id="concil" style="margin-top:18px"><button class="btn" id="bt-concil">Conciliar com Vendas por pedido</button></div>`;
+    $("#bt-concil").onclick = async () => {
+      $("#concil").innerHTML = '<div class="suave">Calculando...</div>';
+      const p = periodo();
+      const c = await api(`/api/empresas/${e.id}/mlivre/conciliacao?inicio=${p.inicio}&fim=${p.fim}`);
+      $("#concil").innerHTML = `<h2>Vendas por pedido × DRE</h2><table>
+        <tr><td><b>Resultado na aba Vendas por pedido</b></td><td class="num"><b>${brl(c.resultado_painel)}</b></td><td></td></tr>
+        <tr><td><b>Margem de contribuição na DRE</b></td><td class="num"><b>${brl(c.margem_dre)}</b></td><td></td></tr>
+        <tr class="destaque"><td><b>Diferença</b></td><td class="num"><b>${brl(c.diferenca)}</b></td><td></td></tr>
+        ${c.linhas.map((l) => `<tr><td>${esc(l.descricao)}</td><td class="num ${l.valor < 0 ? "neg" : ""}">${brl(l.valor)}</td><td class="suave peq">${esc(l.explicacao)}</td></tr>`).join("")}
+        </table><div class="suave peq" style="margin-top:8px">Cada linha é o valor no painel menos o valor na DRE; a soma das linhas é a diferença.${Math.abs(c.conferencia) >= 0.01 ? ` Sem explicação: ${brl(c.conferencia)}.` : ""}</div>`;
+    };
   };
   $("#av").onchange = () => r && desenhar();
   $("#xls").onclick = () => { const p = periodo(); location.href = `/api/empresas/${e.id}/mlivre/dre.xlsx?inicio=${p.inicio}&fim=${p.fim}`; };

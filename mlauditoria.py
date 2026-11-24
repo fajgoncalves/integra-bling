@@ -630,3 +630,65 @@ def auditoria(s, emp: Empresa, ini, fim):
             "dominio_lida": bool(dominio_lido(s, eid, d1, d2)),
             "tem_cobrancas": any(any(p["cobrancas"].values()) for p in pn),
             "tem_extrato": any(p["no_periodo_extrato"] for p in pn)}
+
+
+def conciliacao(s, emp: Empresa, ini, fim):
+    """Ponte entre o resultado da aba Vendas por pedido e a margem de contribuição da DRE do ML no mesmo período.
+    Cada linha é (valor no painel − valor na DRE); a soma das linhas é a diferença total."""
+    P = painel(s, emp, ini, fim)
+    D = mlanalise.dre(s, emp, ini, fim)
+    L = {x["codigo"]: x["total"] for x in D["linhas"]}
+    tot = defaultdict(float)
+    for p in P:
+        for k, v in p["componentes"].items():
+            tot[k] += v
+    res_painel = round(sum(p["resultado"] for p in P), 2)
+    mc = L["MC"]
+    tarifas_painel = sum(tot[k] for k in ("tarifa", "parcelamento", "frete", "frete_devolucao", "outras"))
+    tarifas_dre = L["CML"] - L["ADS"]
+    # cobranças da DRE (data no período, sem publicidade): de vendas do período, de vendas de outros meses, sem venda
+    d1, d2 = _periodo(ini, fim)
+    ids = {p["order_id"] for p in P}
+    outras_vendas = sem_venda = 0.0
+    det_sem = defaultdict(float)
+    for c in s.scalars(select(MLCobranca).where(MLCobranca.empresa_id == emp.id, MLCobranca.data >= d1, MLCobranca.data <= d2)).all():
+        if mlanalise.classe_tarifa(c.grupo, c.natureza, c.tipo, c.descricao) == "ADS":
+            continue
+        if c.order_id and c.order_id in ids:
+            continue
+        if c.order_id:
+            outras_vendas += _f(c.valor)
+        else:
+            sem_venda += _f(c.valor)
+            det_sem[mlanalise.classe_tarifa(c.grupo, c.natureza, c.tipo, c.descricao)] += _f(c.valor)
+    # cobranças das vendas do período lançadas fora do período (ex.: devolução cobrada no mês seguinte) — só pesa no painel
+    fora = 0.0
+    lst = list(ids)
+    for k in range(0, len(lst), 5000):
+        fora += _f(s.scalar(select(func.sum(MLCobranca.valor)).where(
+            MLCobranca.empresa_id == emp.id, MLCobranca.order_id.in_(lst[k:k + 5000]),
+            (MLCobranca.data < d1) | (MLCobranca.data > d2))))
+    nomes = {"COM": "tarifas de venda", "PARC": "parcelamento", "FRETE": "frete", "DEVOL": "devolução", "FULL": "Full",
+             "DIFAL": "ICMS-DIFAL", "OUTRAS": "outras", "TMP": "Mercado Pago", "BONUS": "bonificações"}
+    sem_txt = ", ".join(f"{nomes.get(k, k)} R$ {mlanalise._br(-v)}" for k, v in sorted(det_sem.items(), key=lambda kv: kv[1]) if abs(v) >= 0.01)
+    resto_tar = (tarifas_painel - tarifas_dre) - (-outras_vendas - sem_venda)
+    linhas = [
+        ("Frete pago pelos compradores", tot["frete_comprador"],
+         "Entra no painel (vem do extrato do Mercado Pago). A DRE não tem essa receita."),
+        ("Devoluções", tot["reembolso"] - L["DEV"],
+         "O painel usa o que saiu do Mercado Pago para o comprador, inclusive frete devolvido. A DRE limita a devolução ao valor dos produtos."),
+        ("Impostos sobre vendas", tot["imposto"] - L["IMP"], ""),
+        ("Custo dos produtos", tot["cmv"] - L["CMV"], ""),
+        ("Cobranças de vendas de outros meses", -outras_vendas,
+         "Lançadas no período, mas de vendas de meses anteriores ou posteriores: estão na DRE e não no painel."),
+        ("Cobranças sem venda", -sem_venda,
+         "Cobranças do período que não pertencem a uma venda: só estão na DRE" + (f" ({sem_txt})." if sem_txt else ".")),
+        ("Tarifas e fretes das vendas: extrato × fatura", resto_tar,
+         f"O painel usa o que o Mercado Pago debitou de cada venda (inclui R$ {mlanalise._br(-fora)} lançados fora do período, como "
+         "devoluções cobradas depois); a DRE usa a fatura do ML pela data de cada lançamento."),
+        ("Publicidade", tot["publicidade"] - L["ADS"],
+         "O painel rateia o Product Ads por venda; a DRE usa o total da fatura (inclui campanhas sem venda no período)."),
+    ]
+    out = [{"descricao": d, "valor": round(v, 2), "explicacao": x} for d, v, x in linhas]
+    return {"resultado_painel": res_painel, "margem_dre": mc, "diferenca": round(res_painel - mc, 2), "linhas": out,
+            "conferencia": round(res_painel - mc - sum(x["valor"] for x in out), 2)}
