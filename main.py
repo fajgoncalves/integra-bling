@@ -5,7 +5,6 @@ import re
 import json
 import secrets
 import threading
-from collections import defaultdict
 import datetime as dt
 from pathlib import Path
 
@@ -45,39 +44,6 @@ def get_db():
 
 
 _parar_rotina = threading.Event()
-
-
-def _diag_conciliacao():  # DIAG temporário (24/11): pedidos cancelados sem reembolso no extrato
-    import time as _t
-    _t.sleep(10)
-    try:
-        from db import MLExtrato as _E
-        with SessionLocal() as s:
-            e = s.get(Empresa, 1)
-            print(f"[DIAG] extrato de {s.scalar(select(func.min(_E.data)))} a {s.scalar(select(func.max(_E.data)))}", flush=True)
-            for m in ("2026-09", "2026-10", "2026-11"):
-                P = mlauditoria.painel(s, e, m, m)
-                alvo = [p for p in P if p["componentes"]["reembolso"] == 0 and p["devolvido"] > 0 and p["fonte"] == "extrato"]
-                tipos = defaultdict(int)
-                achou = 0
-                for p in alvo:
-                    lin = s.scalars(select(_E).where(_E.order_id == p["order_id"])).all()
-                    descs = ",".join(sorted({x.descricao for x in lin}))
-                    tipos[descs] += 1
-                    orig = {x.origem_id for x in lin if x.origem_id}
-                    outras = s.scalars(select(_E).where(_E.origem_id.in_(orig or {"-"}), (_E.order_id.is_(None)) | (_E.order_id != p["order_id"]))).all()
-                    if outras:
-                        achou += 1
-                        if achou <= 3:
-                            for x in outras:
-                                print(f"[DIAG] {m} {p['order_id']} outra-linha {x.data} {x.descricao} cred={x.credito} deb={x.debito} order={x.order_id}", flush=True)
-                    v = s.scalar(select(MLVenda).where(MLVenda.order_id == p["order_id"]))
-                    if len(alvo) and tipos[descs] <= 2:
-                        print(f"[DIAG] {m} {p['order_id']} st={v.status} pago={v.pago} dev={v.devolvido} descs={descs} liq={p['extrato_liquido']}", flush=True)
-                print(f"[DIAG] {m} alvo={len(alvo)} soma={sum(p['vendas'] for p in alvo):.2f} com_linha_em_outro={achou} tipos={dict(tipos)}", flush=True)
-    except Exception:  # noqa: BLE001
-        import traceback
-        print(f"[DIAG] erro {traceback.format_exc()}", flush=True)
 
 
 @app.on_event("startup")
@@ -132,8 +98,6 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
-        if os.environ.get("INTEGRA_SEM_THREADS") != "1":
-            threading.Thread(target=_diag_conciliacao, daemon=True).start()
         if get_config(s, "migracao_1171_desde_set") != "1":  # 1.17.1: módulo ML só de set/2026 em diante
             corte = dt.date(2026, 9, 1)
             set_config(s, "rotina_inicio", "2026-09")

@@ -643,6 +643,8 @@ def conciliacao(s, emp: Empresa, ini, fim):
         for k, v in p["componentes"].items():
             tot[k] += v
     res_painel = round(sum(p["resultado"] for p in P), 2)
+    alvo = [p for p in P if p["fonte"] == "extrato" and p["devolvido"] > 0 and abs(p["componentes"]["reembolso"]) < 0.01]
+    sem_debito, n_sem_debito = sum(min(p["devolvido"], p["vendas"]) for p in alvo), len(alvo)
     mc = L["MC"]
     tarifas_painel = sum(tot[k] for k in ("tarifa", "parcelamento", "frete", "frete_devolucao", "outras"))
     tarifas_dre = L["CML"] - L["ADS"]
@@ -675,9 +677,12 @@ def conciliacao(s, emp: Empresa, ini, fim):
     linhas = [
         ("Frete pago pelos compradores", tot["frete_comprador"],
          "Entra no painel (vem do extrato do Mercado Pago). A DRE não tem essa receita."),
-        ("Devoluções", tot["reembolso"] - L["DEV"],
-         "O painel usa o que de fato saiu do Mercado Pago para o comprador (extrato); a DRE usa o valor devolvido informado em "
-         "cada pedido, limitado ao valor dos produtos. Ex.: venda cancelada antes de o dinheiro ser liberado não gera saída no extrato."),
+        ("Devoluções que não saíram do Mercado Pago", sem_debito,
+         f"{n_sem_debito} venda(s) canceladas com devolução ao comprador no pedido, mas sem débito no extrato do vendedor "
+         "(o dinheiro ficou com você — ex.: mediação cancelada / reembolso coberto pelo Mercado Livre). A DRE desconta; o painel não."),
+        ("Devoluções: demais diferenças", tot["reembolso"] - L["DEV"] - sem_debito,
+         "Principalmente frete e juros do parcelamento devolvidos ao comprador: o painel desconta na devolução (e soma no "
+         "frete pago pelo comprador); a DRE limita a devolução ao valor dos produtos."),
         ("Impostos sobre vendas", tot["imposto"] - L["IMP"], ""),
         ("Custo dos produtos", tot["cmv"] - L["CMV"], ""),
         ("Cobranças de vendas de outros meses", -outras_vendas,
