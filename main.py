@@ -46,6 +46,42 @@ def get_db():
 _parar_rotina = threading.Event()
 
 
+def _diag_conciliacao():  # DIAG temporário (24/11): conciliação out/nov 2026
+    import time as _t
+    _t.sleep(10)
+    try:
+        with SessionLocal() as s:
+            for e in s.scalars(select(Empresa).where(Empresa.ml_refresh.isnot(None))).all():
+                for m in ("2026-10", "2026-11"):
+                    c = mlauditoria.conciliacao(s, e, m, m)
+                    print(f"[DIAG] {m} painel={c['resultado_painel']} dre={c['margem_dre']} dif={c['diferenca']} conf={c['conferencia']}", flush=True)
+                    for l in c["linhas"]:
+                        print(f"[DIAG] {m} {l['valor']:>12} {l['descricao']}", flush=True)
+                    P = mlauditoria.painel(s, e, m, m)
+                    D = {v.order_id: r for v, _i, r in mlanalise.pedidos(s, e, m, m)}
+                    so_p = [p for p in P if p["order_id"] not in D]
+                    print(f"[DIAG] {m} painel={len(P)} dre={len(D)} so_painel={len(so_p)} reemb_so_painel={sum(p['componentes']['reembolso'] for p in so_p):.2f}", flush=True)
+                    di = dc = dd = 0.0
+                    ex = []
+                    for p in P:
+                        r = D.get(p["order_id"])
+                        if not r:
+                            continue
+                        a = p["componentes"]["imposto"] + r["imposto"]
+                        b = p["componentes"]["cmv"] + r["cmv"]
+                        d = p["componentes"]["reembolso"] + r["devolvido"]
+                        di += a; dc += b; dd += d
+                        if abs(a) + abs(b) + abs(d) > 1 and len(ex) < 8:
+                            ex.append((p["order_id"], p["fonte"], p["vendas"], p["devolvido"], p["componentes"]["reembolso"], r["devolvido"],
+                                       p["componentes"]["imposto"], -r["imposto"], p["componentes"]["cmv"], -r["cmv"]))
+                    print(f"[DIAG] {m} dif_imposto={di:.2f} dif_cmv={dc:.2f} dif_dev={dd:.2f}", flush=True)
+                    for x in ex:
+                        print(f"[DIAG] {m} ex {x}", flush=True)
+    except Exception as ex:  # noqa: BLE001
+        import traceback
+        print(f"[DIAG] erro {traceback.format_exc()}", flush=True)
+
+
 @app.on_event("startup")
 def iniciar():
     db.criar_tabelas()
@@ -98,6 +134,8 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
+        if os.environ.get("INTEGRA_SEM_THREADS") != "1":
+            threading.Thread(target=_diag_conciliacao, daemon=True).start()
         if get_config(s, "migracao_1171_desde_set") != "1":  # 1.17.1: módulo ML só de set/2026 em diante
             corte = dt.date(2026, 9, 1)
             set_config(s, "rotina_inicio", "2026-09")
