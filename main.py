@@ -46,6 +46,25 @@ def get_db():
 _parar_rotina = threading.Event()
 
 
+def _diag_bling():  # DIAG temporário (26/11): categorias do Bling para a DRE do ML
+    import time as _t
+    _t.sleep(10)
+    try:
+        with SessionLocal() as s:
+            for e in s.scalars(select(Empresa)).all():
+                mx = s.scalar(select(func.max(Movimento.data)).where(Movimento.empresa_id == e.id))
+                print(f"[DIAG] emp {e.id} {e.nome} bling_sync={e.bling_sync_em} {e.bling_sync_periodo} mov_max={mx}", flush=True)
+                tot = dict(s.execute(select(Movimento.categoria_codigo, func.sum(Movimento.valor)).where(
+                    Movimento.empresa_id == e.id, Movimento.data >= dt.date(2026, 9, 1), Movimento.deb_cred == "D")
+                    .group_by(Movimento.categoria_codigo)).all())
+                for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == e.id, ContaOrigem.origem == "BLING")).all():
+                    if tot.get(c.codigo) or any(k in (c.descricao or "").lower() for k in ("contab", "full", "envio", "frete")):
+                        print(f"[DIAG] emp {e.id} cat {c.codigo} [{c.tipo}] {c.descricao} pai={c.pai_codigo} desde_set={tot.get(c.codigo)}", flush=True)
+    except Exception:  # noqa: BLE001
+        import traceback
+        print(f"[DIAG] erro {traceback.format_exc()}", flush=True)
+
+
 @app.on_event("startup")
 def iniciar():
     db.criar_tabelas()
@@ -98,6 +117,8 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
+        if os.environ.get("INTEGRA_SEM_THREADS") != "1":
+            threading.Thread(target=_diag_bling, daemon=True).start()
         if get_config(s, "migracao_1171_desde_set") != "1":  # 1.17.1: módulo ML só de set/2026 em diante
             corte = dt.date(2026, 9, 1)
             set_config(s, "rotina_inicio", "2026-09")
