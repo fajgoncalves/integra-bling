@@ -314,6 +314,15 @@ def verifica_mercado_livre(c, eid):
     assert L["TMP"]["valores"] == [-1, -2.5] and L["BONUS"]["valores"] == [0, 0] and L["CML"]["total"] == -138.5
     assert L["COM"]["composicao"][0]["descricao"] == "Tarifa de venda (CV)"
     assert any("resumo da fatura" in c_["descricao"] for c_ in L["TMP"]["composicao"])
+    assert L["COM"]["origem"] == "API Mercado Livre (faturas)" and L["CONTAB"]["origem"] == "Bling" and L["RES"]["total"] == L["MC"]["total"]
+    bc = c.get(f"/api/empresas/{eid}/mlivre/bling_categorias").json()
+    assert any(x["codigo"] == "30" for x in bc["categorias"])
+    assert c.put(f"/api/empresas/{eid}/mlivre/config", json={"bling": {"30": "DOUT", "21": "XX"}}).status_code == 200
+    d2 = c.get(f"/api/empresas/{eid}/mlivre/dre?inicio=2026-01&fim=2026-02").json()
+    L2 = {x["codigo"]: x for x in d2["linhas"]}
+    assert L2["DOUT"]["valores"] == [0, -45] and L2["RES"]["total"] == round(L2["MC"]["total"] - 45, 2)
+    assert L2["DOUT"]["composicao"][0]["descricao"] == "Tarifas bancárias (Bling)"
+    c.put(f"/api/empresas/{eid}/mlivre/config", json={"bling": {}})
     cc = c.get(f"/api/empresas/{eid}/mlivre/conciliacao?inicio=2026-01&fim=2026-02").json()
     assert abs(cc["conferencia"]) < 0.02 and cc["diferenca"] == round(cc["resultado_painel"] - cc["margem_dre"], 2), cc
     assert d["conferencia"]["comissao_pedidos"] == 12 and d["conferencia"]["frete_pedidos"] == 29
@@ -346,6 +355,9 @@ def verifica_mercado_livre(c, eid):
     n1 = d["notas"][0]
     orig_http = mlivre.httpx.Client
     mlivre.httpx.Client = lambda **kw: orig_http(transport=httpx.MockTransport(ml_falso))
+    orig_bl = orig_http  # bling.httpx é o mesmo módulo: um transporte só, que separa pelo endereço
+    mlivre.httpx.Client = lambda **kw: orig_http(transport=httpx.MockTransport(
+        lambda rq: bling_falso(rq) if "bling.com.br" in str(rq.url) else ml_falso(rq)))
     try:
         r = c.get(f"/api/empresas/{eid}/mlivre/notas/{n1['id']}/danfe")
         assert r.status_code == 200 and r.headers["content-type"] == "application/pdf" and r.content[:4] == b"%PDF"
@@ -360,6 +372,9 @@ def verifica_mercado_livre(c, eid):
     _bling.nota_por_chave = lambda eid_, chave, numero, data, http=None: ("", "https://www.bling.com.br/danfe/xyz")
     orig_http = mlivre.httpx.Client
     mlivre.httpx.Client = lambda **kw: orig_http(transport=httpx.MockTransport(ml_falso))
+    orig_bl = orig_http  # bling.httpx é o mesmo módulo: um transporte só, que separa pelo endereço
+    mlivre.httpx.Client = lambda **kw: orig_http(transport=httpx.MockTransport(
+        lambda rq: bling_falso(rq) if "bling.com.br" in str(rq.url) else ml_falso(rq)))
     try:
         r = c.get(f"/api/empresas/{eid}/mlivre/notas/{d2['notas'][0]['id']}/danfe", follow_redirects=False)
         assert r.status_code == 307 and "bling.com.br" in r.headers["location"]
@@ -413,6 +428,9 @@ def verifica_mercado_livre(c, eid):
     c.put("/api/rotina", json={"ativa": True, "inicio": "2026-01"})
     orig_http = mlivre.httpx.Client
     mlivre.httpx.Client = lambda **kw: orig_http(transport=httpx.MockTransport(ml_falso))
+    orig_bl = orig_http  # bling.httpx é o mesmo módulo: um transporte só, que separa pelo endereço
+    mlivre.httpx.Client = lambda **kw: orig_http(transport=httpx.MockTransport(
+        lambda rq: bling_falso(rq) if "bling.com.br" in str(rq.url) else ml_falso(rq)))
     try:
         rotina.executar("manual", hoje=_dt.date(2026, 2, 20))
         rt = c.get("/api/rotina").json()
@@ -442,6 +460,7 @@ def verifica_mercado_livre(c, eid):
         assert "1 pedido(s) que faltavam buscados" in c.get("/api/rotina").json()["execucoes"][0]["resumo"]
     finally:
         mlivre.httpx.Client = orig_http
+        bling.httpx.Client = orig_bl
         ml_chamadas["mp500"] = True
     assert c.post(f"/api/empresas/{eid}/mlivre/desconectar").json()["ml_conectado"] is False
 

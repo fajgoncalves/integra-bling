@@ -438,7 +438,7 @@ async function abaDre(e) {
       + `<div class="suave peq">Bling pelo caixa (pagos e recebidos em ${esc(r.empresa.bling_sync_periodo || "—")}) · Domínio pelas notas fiscais (${esc(r.empresa.dominio_sync_periodo || "—")}) · Base da análise vertical: ${esc(r.base_av || "—")}. Clique num grupo para recolher ou abrir; numa conta, para ver de onde vêm os valores.</div>`;
     const cols = r.meses.length + 2 + (av ? 1 : 0);
     const cel = (v) => `<td class="num ${v < 0 ? "neg" : ""}">${v ? brl(v) : '<span class="suave">–</span>'}</td>`;
-    let html = `<div class="rolagem"><table class="dre"><tr><th>Linha</th>${r.meses.map((m) => `<th class="num">${mesBR(m)}</th>`).join("")}<th class="num">Total</th>${av ? '<th class="num">AV</th>' : ""}</tr>`;
+    let html = `<div class="rolagem"><table class="dre"><tr><th>Linha</th><th>Origem</th>${r.meses.map((m) => `<th class="num">${mesBR(m)}</th>`).join("")}<th class="num">Total</th>${av ? '<th class="num">AV</th>' : ""}</tr>`;
     for (const ln of r.linhas) {
       if (ln.tipo === "CONTA" && fechados.has(ln.pai_id)) continue;
       const temComp = ln.composicao.length > 0;
@@ -965,9 +965,27 @@ async function telaML(id, aba = "vendas", params) {
     const m = modal(`<h2>Configurar análise do Mercado Livre</h2>
       <label>Impostos sobre vendas (%) <input id="ml-imp" inputmode="decimal" value="${brl4(e.ml_imposto_aliq).replace(/,?0+$/, "")}"></label>
       <div class="suave peq" style="margin-top:6px">Aplicado sobre as vendas líquidas (vendas − reembolsos) na DRE, na margem por produto e por pedido. Ex.: Simples Nacional pela alíquota efetiva; Lucro Presumido ou Real pela carga sobre vendas (PIS, COFINS, ICMS).</div>
+      <h3 style="margin-top:18px">Despesas do Bling na DRE do Mercado Livre</h3>
+      <div class="suave peq">Escolha as categorias de despesa do Bling que entram na DRE do ML (pela data do pagamento, em Caixa e Bancos). Aparecem com origem <b>Bling</b>.</div>
+      <div id="ml-bling" class="suave" style="margin-top:8px;max-height:320px;overflow:auto">Carregando...</div>
       <div class="linha" style="margin-top:14px"><button class="btn pri" id="ml-ok">Salvar</button><button class="btn" data-fechar>Cancelar</button></div>`, true);
+    let bl = null;
+    api(`/api/empresas/${id}/mlivre/bling_categorias`).then((x) => {
+      bl = x;
+      const opc = (v) => `<option value="">Não entra</option>${Object.entries(x.linhas).map(([k, n]) => `<option value="${k}" ${v === k ? "selected" : ""}>${esc(n)}</option>`).join("")}`;
+      $("#ml-bling", m).classList.remove("suave");
+      $("#ml-bling", m).innerHTML = !x.categorias.length ? '<div class="aviso">Nenhuma categoria do Bling lida. Conecte e atualize o Bling da empresa.</div>'
+        : `<div class="suave peq" style="margin-bottom:6px">Bling lido até ${x.lido_ate ? x.lido_ate.split("-").reverse().join("/") : "—"}. Total pago nos últimos 3 meses ao lado.</div>
+          <input id="bl-q" placeholder="Buscar categoria..." style="width:100%;margin-bottom:6px">
+          <table>${x.categorias.map((c) => `<tr data-d="${esc(c.descricao.toLowerCase())}"><td>${esc(c.descricao)}</td><td class="num suave peq">${c.total_3m ? brl(c.total_3m) : ""}</td>
+            <td><select data-cod="${esc(c.codigo)}">${opc(c.linha)}</select></td></tr>`).join("")}</table>`;
+      const q = $("#bl-q", m);
+      if (q) q.oninput = () => $$("#ml-bling tr", m).forEach((tr) => { tr.style.display = tr.dataset.d.includes(q.value.toLowerCase()) ? "" : "none"; });
+    }).catch((er) => { $("#ml-bling", m).textContent = er.message; });
     $("#ml-ok", m).onclick = (ev) => tentar(async () => {
-      await api(`/api/empresas/${id}/mlivre/config`, { method: "PUT", body: { imposto: $("#ml-imp", m).value } });
+      const body = { imposto: $("#ml-imp", m).value };
+      if (bl && bl.categorias.length) { body.bling = {}; $$("#ml-bling select", m).forEach((sel) => { if (sel.value) body.bling[sel.dataset.cod] = sel.value; }); }
+      await api(`/api/empresas/${id}/mlivre/config`, { method: "PUT", body });
       m.remove(); toast("Salvo."); rota();
     }, ev.target);
   };
@@ -1027,14 +1045,14 @@ async function mlDre(e) {
   const desenhar = () => {
     const av = $("#av").checked;
     $("#dre-avisos").innerHTML = r.avisos.map((a) => `<div class="aviso">${esc(a)}</div>`).join("")
-      + `<div class="suave peq">Vendas, reembolsos, impostos e custo pela data de fechamento dos pedidos; tarifas e bonificações pelo faturamento oficial do mês do Mercado Livre e do Mercado Pago. Clique numa tarifa para ver a composição.</div>`;
-    let html = `<div class="rolagem"><table class="dre"><tr><th>Linha</th>${r.meses.map((m) => `<th class="num">${mesBR(m)}</th>`).join("")}<th class="num">Total</th>${av ? '<th class="num">%</th>' : ""}</tr>`;
+      + `<div class="suave peq">Vendas, reembolsos, impostos e custo pela data de fechamento dos pedidos; tarifas e bonificações pela data de cada lançamento nas faturas do Mercado Livre e do Mercado Pago; despesas do Bling pela data do pagamento. A coluna Origem mostra de onde vem cada linha. Clique numa linha para ver a composição.</div>`;
+    let html = `<div class="rolagem"><table class="dre"><tr><th>Linha</th><th>Origem</th>${r.meses.map((m) => `<th class="num">${mesBR(m)}</th>`).join("")}<th class="num">Total</th>${av ? '<th class="num">%</th>' : ""}</tr>`;
     for (const ln of r.linhas) {
       const temComp = ln.composicao.length > 0;
       const cls = ln.tipo === "GRUPO" ? "grupo" : ln.tipo === "TOTAL" ? "destaque" : "conta";
-      html += `<tr class="${cls}" data-c="${ln.codigo}"><td class="${temComp ? "clicavel" : ""}" style="${ln.grupo ? "padding-left:22px" : ""}">${temComp ? (abertas.has(ln.codigo) ? "▾ " : "▸ ") : ""}${esc(ln.nome)}</td>
+      html += `<tr class="${cls}" data-c="${ln.codigo}"><td class="${temComp ? "clicavel" : ""}" style="${ln.grupo ? "padding-left:22px" : ""}">${temComp ? (abertas.has(ln.codigo) ? "▾ " : "▸ ") : ""}${esc(ln.nome)}</td><td class="peq ${ln.origem === "Bling" ? "" : "suave"}">${ln.origem === "Bling" ? '<span class="badge b-aviso">Bling</span>' : esc(ln.origem || "")}</td>
         ${ln.valores.map(celML).join("")}${celML(ln.total)}${av ? `<td class="num suave">${pct(ln.av_total)}</td>` : ""}</tr>`;
-      if (abertas.has(ln.codigo)) for (const c of ln.composicao) html += `<tr class="comp"><td style="padding-left:34px">${esc(c.descricao)}</td>${c.valores.map(celML).join("")}${celML(c.total)}${av ? "<td></td>" : ""}</tr>`;
+      if (abertas.has(ln.codigo)) for (const c of ln.composicao) html += `<tr class="comp"><td style="padding-left:34px">${esc(c.descricao)}</td><td></td>${c.valores.map(celML).join("")}${celML(c.total)}${av ? "<td></td>" : ""}</tr>`;
     }
     $("#dre").innerHTML = html + "</table></div>";
     $("#dre").classList.remove("suave");

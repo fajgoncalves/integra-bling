@@ -25,6 +25,7 @@ from db import SessionLocal, Empresa, Job, MLVenda, MLExtrato, RotinaExec, Rotin
 from seguranca import get_config, set_config
 import mlivre
 import dominio
+import bling
 
 HORA = 0  # começa à 00:00
 JANELA_FIM = 7  # se o serviço reiniciar no meio da madrugada, retoma até as 07:00
@@ -175,6 +176,13 @@ def dominio_periodo(eid, ini, fim):
     return fazer
 
 
+def bling_periodo(eid, d1, d2):
+    def fazer():
+        jid = _job(eid, "bling_sync", {"inicio": d1.isoformat(), "fim": d2.isoformat()})
+        _rodar_job(bling.sincronizar, jid)
+    return fazer
+
+
 def conferir_pedidos(eid, mes, cli=None):
     """Confere pedido a pedido: os ids que a busca do ML devolve no mês × os gravados. Os que faltarem são buscados um a um.
     Devolve (faltavam, ainda_faltam, total_da_busca, devolvidos_pela_busca)."""
@@ -243,6 +251,7 @@ def executar(origem="agendada", hoje=None):
             with SessionLocal() as s:
                 e = s.get(Empresa, eid)
                 tem_ml, tem_dom = bool(e.ml_refresh), bool(e.cnpj or e.codigo_dominio)
+                tem_bling = bool(e.bling_refresh)
                 st = estado(e)
                 try:
                     dominio.central(s)
@@ -308,6 +317,14 @@ def executar(origem="agendada", hoje=None):
                         linha.append(f"{len(faltam)} venda(s) sem extrato")
                     else:
                         _resolvida(eid, etapa)
+            if tem_bling:  # Caixa e Bancos do Bling (despesas que entram na DRE do ML): mês anterior até hoje
+                d1b = ((hoje.replace(day=1) - dt.timedelta(days=1)).replace(day=1) if st.get("bling_ok")
+                       else dt.date.fromisoformat(ini_cfg + "-01"))  # 1ª vez: desde o início configurado
+                ok = tentar(eid, f"BLING:{d1b.isoformat()}:{hoje.isoformat()}", bling_periodo(eid, d1b, hoje), rid)
+                if ok:
+                    _salvar_estado(eid, lambda x: x.update({"bling_ok": hoje.isoformat()}))
+                falhas += 0 if ok else 1
+                linha.append(f"Bling {d1b.strftime('%d/%m')} a {hoje.strftime('%d/%m')}: {'ok' if ok else 'falhou'}")
             if tem_dom:
                 pend = [m for m in meses if m not in st["dominio_meses"]]
                 ini_d = pend[0] if pend else meses[max(0, len(meses) - 2)]

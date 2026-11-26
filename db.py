@@ -125,6 +125,7 @@ class Empresa(Base):
     ml_sync_periodo: Mapped[str] = mapped_column(String(30), default="")
     ml_imposto_aliq: Mapped[float] = mapped_column(Numeric(7, 4), default=0)  # % de impostos sobre vendas (DRE do ML)
     ml_regras: Mapped[str] = mapped_column(Text, default="")  # JSON: comissão acordada por tipo de anúncio etc. (auditoria)
+    ml_bling: Mapped[str] = mapped_column(Text, default="")  # JSON {codigo_categoria_bling: linha da DRE do ML}
     rotina_ativa: Mapped[bool] = mapped_column(Boolean, default=True)  # entra na rotina automática diária
     rotina_estado: Mapped[str] = mapped_column(Text, default="")  # JSON: meses/extrato/Domínio já importados
     dominio_sync_em: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
@@ -480,7 +481,7 @@ def criar_tabelas():
                           ("ml_user_id", "BIGINT"), ("ml_apelido", "VARCHAR(120) DEFAULT ''"),
                           ("ml_conectado_em", "TIMESTAMP"), ("ml_sync_em", "TIMESTAMP"),
                           ("ml_sync_periodo", "VARCHAR(30) DEFAULT ''"),
-                          ("ml_imposto_aliq", "NUMERIC(7,4) DEFAULT 0"), ("ml_regras", "TEXT DEFAULT ''"),
+                          ("ml_imposto_aliq", "NUMERIC(7,4) DEFAULT 0"), ("ml_regras", "TEXT DEFAULT ''"), ("ml_bling", "TEXT DEFAULT ''"),
                           ("rotina_ativa", "BOOLEAN DEFAULT TRUE"), ("rotina_estado", "TEXT DEFAULT ''")],
              "ml_vendas": [("frete", "NUMERIC(15,2)"), ("pagamentos", "VARCHAR(300) DEFAULT ''")],
              "ml_itens": [("categoria", "VARCHAR(30) DEFAULT ''")],

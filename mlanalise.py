@@ -5,12 +5,13 @@ própria do módulo (por SKU, com vigência mensal). Quando o SKU não tem custo
 produtos da empresa (casando o SKU com o código do produto) — só leitura: não lê nem altera a DRE principal.
 """
 import re
+import json
 import datetime as dt
 from collections import defaultdict
 
 from sqlalchemy import select, func
 
-from db import Empresa, MLVenda, MLItem, MLTarifa, MLCusto, MLAds, MLCobranca, Produto, ProdutoCusto
+from db import Empresa, MLVenda, MLItem, MLTarifa, MLCusto, MLAds, MLCobranca, Produto, ProdutoCusto, ContaOrigem, Movimento
 
 # encargos do faturamento → linha da DRE do ML
 # códigos das cobranças do ML (C… = cobrança, B… = estorno/bonificação da mesma tarifa): sufixo → linha da DRE
@@ -35,12 +36,25 @@ LINHAS = [  # (código, nome, tipo, fórmula)
     ("DEVOL", "Tarifas de devolução", "CONTA", "CML"),
     ("ADS", "Publicidade (Product Ads e outras campanhas)", "CONTA", "CML"),
     ("FULL", "Full (armazenagem e coleta)", "CONTA", "CML"),
+    ("ENVFULL", "Envio de mercadoria para o Full", "CONTA", "CML"),
     ("DIFAL", "ICMS-DIFAL cobrado pelo Mercado Livre", "CONTA", "CML"),
     ("OUTRAS", "Outras tarifas do Mercado Livre", "CONTA", "CML"),
     ("TMP", "Tarifas do Mercado Pago", "CONTA", "CML"),
     ("BONUS", "(+) Bonificações do Mercado Livre", "CONTA", "CML"),
     ("MC", "(=) Margem de contribuição", "TOTAL", "LB + CML"),
+    ("DOP", "(-) Despesas operacionais", "GRUPO", ""),
+    ("CONTAB", "Contabilidade", "CONTA", "DOP"),
+    ("DOUT", "Outras despesas", "CONTA", "DOP"),
+    ("RES", "(=) Resultado", "TOTAL", "MC + DOP"),
 ]
+# de onde vem cada linha (mostrado na DRE)
+ORIGEM = {"RB": "API Mercado Livre (pedidos)", "DEV": "API Mercado Livre (pedidos)", "IMP": "Alíquota configurada",
+          "CMV": "Custos cadastrados", "COM": "API Mercado Livre (faturas)", "PARC": "API Mercado Livre (faturas)",
+          "FRETE": "API Mercado Livre (faturas)", "DEVOL": "API Mercado Livre (faturas)", "ADS": "API Mercado Livre (faturas)",
+          "FULL": "API Mercado Livre (faturas)", "ENVFULL": "Bling", "DIFAL": "API Mercado Livre (faturas)",
+          "OUTRAS": "API Mercado Livre (faturas)", "TMP": "API Mercado Pago (faturas)", "BONUS": "API Mercado Livre (faturas)",
+          "CONTAB": "Bling", "DOUT": "Bling"}
+LINHAS_BLING = {"ENVFULL": "Envio de mercadoria para o Full", "CONTAB": "Contabilidade", "DOUT": "Outras despesas"}
 
 
 def meses_entre(ini, fim):
@@ -256,6 +270,27 @@ def ads_rateio(s, eid, ini, fim):
     return out
 
 
+def bling_mapa(s, emp: Empresa):
+    """{código da categoria do Bling: linha da DRE do ML}. Sem configuração, sugere pelo nome: serviços contábeis /
+    contabilidade → Contabilidade; frete para envio ao Full (fulfillment) → Envio para o Full."""
+    try:
+        m = json.loads(emp.ml_bling or "")
+        if isinstance(m, dict):
+            return {str(k): v for k, v in m.items() if v in LINHAS_BLING}
+    except ValueError:
+        pass
+    out = {}
+    for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == emp.id, ContaOrigem.origem == "BLING")).all():
+        d = (c.descricao or "").lower()
+        if "D" not in (c.tipo or "D"):
+            continue
+        if "contab" in d:
+            out[c.codigo] = "CONTAB"
+        elif "frete" in d and ("fulfillment" in d or " full" in d) and "envio" in d:
+            out[c.codigo] = "ENVFULL"
+    return out
+
+
 def dre(s, emp: Empresa, ini, fim):
     meses = meses_entre(ini, fim)
     idx = {m: i for i, m in enumerate(meses)}
@@ -305,6 +340,20 @@ def dre(s, emp: Empresa, ini, fim):
         comp[ln][f"{t.rotulo} ({t.tipo}) · resumo da fatura"][i] += x
     meses_tarifa |= {t.periodo for t in s.scalars(select(MLTarifa).where(MLTarifa.empresa_id == emp.id,
                                                                          MLTarifa.periodo >= ini, MLTarifa.periodo <= fim)).all()}
+    # despesas lançadas no Bling (Caixa e Bancos, pela data do pagamento) nas categorias escolhidas
+    mapa = bling_mapa(s, emp)
+    bling_ate = None
+    if mapa:
+        nomes = {c.codigo: c.descricao for c in s.scalars(select(ContaOrigem).where(
+            ContaOrigem.empresa_id == emp.id, ContaOrigem.origem == "BLING", ContaOrigem.codigo.in_(list(mapa)))).all()}
+        for cod, data, dc, valor in s.execute(select(Movimento.categoria_codigo, Movimento.data, Movimento.deb_cred, Movimento.valor)
+                                              .where(Movimento.empresa_id == emp.id, Movimento.categoria_codigo.in_(list(mapa)),
+                                                     Movimento.data >= d1_, Movimento.data <= d2_)).all():
+            x = float(valor or 0) * (1 if dc == "C" else -1)
+            i = idx[data.strftime("%Y-%m")]
+            val[mapa[cod]][i] += x
+            comp[mapa[cod]][f"{nomes.get(cod, cod)} (Bling)"][i] += x
+        bling_ate = s.scalar(select(func.max(Movimento.data)).where(Movimento.empresa_id == emp.id))
     for cod, _n, tipo, form in LINHAS:  # grupos e totais, na ordem
         if tipo == "GRUPO":
             filhos = [c for c, _, tp, f in LINHAS if tp == "CONTA" and f == cod]
@@ -319,6 +368,7 @@ def dre(s, emp: Empresa, ini, fim):
         tot = round(sum(vs), 2)
         btot = sum(base)
         linhas.append({"codigo": cod, "nome": nome if cod != "IMP" else f"{nome} ({_br(float(emp.ml_imposto_aliq or 0))}%)",
+                       "origem": ORIGEM.get(cod, ""),
                        "tipo": tipo, "grupo": form if tipo == "CONTA" and form else None, "valores": vs, "total": tot,
                        "av": [round(x / b * 100, 1) if b else None for x, b in zip(vs, base)],
                        "av_total": round(tot / btot * 100, 1) if btot else None,
@@ -335,6 +385,12 @@ def dre(s, emp: Empresa, ini, fim):
     if sem_fat:
         avisos.append("Sem faturamento do Mercado Livre lido em " + ", ".join(f"{m[5:]}/{m[:4]}" for m in sem_fat)
                       + " (o período pode não ter fechado): as tarifas desses meses estão zeradas.")
+    if mapa and (not bling_ate or bling_ate < d2_):
+        avisos.append("Despesas do Bling (contabilidade, envio para o Full) lidas até "
+                      + (bling_ate.strftime("%d/%m/%Y") if bling_ate else "— (nada lido)")
+                      + ": depois disso ainda não entraram. A rotina das 00:00 atualiza o Bling.")
+    if not mapa:
+        avisos.append("Nenhuma categoria do Bling escolhida para a DRE do ML (botão Configurar).")
     if estimados:
         avisos.append(f"{estimados} pedido(s) de meses anteriores à primeira vigência de custo do produto: foi usado o primeiro "
                       "custo informado. Para precisão, informe o custo a partir do mês das vendas.")

@@ -27,7 +27,7 @@ import rotina
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.18.0"
+VERSAO = "1.19.0"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Seller 360", version=VERSAO)
@@ -46,23 +46,18 @@ def get_db():
 _parar_rotina = threading.Event()
 
 
-def _diag_bling():  # DIAG temporário (26/11): categorias do Bling para a DRE do ML
+def _bling_agora():  # 1.19.0: atualiza o Bling desde set/2026 para as despesas entrarem já na DRE do ML
     import time as _t
-    _t.sleep(10)
-    try:
-        with SessionLocal() as s:
-            for e in s.scalars(select(Empresa)).all():
-                mx = s.scalar(select(func.max(Movimento.data)).where(Movimento.empresa_id == e.id))
-                print(f"[DIAG] emp {e.id} {e.nome} bling_sync={e.bling_sync_em} {e.bling_sync_periodo} mov_max={mx}", flush=True)
-                tot = dict(s.execute(select(Movimento.categoria_codigo, func.sum(Movimento.valor)).where(
-                    Movimento.empresa_id == e.id, Movimento.data >= dt.date(2026, 9, 1), Movimento.deb_cred == "D")
-                    .group_by(Movimento.categoria_codigo)).all())
-                for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == e.id, ContaOrigem.origem == "BLING")).all():
-                    if tot.get(c.codigo) or any(k in (c.descricao or "").lower() for k in ("contab", "full", "envio", "frete")):
-                        print(f"[DIAG] emp {e.id} cat {c.codigo} [{c.tipo}] {c.descricao} pai={c.pai_codigo} desde_set={tot.get(c.codigo)}", flush=True)
-    except Exception:  # noqa: BLE001
-        import traceback
-        print(f"[DIAG] erro {traceback.format_exc()}", flush=True)
+    _t.sleep(15)
+    with SessionLocal() as s:
+        ids = [e.id for e in s.scalars(select(Empresa).where(Empresa.bling_refresh != "")).all()]
+    for eid in ids:
+        try:
+            rotina.bling_periodo(eid, dt.date(2026, 9, 1), agora().date())()
+            rotina._salvar_estado(eid, lambda x: x.update({"bling_ok": agora().date().isoformat()}))
+            print(f"[BLING] empresa {eid} atualizada", flush=True)
+        except Exception as ex:  # noqa: BLE001
+            print(f"[BLING] empresa {eid} erro {ex}", flush=True)
 
 
 @app.on_event("startup")
@@ -117,8 +112,11 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
-        if os.environ.get("INTEGRA_SEM_THREADS") != "1":
-            threading.Thread(target=_diag_bling, daemon=True).start()
+        if get_config(s, "migracao_1190_bling") != "1":
+            set_config(s, "migracao_1190_bling", "1")
+            s.commit()
+            if os.environ.get("INTEGRA_SEM_THREADS") != "1":
+                threading.Thread(target=_bling_agora, daemon=True).start()
         if get_config(s, "migracao_1171_desde_set") != "1":  # 1.17.1: módulo ML só de set/2026 em diante
             corte = dt.date(2026, 9, 1)
             set_config(s, "rotina_inicio", "2026-09")
@@ -722,6 +720,8 @@ async def ml_config(eid: int, request: Request, u=Depends(usuario), s=Depends(ge
                 raise HTTPException(400, f"Valor inválido em {k}.")
             r[k] = n
         e.ml_regras = json.dumps(r)
+    if isinstance(b.get("bling"), dict):
+        e.ml_bling = json.dumps({str(k): v for k, v in b["bling"].items() if v in mlanalise.LINHAS_BLING})
     if "imposto" in b:
         v = _num_br(b["imposto"])
         if v is None or v < 0 or v > 60:
@@ -730,6 +730,22 @@ async def ml_config(eid: int, request: Request, u=Depends(usuario), s=Depends(ge
     audit(s, u.email, "ML_CONFIG", f"{e.id} imposto={e.ml_imposto_aliq}")
     s.commit()
     return _emp_json(s, e)
+
+
+@app.get("/api/empresas/{eid}/mlivre/bling_categorias")
+def ml_bling_categorias(eid: int, _u=Depends(usuario), s=Depends(get_db)):
+    """Categorias de despesa do Bling, com o total pago nos últimos 3 meses e a linha da DRE do ML escolhida."""
+    e = _ml_emp(s, eid)
+    mapa = mlanalise.bling_mapa(s, e)
+    desde = (agora() - dt.timedelta(days=92)).date()
+    tot = dict(s.execute(select(Movimento.categoria_codigo, func.sum(Movimento.valor)).where(
+        Movimento.empresa_id == e.id, Movimento.deb_cred == "D", Movimento.data >= desde).group_by(Movimento.categoria_codigo)).all())
+    cats = [{"codigo": c.codigo, "descricao": c.descricao, "total_3m": float(tot.get(c.codigo) or 0), "linha": mapa.get(c.codigo, "")}
+            for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == e.id, ContaOrigem.origem == "BLING",
+                                                         ContaOrigem.tipo.in_(("D", "RD")))).all()]
+    cats.sort(key=lambda x: (not x["linha"], -x["total_3m"], x["descricao"]))
+    return {"conectado": bool(e.bling_refresh), "linhas": mlanalise.LINHAS_BLING, "categorias": cats,
+            "lido_ate": (lambda d: d.isoformat() if d else None)(s.scalar(select(func.max(Movimento.data)).where(Movimento.empresa_id == e.id)))}
 
 
 @app.get("/api/empresas/{eid}/mlivre/dre")
@@ -761,20 +777,21 @@ def ml_dre_xlsx(eid: int, inicio: str, fim: str, _u=Depends(usuario), s=Depends(
     ws["A1"].font = Font(bold=True, size=13)
     ws.append([f"{inicio[5:]}/{inicio[:4]} a {fim[5:]}/{fim[:4]}"])
     ws.append([])
-    ws.append(["Linha"] + [f"{m[5:]}/{m[:4]}" for m in d["meses"]] + ["Total", "% vendas"])
+    ws.append(["Linha", "Origem"] + [f"{m[5:]}/{m[:4]}" for m in d["meses"]] + ["Total", "% vendas"])
     for c in ws[4]:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="0F3D5E")
     for ln in d["linhas"]:
-        ws.append([("    " if ln["grupo"] else "") + ln["nome"]] + ln["valores"] + [ln["total"], (ln["av_total"] or 0) / 100])
+        ws.append([("    " if ln["grupo"] else "") + ln["nome"], ln.get("origem", "")] + ln["valores"] + [ln["total"], (ln["av_total"] or 0) / 100])
         r = ws.max_row
-        for c in ws[r][1:]:
+        for c in ws[r][2:]:
             c.number_format = "#,##0.00;[Red]-#,##0.00"
         ws.cell(r, ws.max_column).number_format = "0.0%"
         if ln["tipo"] != "CONTA":
             for c in ws[r]:
                 c.font = Font(bold=True)
     ws.column_dimensions["A"].width = 52
+    ws.column_dimensions["B"].width = 28
     for a in d["avisos"]:
         ws.append([])
         ws.append([a])

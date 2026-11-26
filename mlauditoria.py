@@ -647,7 +647,7 @@ def conciliacao(s, emp: Empresa, ini, fim):
     sem_debito, n_sem_debito = sum(min(p["devolvido"], p["vendas"]) for p in alvo), len(alvo)
     mc = L["MC"]
     tarifas_painel = sum(tot[k] for k in ("tarifa", "parcelamento", "frete", "frete_devolucao", "outras"))
-    tarifas_dre = L["CML"] - L["ADS"]
+    tarifas_dre = L["CML"] - L["ADS"] - L["ENVFULL"]
     # cobranças da DRE (data no período, sem publicidade): de vendas do período, de vendas de outros meses, sem venda
     d1, d2 = _periodo(ini, fim)
     ids = {p["order_id"] for p in P}
@@ -692,6 +692,8 @@ def conciliacao(s, emp: Empresa, ini, fim):
         ("Tarifas e fretes das vendas: extrato × fatura", resto_tar,
          f"O painel usa o que o Mercado Pago debitou de cada venda (inclui R$ {mlanalise._br(abs(fora))} lançados fora do período, como "
          "devoluções cobradas depois); a DRE usa a fatura do ML pela data de cada lançamento."),
+        ("Envio de mercadoria para o Full (Bling)", -L["ENVFULL"],
+         "Despesa lançada no Bling que só está na DRE (não pertence a uma venda)."),
         ("Publicidade", tot["publicidade"] - L["ADS"],
          "O painel rateia o Product Ads por venda; a DRE usa o total da fatura (inclui campanhas sem venda no período)."),
     ]
