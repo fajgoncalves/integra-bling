@@ -6,6 +6,7 @@ produtos da empresa (casando o SKU com o código do produto) — só leitura: n�
 """
 import re
 import json
+import unicodedata
 import datetime as dt
 from collections import defaultdict
 
@@ -281,7 +282,7 @@ def bling_mapa(s, emp: Empresa):
         pass
     out = {}
     for c in s.scalars(select(ContaOrigem).where(ContaOrigem.empresa_id == emp.id, ContaOrigem.origem == "BLING")).all():
-        d = (c.descricao or "").lower()
+        d = unicodedata.normalize("NFKD", (c.descricao or "").lower()).encode("ascii", "ignore").decode()  # "contábeis" → "contabeis"
         if "D" not in (c.tipo or "D"):
             continue
         if "contab" in d:

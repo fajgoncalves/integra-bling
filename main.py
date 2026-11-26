@@ -27,7 +27,7 @@ import rotina
 from seguranca import (hash_senha, confere_senha, assinar, verificar, cifrar, decifrar, get_config, set_config)
 import os
 
-VERSAO = "1.19.0"
+VERSAO = "1.19.1"
 COOKIE = "ib_sess"
 RAIZ = Path(__file__).parent
 app = FastAPI(title="Seller 360", version=VERSAO)
@@ -58,33 +58,6 @@ def _bling_agora():  # 1.19.0: atualiza o Bling desde set/2026 para as despesas 
             print(f"[BLING] empresa {eid} atualizada", flush=True)
         except Exception as ex:  # noqa: BLE001
             print(f"[BLING] empresa {eid} erro {ex}", flush=True)
-
-
-def _diag_bling2():  # DIAG temporário (26/11): despesas do Bling por mês
-    import time as _t
-    _t.sleep(10)
-    try:
-        with SessionLocal() as s:
-            e = s.get(Empresa, 1)
-            mapa = mlanalise.bling_mapa(s, e)
-            print(f"[DIAG] mapa={mapa} ml_bling={e.ml_bling!r}", flush=True)
-            for cod, m, dc, n, v in s.execute(select(Movimento.categoria_codigo, func.to_char(Movimento.data, "YYYY-MM"), Movimento.deb_cred,
-                                                     func.count(), func.sum(Movimento.valor)).where(
-                    Movimento.empresa_id == 1, Movimento.data >= dt.date(2026, 8, 1),
-                    Movimento.categoria_codigo.in_(["14614037187", "14634474841", "14702610746", "14614037175", "14702610876"]))
-                    .group_by(Movimento.categoria_codigo, func.to_char(Movimento.data, "YYYY-MM"), Movimento.deb_cred)).all():
-                print(f"[DIAG] {cod} {m} {dc} n={n} v={v}", flush=True)
-            for x in s.scalars(select(Movimento).where(Movimento.empresa_id == 1, Movimento.data >= dt.date(2026, 10, 1),
-                                                       Movimento.data <= dt.date(2026, 11, 30))).all():
-                d = ((x.descricao or "") + " " + (x.contato or "")).lower()
-                if any(k in d for k in ("contab", "full", "fulfillment")):
-                    print(f"[DIAG] mov {x.data} {x.deb_cred} {x.valor} cat={x.categoria_codigo!r} categ={x.categorizado} {x.contato[:40]} | {x.descricao[:80]}", flush=True)
-            print(f"[DIAG] mov_max={s.scalar(select(func.max(Movimento.data)).where(Movimento.empresa_id == 1))} "
-                  f"out={s.scalar(select(func.count()).select_from(Movimento).where(Movimento.empresa_id == 1, Movimento.data >= dt.date(2026, 10, 1), Movimento.data <= dt.date(2026, 10, 31)))} "
-                  f"out_sem_cat={s.scalar(select(func.count()).select_from(Movimento).where(Movimento.empresa_id == 1, Movimento.data >= dt.date(2026, 10, 1), Movimento.data <= dt.date(2026, 10, 31), Movimento.categorizado == False))}", flush=True)  # noqa: E712
-    except Exception:  # noqa: BLE001
-        import traceback
-        print(f"[DIAG] erro {traceback.format_exc()}", flush=True)
 
 
 @app.on_event("startup")
@@ -139,8 +112,6 @@ def iniciar():
             for p in s.scalars(select(Produto).where(Produto.custo.is_not(None))).all():
                 s.add(ProdutoCusto(produto_id=p.id, mes_inicio="2000-01", custo=p.custo, criado_por=p.custo_por or "migração"))
             set_config(s, "migracao_custo_vigencia", "1")
-        if os.environ.get("INTEGRA_SEM_THREADS") != "1":
-            threading.Thread(target=_diag_bling2, daemon=True).start()
         if get_config(s, "migracao_1190_bling") != "1":
             set_config(s, "migracao_1190_bling", "1")
             s.commit()

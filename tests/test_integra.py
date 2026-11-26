@@ -803,6 +803,18 @@ def test_devolucao_frete_pelo_valor_devolvido():
     assert ma.grupo_cobranca(est) == "COMISSAO"
 
 
+def test_bling_mapa_com_acento():
+    import types
+    import mlanalise as ma
+
+    class S:
+        def scalars(self, _q):
+            return types.SimpleNamespace(all=lambda: [types.SimpleNamespace(codigo="1", descricao="Serviços contábeis", tipo="D"),
+                                                      types.SimpleNamespace(codigo="2", descricao="Custo Do Frete Para Envio Fulfillment Mercado Livre", tipo="D"),
+                                                      types.SimpleNamespace(codigo="3", descricao="Custo de Envio por Fulfillment Mercado Livre", tipo="D")])
+    assert ma.bling_mapa(S(), types.SimpleNamespace(id=1, ml_bling="")) == {"1": "CONTAB", "2": "ENVFULL"}
+
+
 def test_codigos_e_paginacao_do_faturamento():
     import mlanalise as ma
     import mlivre
